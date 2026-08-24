@@ -1551,6 +1551,12 @@
             cursor: wait;
         }
 
+        .disabled-by-capability {
+            opacity: 0.38 !important;
+            pointer-events: none !important;
+            filter: grayscale(80%);
+        }
+
         .loading-pulse {
             animation: pulse 1.5s infinite;
             color: var(--neon-amber);
@@ -3338,6 +3344,7 @@
                 const info = { engine: 'webllm', model: modelName, webgpuAvailable: hasWebGPU, weightsLoaded: isLoaded };
                 if (pane === 'alpha') currentRawModelInfo = info;
                 else currentRawModelInfoBeta = info;
+                syncModelCapabilities(modelName, pane);
                 return;
             }
 
@@ -3356,6 +3363,7 @@
                 const info = { engine: 'chrome-builtin-ai', model: 'gemini-nano', availability };
                 if (pane === 'alpha') currentRawModelInfo = info;
                 else currentRawModelInfoBeta = info;
+                syncModelCapabilities(modelName, pane);
                 return;
             }
 
@@ -3363,6 +3371,7 @@
                 metaEl.textContent = `FORMAT: OPENAI | ENDPOINT: ACTIVE`;
                 if (pane === 'alpha') currentRawModelInfo = { endpoint: activeBaseUrl, model: modelName, protocol: 'openai' };
                 else currentRawModelInfoBeta = { endpoint: activeBaseUrl, model: modelName, protocol: 'openai' };
+                syncModelCapabilities(modelName, pane);
                 return;
             }
 
@@ -3390,6 +3399,88 @@
                 if (pane === 'alpha') currentRawModelInfo = { error: err.message, model: modelName };
                 else currentRawModelInfoBeta = { error: err.message, model: modelName };
             }
+            syncModelCapabilities(modelName, pane);
+        }
+
+        function syncModelCapabilities(modelName, pane = 'alpha') {
+            if (!modelName) return;
+            const info = pane === 'alpha' ? currentRawModelInfo : currentRawModelInfoBeta;
+            const modelLower = (modelName || '').toLowerCase();
+            const format = activeApiFormat;
+
+            let hasVision = false;
+            if (info && info.details) {
+                const family = (info.details.family || '').toLowerCase();
+                const families = Array.isArray(info.details.families) ? info.details.families.map(f => String(f).toLowerCase()) : [];
+                if (family.includes('clip') || family.includes('vision') || family.includes('mllama') || family.includes('llava') ||
+                    families.some(f => f.includes('clip') || f.includes('vision') || f.includes('mllama') || f.includes('llava'))) {
+                    hasVision = true;
+                }
+            }
+            if (modelLower.includes('vision') || modelLower.includes('llava') || modelLower.includes('bakllava') ||
+                modelLower.includes('moondream') || modelLower.includes('qwen2-vl') || modelLower.includes('qwen-vl') ||
+                modelLower.includes('paligemma') || modelLower.includes('pixtral') || modelLower.includes('minicpm-v') ||
+                modelLower.includes('mllama') || modelLower.includes('gpt-4o') || modelLower.includes('gpt-4-vision') ||
+                modelLower.includes('claude-3')) {
+                hasVision = true;
+            }
+
+            const isOllama = format === 'ollama';
+            const isServer = isOllama || format === 'openai';
+            const hasMinPMirostat = isServer;
+            const hasAdvancedSamplers = isServer;
+            const hasDaemonGpuCtx = isOllama;
+
+            const applyCapability = (elementId, isSupported, reasonMsg) => {
+                const el = document.getElementById(elementId);
+                if (!el) return;
+                const group = el.closest('.slider-group') || el.closest('.input-container') || el;
+
+                if (!isSupported) {
+                    el.disabled = true;
+                    group.classList.add('disabled-by-capability');
+                    if (!el.hasAttribute('data-default-title')) {
+                        el.setAttribute('data-default-title', el.title || '');
+                    }
+                    el.title = `[UNSUPPORTED BY ${modelName.toUpperCase()}] ${reasonMsg}`;
+                } else {
+                    el.disabled = false;
+                    group.classList.remove('disabled-by-capability');
+                    if (el.hasAttribute('data-default-title')) {
+                        el.title = el.getAttribute('data-default-title');
+                    }
+                }
+            };
+
+            const uploadBtn = document.getElementById('upload-btn');
+            if (uploadBtn) {
+                if (!hasVision) {
+                    uploadBtn.disabled = true;
+                    uploadBtn.classList.add('disabled-by-capability');
+                    if (!uploadBtn.hasAttribute('data-default-title')) {
+                        uploadBtn.setAttribute('data-default-title', uploadBtn.title || 'Upload Media');
+                    }
+                    uploadBtn.title = `[VISION UNSUPPORTED] Selected model (${modelName}) does not support multimodal/vision ingestion.`;
+                } else {
+                    uploadBtn.disabled = false;
+                    uploadBtn.classList.remove('disabled-by-capability');
+                    if (uploadBtn.hasAttribute('data-default-title')) {
+                        uploadBtn.title = uploadBtn.getAttribute('data-default-title');
+                    }
+                }
+            }
+
+            const suffix = pane === 'beta' ? '-beta' : '';
+            applyCapability(`param-minp${suffix}`, hasMinPMirostat, 'Min_P sampler unsupported on this engine.');
+            applyCapability(`param-mirostat${suffix}`, hasMinPMirostat, 'Mirostat sampler unsupported on this engine.');
+            applyCapability(`param-gpu${suffix}`, hasDaemonGpuCtx, 'GPU layers parameter is Ollama daemon-specific.');
+            applyCapability(`param-ctx${suffix}`, hasDaemonGpuCtx, 'Context length parameter is Ollama daemon-specific.');
+            applyCapability(`param-topk${suffix}`, hasDaemonGpuCtx, 'Top_K parameter is Ollama daemon-specific.');
+            applyCapability(`param-repeat${suffix}`, hasDaemonGpuCtx, 'Repeat penalty is Ollama daemon-specific.');
+
+            ['dry', 'dry-base', 'dry-allowed', 'dry-penalty', 'dry-seq', 'xtc-thresh', 'xtc-prob', 'dynatemp', 'dynatemp-exp'].forEach(key => {
+                applyCapability(`param-${key}${suffix}`, hasAdvancedSamplers, 'Advanced sampler unsupported on this engine.');
+            });
         }
 
         // Curated set of small-to-mid prebuilt WebLLM/MLC model IDs that run
@@ -5450,6 +5541,198 @@
             'param-xtc-thresh-beta', 'param-xtc-prob-beta', 'param-dynatemp-beta', 'param-dynatemp-exp-beta'
         ];
 
+        const defaultAppState = {
+            baseUrl: 'http://localhost:11434',
+            apiKey: '',
+            apiFormat: 'ollama',
+            systemPrompt: '',
+            authorsNote: '',
+            authorsNoteDepth: 3,
+            theme: 'neon',
+            scanlines: 'on',
+            airgap: false,
+            ttsActive: false,
+            dualDeckActive: false,
+            betaCollapsed: false,
+            voiceURI: '',
+            voiceRate: '2.25',
+            voicePitch: '1.00',
+            voiceVol: '1.00',
+            params: {
+                'param-temp': '0.7',
+                'param-minp': '0.05',
+                'param-mirostat': '0',
+                'param-tokens': '2048',
+                'param-gpu': '33',
+                'param-ctx': '2048',
+                'param-topp': '0.9',
+                'param-topk': '40',
+                'param-repeat': '1.1',
+                'param-dry': '0.0',
+                'param-dry-base': '1.75',
+                'param-dry-allowed': '2',
+                'param-dry-penalty': '-1',
+                'param-dry-seq': '["\\n", ":", "\\"", "*"]',
+                'param-xtc-thresh': '0.1',
+                'param-xtc-prob': '0.0',
+                'param-dynatemp': '0.0',
+                'param-dynatemp-exp': '1.0',
+                'param-temp-beta': '0.7',
+                'param-minp-beta': '0.05',
+                'param-mirostat-beta': '0',
+                'param-tokens-beta': '2048',
+                'param-gpu-beta': '33',
+                'param-ctx-beta': '2048',
+                'param-topp-beta': '0.9',
+                'param-topk-beta': '40',
+                'param-repeat-beta': '1.1',
+                'param-dry-beta': '0.0',
+                'param-dry-base-beta': '1.75',
+                'param-dry-allowed-beta': '2',
+                'param-dry-penalty-beta': '-1',
+                'param-dry-seq-beta': '["\\n", ":", "\\"", "*"]',
+                'param-xtc-thresh-beta': '0.1',
+                'param-xtc-prob-beta': '0.0',
+                'param-dynatemp-beta': '0.0',
+                'param-dynatemp-exp-beta': '1.0'
+            }
+        };
+
+        let appState = JSON.parse(JSON.stringify(defaultAppState));
+        let saveStateTimeout = null;
+
+        function savePersistentState() {
+            if (saveStateTimeout) clearTimeout(saveStateTimeout);
+            saveStateTimeout = setTimeout(() => {
+                try {
+                    appState.baseUrl = settingBaseUrl ? settingBaseUrl.value : activeBaseUrl;
+                    appState.apiKey = settingApiKey ? settingApiKey.value : activeApiKey;
+                    appState.apiFormat = settingApiFormat ? settingApiFormat.value : activeApiFormat;
+                    appState.systemPrompt = systemPromptInput ? systemPromptInput.value : '';
+                    appState.authorsNote = authorsNoteInput ? authorsNoteInput.value : '';
+                    appState.authorsNoteDepth = authorsNoteDepth ? authorsNoteDepth.value : 3;
+                    appState.theme = savedThemeState || 'neon';
+                    appState.scanlines = savedScanlineState || 'on';
+                    appState.airgap = isBlackoutMode;
+                    appState.ttsActive = isTtsActive;
+                    appState.dualDeckActive = isDualDeckActive;
+                    appState.betaCollapsed = isPaneBetaCollapsed;
+                    appState.voiceURI = voiceSelect ? voiceSelect.value : '';
+
+                    const rateEl = document.getElementById('param-voice-rate');
+                    const pitchEl = document.getElementById('param-voice-pitch');
+                    const volEl = document.getElementById('param-voice-vol');
+                    if (rateEl) appState.voiceRate = rateEl.value;
+                    if (pitchEl) appState.voicePitch = pitchEl.value;
+                    if (volEl) appState.voiceVol = volEl.value;
+
+                    AUTO_STATE_PARAM_IDS.forEach(id => {
+                        const el = document.getElementById(id);
+                        if (el) appState.params[id] = el.value;
+                    });
+
+                    localStorage.setItem('neural_app_state', JSON.stringify(appState));
+                } catch (e) {
+                    console.warn('Failed to save persistent appState', e);
+                }
+            }, 300);
+        }
+
+        function loadPersistentState() {
+            try {
+                const raw = localStorage.getItem('neural_app_state');
+                let loaded = {};
+                if (raw) {
+                    try { loaded = JSON.parse(raw); } catch (e) { loaded = {}; }
+                }
+                appState = Object.assign({}, JSON.parse(JSON.stringify(defaultAppState)), loaded);
+                if (loaded && loaded.params) {
+                    appState.params = Object.assign({}, defaultAppState.params, loaded.params);
+                }
+
+                if (appState.baseUrl && settingBaseUrl) settingBaseUrl.value = appState.baseUrl;
+                if (appState.apiKey !== undefined && settingApiKey) settingApiKey.value = appState.apiKey;
+                if (appState.apiFormat && settingApiFormat) settingApiFormat.value = appState.apiFormat;
+                activeBaseUrl = appState.baseUrl || activeBaseUrl;
+                activeApiKey = appState.apiKey !== undefined ? appState.apiKey : activeApiKey;
+                activeApiFormat = appState.apiFormat || activeApiFormat;
+                syncSliderVisibility(activeApiFormat);
+
+                if (appState.systemPrompt !== undefined && systemPromptInput) systemPromptInput.value = appState.systemPrompt;
+                if (appState.authorsNote !== undefined && authorsNoteInput) authorsNoteInput.value = appState.authorsNote;
+                if (appState.authorsNoteDepth !== undefined && authorsNoteDepth) {
+                    authorsNoteDepth.value = appState.authorsNoteDepth;
+                    const depthValLabel = document.getElementById('authors-note-depth-val');
+                    if (depthValLabel) depthValLabel.textContent = appState.authorsNoteDepth;
+                }
+
+                if (appState.theme) {
+                    savedThemeState = appState.theme;
+                    applyTheme(savedThemeState);
+                }
+                if (appState.scanlines) {
+                    savedScanlineState = appState.scanlines;
+                    applyScanlines(savedScanlineState);
+                }
+
+                if (appState.airgap !== undefined && appState.airgap !== isBlackoutMode) {
+                    toggleAirgap();
+                }
+
+                if (appState.ttsActive !== undefined && appState.ttsActive !== isTtsActive) {
+                    isTtsActive = appState.ttsActive;
+                    if (ttsBtn) ttsBtn.classList.toggle('active-state', isTtsActive);
+                }
+
+                if (appState.dualDeckActive && !isDualDeckActive) {
+                    dualDeckToggleBtn.click();
+                }
+
+                const rateEl = document.getElementById('param-voice-rate');
+                const pitchEl = document.getElementById('param-voice-pitch');
+                const volEl = document.getElementById('param-voice-vol');
+                if (rateEl && appState.voiceRate) {
+                    rateEl.value = appState.voiceRate;
+                    const rateVal = document.getElementById('voice-rate-val');
+                    if (rateVal) rateVal.textContent = parseFloat(appState.voiceRate).toFixed(2);
+                }
+                if (pitchEl && appState.voicePitch) {
+                    pitchEl.value = appState.voicePitch;
+                    const pitchVal = document.getElementById('voice-pitch-val');
+                    if (pitchVal) pitchVal.textContent = parseFloat(appState.voicePitch).toFixed(2);
+                }
+                if (volEl && appState.voiceVol) {
+                    volEl.value = appState.voiceVol;
+                    const volVal = document.getElementById('voice-vol-val');
+                    if (volVal) volVal.textContent = parseFloat(appState.voiceVol).toFixed(2);
+                }
+
+                if (appState.params) {
+                    Object.entries(appState.params).forEach(([id, val]) => {
+                        const el = document.getElementById(id);
+                        if (el) {
+                            el.value = val;
+                            el.dispatchEvent(new Event('input', { bubbles: true }));
+                        }
+                    });
+                }
+            } catch (e) {
+                console.warn('loadPersistentState recovery fallback applied', e);
+                appState = JSON.parse(JSON.stringify(defaultAppState));
+            }
+        }
+
+        document.addEventListener('input', (e) => {
+            if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT')) {
+                savePersistentState();
+            }
+        });
+        document.addEventListener('change', (e) => {
+            if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT')) {
+                savePersistentState();
+            }
+        });
+
         function captureAutoStateSnapshot() {
             const params = {};
             AUTO_STATE_PARAM_IDS.forEach(id => {
@@ -6589,6 +6872,7 @@
                 logNetwork(`IndexedDB init/restore failed: ${err.message}`, 'error');
                 showToast("Storage layer unavailable — session may not persist.", "error");
             }
+            loadPersistentState();
             fetchModels();
             loadVoices();
             injectWorldInfoUI();
