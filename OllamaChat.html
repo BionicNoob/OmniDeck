@@ -1540,6 +1540,17 @@
         }
 
         /* Loading & Reasoning Styles */
+        .spin-icon {
+            animation: cyberSpin 1s linear infinite;
+        }
+        @keyframes cyberSpin {
+            100% { transform: rotate(360deg); }
+        }
+        .cyber-btn.pulling {
+            opacity: 0.7;
+            cursor: wait;
+        }
+
         .loading-pulse {
             animation: pulse 1.5s infinite;
             color: var(--neon-amber);
@@ -1608,7 +1619,7 @@
             </div>
 
             <div class="metric-block" style="flex-grow: 1; display: flex; flex-direction: column; min-height: 130px;">
-                <label><span>NETWORK SOCKET LOG</span><span>[LIVE]</span></label>
+                <label><span>SYS LOG</span><span>[LIVE]</span></label>
                 <div id="telemetry-console">
                     <div class="log-line">> [INFO] daemon initialization complete: bind=127.0.0.1:11434</div>
                     <div class="log-line">> [DEBUG] keep_alive=-1 persistent socket established</div>
@@ -3792,7 +3803,7 @@
                 senderDiv.className = 'message-sender';
                 const modelName = pane === 'alpha' ? (modelSelectAlpha.value || 'ALPHA') : (modelSelectBeta.value || 'BETA');
                 
-                let senderName = 'NEURAL_AI // ' + modelName.toUpperCase();
+                let senderName = 'ASSISTANT // ' + modelName.toUpperCase();
                 if (sender === 'User') senderName = 'OPERATOR // YOU';
                 else if (sender === 'System') senderName = 'SYSTEM // DIALOG';
 
@@ -3884,7 +3895,7 @@
                 const senderDiv = document.createElement('div');
                 senderDiv.className = 'message-sender';
                 const modelName = pane === 'alpha' ? (modelSelectAlpha.value || 'ALPHA') : (modelSelectBeta.value || 'BETA');
-                let senderName = 'NEURAL_AI // ' + modelName.toUpperCase();
+                let senderName = 'ASSISTANT // ' + modelName.toUpperCase();
                 if (sender === 'User') senderName = 'OPERATOR // YOU';
                 else if (sender === 'System') senderName = 'SYSTEM // DIALOG';
                 senderDiv.innerHTML = `<span>${senderName}</span><span>${new Date(node.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span>`;
@@ -6155,7 +6166,7 @@
         });
 
         // OLLAMA LIBRARY PULL UTILITY
-        document.getElementById('pull-model-btn').addEventListener('click', async () => {
+        document.getElementById('pull-model-btn').addEventListener('click', async function() {
             if (activeApiFormat !== 'ollama') {
                 showToast("Model pull is an Ollama-only feature. Switch API format to Ollama Native first.", "warn");
                 return;
@@ -6167,6 +6178,15 @@
             const tag = prompt("Enter Ollama library tag to pull (e.g. mistral:7b, phi3:mini):");
             if (!tag || !tag.trim()) return;
             const modelTag = tag.trim();
+
+            const pullBtn = this;
+            const originalHTML = pullBtn.innerHTML;
+            const originalTitle = pullBtn.title;
+
+            pullBtn.disabled = true;
+            pullBtn.classList.add('pulling');
+            pullBtn.title = `Pulling ${modelTag}...`;
+            pullBtn.innerHTML = `<svg class="spin-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>`;
 
             showToast(`Pulling ${modelTag}...`, "info");
             logNetwork(`[PULL] Requesting ${modelTag} from Ollama daemon...`, "info");
@@ -6189,6 +6209,11 @@
             } catch (err) {
                 showToast(`Pull failed: ${err.message}`, "warn");
                 logNetwork(`[PULL] Failed to pull ${modelTag}: ${err.message}`, "error");
+            } finally {
+                pullBtn.disabled = false;
+                pullBtn.classList.remove('pulling');
+                pullBtn.innerHTML = originalHTML;
+                pullBtn.title = originalTitle;
             }
         });
 
