@@ -4,24 +4,127 @@ A zero-install, fully client-side HTML app for OpenAI and Ollama. Runs entirely 
 
 [![Download Latest Release](https://img.shields.io/badge/Download-Latest_Release-blue.svg)](https://github.com/YOUR_USER/YOUR_REPO/releases/latest)
 
-## Architecture
-This tool uses a Bring Your Own Key (BYOK) architecture [2]. API keys are saved strictly to ur browser's `localStorage` and sent directly to the respective LLM endpoints. 
+# OMNI-DECK v4.44 ֎
 
-## Setup and Installation
-1. Click the Download badge above to grab the latest `.zip` release.
-2. Extract the archive.
-3. Double-click `index.html` to open it locally in any modern browser. No server required.
+**The Ultimate Universal AI Terminal**
 
-## Use & Configuration
+OMNI-DECK is a highly advanced, single-file, browser-based interface for interacting with Large Language Models. Built with a stunning, customizable cyberpunk aesthetic, it serves as a unified frontend for local daemons (Ollama), remote APIs (OpenAI-compatible), and fully on-device browser-native inference engines (WebGPU/WebLLM & Chrome Gemini Nano). 
 
-### OpenAI
-1. Click the **Settings** icon in the UI.
-2. Paste ur OpenAI API key. 
-3. The app routes fetch requests directly to `api.openai.com` [3].
+Operating entirely offline with zero build steps or external backend dependencies (beyond the LLM engines themselves), OMNI-DECK stores everything locally in your browser using IndexedDB.
 
-### Ollama (Local)
-Because browsers block external origin requests to `localhost` by default, u must override CORS rules before launching the Ollama daemon [4].
+---
 
-**Mac/Linux Terminal:**
-```bash
-launchctl setenv OLLAMA_ORIGINS "*" && pkill Ollama; open -a Ollama
+## 🚀 Key Features
+
+### 🧠 Multi-Engine Support
+Switch seamlessly between different AI execution environments on the fly:
+*   **Ollama Native:** Full support for Ollama's `/api/chat` endpoint, including model pulling and advanced parameters (num_ctx, num_gpu, etc.).
+*   **OpenAI Compatible:** Connect to any remote or local vLLM, TabbyAPI, or standard OpenAI endpoint via `/v1/chat/completions`.
+*   **Browser-Native WebGPU (WebLLM):** Run models entirely within the browser tab using your local GPU hardware. No daemon required. Weights are fetched once and cached in IndexedDB.
+*   **Chrome Built-In (Gemini Nano):** Utilize Chrome's experimental Prompt API to run Gemini Nano entirely on-device natively.
+
+### 🌳 Branching Chat Trees & Non-Linear History
+Never lose a good prompt again. OMNI-DECK treats conversations like Git branches.
+*   **Edit & Fork:** Edit any past user message or AI response to instantly fork a new conversational branch.
+*   **Branch Navigation:** A built-in `< [i/n] >` HUD allows you to seamlessly traverse sibling branches at any fork point.
+*   **Regenerate:** Request a new response without deleting the old one; the new response simply becomes a parallel branch.
+
+### 🌓 Dual-Pane Interrogation (A/B Testing)
+*   Activate **[ DUAL PANE ]** mode to split the terminal into "Alpha" and "Beta" sectors.
+*   Route a single prompt to two entirely different models (or the same model with different parameter presets) simultaneously.
+*   Compare logic, speed, and output quality side-by-side.
+
+### 📚 Dynamic Knowledge Base & RAG
+*   **Document Injection:** Drag and drop or select `PDF`, `DOCX`, `TXT`, `MD`, `CSV`, or `JSON` files. OMNI-DECK parses them locally (via pdf.js and mammoth.js) and injects them into the context window.
+*   **URL Scraping:** Paste a URL to have the terminal fetch, strip HTML boilerplate, and inject the core article text into your session memory.
+
+### 📖 World Info (Lorebook)
+A powerful, Mikupad-style dynamic memory injection system.
+*   Create memory entries triggered by specific comma-separated Regex keys.
+*   When you or the AI mention a trigger word (e.g., "dragon"), the associated lore is instantly wrapped in your custom global prefix/suffix and silently injected into the system prompt for that turn.
+
+### 🎛️ Advanced Parameter Control
+Beyond standard Temperature and Top-P, OMNI-DECK exposes advanced Llama.cpp samplers (when supported by the backend):
+*   **Standard:** Min_P, Mirostat, Context Length, GPU Layers, Top_K, Repeat Penalty.
+*   **Advanced:** DRY Multiplier/Base/Allowed/Penalty (for repetition mitigation), XTC Threshold & Probability, Dynatemp Range & Exponent.
+
+### 📊 Tactical Telemetry Rack
+Live dashboard monitoring your session and system limits:
+*   **Live Token Budget:** Visual gauge tracking context usage against your defined limit.
+*   **TPS Monitor:** Real-time Tokens-Per-Second generation speed tracking.
+*   **System Resources:** CPU Core count and JS Heap memory estimation.
+*   **Latency Radar:** Live ping tracker with a visual sweeping circuit canvas.
+
+### 💾 Robust Local Storage & Portability
+*   **IndexedDB Backing:** Every keystroke, branch, and configuration is saved asynchronously to your browser's IndexedDB. 
+*   **Session History:** Restore previous chats instantly from the `[ HISTORY ]` panel.
+*   **Manifest Backup:** Export your entire deck—settings, API keys, persona library, lorebook, documents, and chat history—into a single `.json` config manifest. Drop the manifest back into any fresh OMNI-DECK instance to restore your exact environment instantly.
+
+### 🎨 Customization & Accessibility
+*   **Themes:** Cycle between `NEON` (Cyberpunk), `DARK` (Engineering/Slate), and `MODERN` (Clean/Light SaaS) themes.
+*   **CRT Scanlines:** Toggle the retro visual overlay on or off.
+*   **Text-to-Speech (TTS):** Built-in browser vocalization with adjustable Voice Profile, Rate, Pitch, and Gain.
+*   **Markdown & Math:** Full support for rendering code blocks (Prism.js syntax highlighting) and LaTeX equations (MathJax) dynamically as the text streams.
+
+---
+
+## 🛠️ Setup & Installation
+
+OMNI-DECK is a **Zero-Install** application. Because everything is contained within a single `.html` file, deployment is trivial.
+
+### Basic Execution
+1. Download `index.html`.
+2. Double-click to open it in any modern web browser (Chrome/Edge/Brave highly recommended for WebGPU features).
+
+### Configuring a Local Backend (Ollama)
+If you wish to use Ollama natively:
+1. Ensure Ollama is installed and running on your machine.
+2. **CORS Requirement:** Ollama blocks browser requests by default. You MUST start Ollama with CORS enabled.
+   * **Windows/Linux (CLI):** `OLLAMA_ORIGINS="*" ollama serve`
+   * **macOS:** Launch via terminal with the above environment variable.
+3. In OMNI-DECK, open the **PARAMETERS** module (right sidebar).
+4. Set Endpoint Protocol to `Ollama Native`, Base URL to `http://localhost:11434`, and click **SAVE CONFIGURATION**.
+
+### Configuring WebGPU (WebLLM)
+To run models entirely in your browser without Ollama:
+1. Ensure you are using a Chromium-based browser with Hardware Acceleration enabled.
+2. Select **Browser-Native WebGPU (WebLLM)** in the API Protocol Format dropdown and Save.
+3. The model list will populate with optimized WebLLM models. Selecting one and sending a prompt will initiate the model download directly into your browser's cache.
+
+### Configuring Chrome Gemini Nano
+1. Open Google Chrome (v127+).
+2. Navigate to `chrome://flags/#prompt-api-for-gemini-nano` and enable it.
+3. Restart Chrome.
+4. Select **Chrome Built-In (Gemini Nano)** in OMNI-DECK.
+
+---
+
+## 🕹️ Interface & Usage Guide
+
+*   **Left Panel (Telemetry):** Click the mobile toggle icon in the top left to hide/show. Monitors your system's heartbeat.
+*   **Center Panel (Chat Stream):** Your main interaction zone. Use the `[ COPY ]` and `[ EDIT ]` buttons hovering on message bubbles.
+*   **Right Panel (Parameters):** Contains API configuration, LLM sliders, utility buttons (Regenerate, Export, Diagnostics), and appearance toggles.
+*   **Top Navigation Bar:**
+    *   **[ DUAL PANE ]**: Splits the chat vertically for A/B testing.
+    *   **[ HISTORY ]**: Browse and restore past sessions.
+    *   **[ KNOWLEDGE BASE ]**: Upload documents or scrape URLs.
+    *   **[ VISUALIZER ]**: View the fluid quantum avatar that reacts to the AI's state (Idle, Thinking, Streaming).
+    *   **[ AUDIO ]**: Configure TTS vocoder settings.
+    *   **[ SYSTEM PROMPT ]**: Configure your root instructions, Persona library, and Author's Note depth injection.
+
+### Emergency / Factory Reset
+If the system state becomes corrupted or you need to instantly wipe all sensitive data:
+*   Navigate to the bottom of the Parameters panel and click **[ CLEAR ALL DATA ]**.
+*   **Shortcut:** Press the `ESC` key rapidly 3 times to trigger a total environment purge (clears LocalStorage and IndexedDB entirely).
+
+---
+
+## 🔒 Security & Privacy (Offline Mode)
+OMNI-DECK respects your privacy.
+*   **Airgap / Offline Mode:** Click `[ OFFLINE MODE ]` in the Utilities panel to activate a strict network block. In this mode, OMNI-DECK will actively intercept and block any HTTP requests attempting to reach non-local IP addresses, ensuring your data never leaves your machine.
+*   All API keys entered are stored exclusively in your browser's local storage and are never transmitted anywhere except your designated Base URL.
+
+---
+
+## 📄 License
+This interface is provided as-is, intended for local development, research, and high-efficiency text generation. Ensure you comply with the licenses of the underlying models you choose to load through this terminal.
