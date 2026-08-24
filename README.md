@@ -194,3 +194,32 @@ OMNI-DECK is a **Zero-Install** application.
 
 ## 🔒 Security & Privacy (Airgap Mode)
 OMNI-DECK respects your privacy. Activate **[ OFFLINE MODE ]** to enforce a strict network block. OMNI-DECK will actively intercept and block any HTTP requests attempting to reach non-local IP addresses, ensuring your data never leaves your hardware. All API keys are stored exclusively in local storage.
+
+</details>
+
+<details>
+<summary><strong>📡 View Telemetry & Diagnostics</strong></summary>
+
+Monitor session constraints in real-time:
+- **Token Budget:** Visual gauge tracking context saturation.
+- **Throughput:** Real-time Tokens-Per-Second (TPS) generation speed tracking.
+- **System Overhead:** CPU Core count and JS Heap memory estimation.
+- **Latency Radar:** Live ping tracker with visual sweeping circuit canvas.
+
+</details>
+
+## 🚀 Deployment Protocol
+
+OMNI-DECK requires zero build steps and operates entirely offline.
+
+1. Download the `index.html` binary release.
+2. Execute in a modern web browser (WebGPU capabilities require Chromium-based browsers).
+3. Select your inference engine and initialize the session.
+
+*(Optional)* To bridge with a local Ollama daemon, configure CORS at startup:
+```bash
+OLLAMA_ORIGINS="*" ollama serve
+```
+
+## 🔐 Security & Airgap Protocol
+**Strict Offline Mode:** Activating Airgap Mode triggers HTTP request interception, blocking all outbound traffic to non-local IPs. Data persistence, RAG indexing, and API key storage are strictly confined to local IndexedDB and LocalStorage environments.
