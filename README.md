@@ -1,19 +1,18 @@
-<div align="center">
+<h1 align="center">OMNI-DECK ֎</h1>
+<p align="center"><strong>The Ultimate Single-File Universal AI Terminal</strong></p>
 
-# OMNI-DECK // ENTERPRISE AI TERMINAL
-**Zero-Dependency. Local-First. Universal LLM Frontend.**
+<p align="center">
+  <img src="https://img.shields.io/badge/Release-v4.44-blue" alt="Version">
+  <img src="https://img.shields.io/badge/Size-< 1MB-success" alt="Size">
+  <img src="https://img.shields.io/badge/Dependencies-Zero-red" alt="Dependencies">
+</p>
 
-[![Release](https://img.shields.io/badge/Release-v4.44-blue.svg)]()
-[![Footprint](https://img.shields.io/badge/Footprint-<1MB-success.svg)]()
-[![Dependencies](https://img.shields.io/badge/Dependencies-Zero-red.svg)]()
-[![Platform](https://img.shields.io/badge/Platform-Browser-orange.svg)]()
+OMNI-DECK is a highly advanced, zero-install, browser-based interface for Large Language Models. It serves as a unified frontend for local daemons (Ollama), remote APIs (OpenAI-compatible), and fully on-device browser-native inference engines (WebGPU/WebLLM & Chrome Gemini Nano). 
 
-</div>
+Run elite-tier AI entirely offline. No build steps. No external backend dependencies. Everything stores locally in your browser via IndexedDB.
 
 ---
 
-## 📌 Executive Summary
-OMNI-DECK is an enterprise-grade, browser-based interface for Large Language Models. Engineered as a single, zero-install HTML file, it provides a unified frontend for local daemons (Ollama), remote APIs, and fully on-device browser-native inference engines (WebGPU/WebLLM & Chrome Gemini Nano).
 
 ## 🏗️ Architecture & Capabilities
 
@@ -60,3 +59,4 @@ OLLAMA_ORIGINS="*" ollama serve
 
 ## 🔐 Security & Airgap Protocol
 **Strict Offline Mode:** Activating Airgap Mode triggers HTTP request interception, blocking all outbound traffic to non-local IPs. Data persistence, RAG indexing, and API key storage are strictly confined to local IndexedDB and LocalStorage environments.
+
