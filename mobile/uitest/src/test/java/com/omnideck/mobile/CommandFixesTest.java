@@ -634,7 +634,7 @@ public class CommandFixesTest extends Harness {
         waitFor("busy", () -> engine().isBusy());
         advance(200);
         assertEquals("qwen3:8b", engine().streamingMessage().model);
-        assertNotNull(commandText("Thinking · deep model"));
+        assertNotNull("before any text: preparing, on the deep model", commandText("Preparing a reply · deep model"));
         engine().stop();
         waitFor("stopped", () -> !engine().isBusy());
     }

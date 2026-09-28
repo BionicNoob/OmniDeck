@@ -1548,9 +1548,12 @@ public final class CommandScreen extends Screen {
         boolean deep = m != null && deepModel != null && deepModel.equals(m.model)
                 && !deepModel.equals(e.currentModel());
         switch (mode) {
-            case CoreView.THINKING:
+            case CoreView.THINKING: {
                 if (m == null) return "Running a model task"; // a benchmark or compaction
-                return deep ? "Thinking · deep model" : "Thinking";
+                // More specific than the THINKING annunciator above it.
+                String what = m.thinking.length() > 0 ? "Reasoning" : "Preparing a reply";
+                return deep ? what + " · deep model" : what;
+            }
             case CoreView.STREAMING:
                 return deep ? "Replying · deep model" : "Replying";
             case CoreView.SPEAKING:
@@ -1575,7 +1578,8 @@ public final class CommandScreen extends Screen {
         } else if (m != null) {
             long secs = Math.max(0, (now - m.startedAt) / 1000);
             if (m.content.length() == 0) {
-                line = caps(m.thinking.length() > 0 ? "Reasoning · " + secs + "s"
+                line = caps(m.thinking.length() > 0
+                        ? "~" + Math.round(m.thinking.length() / 4.0) + " tok of reasoning · " + secs + "s"
                         : secs >= 2 ? "Loading the model · " + secs + "s" : "Waiting for the first token");
             } else {
                 double tok = m.content.length() / 4.0;

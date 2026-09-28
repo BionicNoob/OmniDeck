@@ -22,7 +22,7 @@ import static org.junit.Assert.assertTrue;
 
 /**
  * The COMMAND tab's states in every theme, for review:
- * build/screens/command-{theme}-{speaking|scanning|narrow|streaming|pc|pc-2}.png
+ * build/screens/command-{theme}-{speaking|reasoning|scanning|narrow|streaming|pc|pc-2}.png
  * (CommandScreenTest shoots online, offline, the Cyber scanning and narrow views
  * and Cyber/Light streaming).
  */
@@ -162,6 +162,43 @@ public class CommandShotsTest extends Harness {
         assertEquals(CoreView.STREAMING, core().mode());
         shoot("command-dark-streaming");
         waitFor("reply done", () -> !engine().isBusy());
+    }
+
+    // --- Reasoning on the deep model -------------------------------------------
+
+    private void reasoning(String theme) throws Exception {
+        launch(theme, MainActivity.TAB_COMMAND);
+        waitOnline();
+        engine().setDeepModel("qwen3:8b");
+        engine().setMode(Settings.MODE_DEEP);
+        ollama.tokenDelayMs = 300;
+        engine().send("Prove that there are infinitely many primes.");
+        waitFor("reasoning", () -> {
+            ChatMessage m = engine().streamingMessage();
+            return m != null && m.thinking.length() > 12 && m.content.length() == 0;
+        });
+        advance(300);
+        assertEquals(CoreView.THINKING, core().mode());
+        assertTrue(shows("Reasoning · deep model"));
+        assertTrue(shows("tok of reasoning"));
+        shoot("command-" + theme + "-reasoning");
+        engine().stop();
+        waitFor("stopped", () -> !engine().isBusy());
+    }
+
+    @Test
+    public void cyberReasoning() throws Exception {
+        reasoning("cyber");
+    }
+
+    @Test
+    public void lightReasoning() throws Exception {
+        reasoning("light");
+    }
+
+    @Test
+    public void darkReasoning() throws Exception {
+        reasoning("dark");
     }
 
     // --- A fully set-up PC: the power strip and rich vitals -------------------
