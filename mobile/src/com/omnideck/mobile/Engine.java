@@ -1623,6 +1623,18 @@ public final class Engine {
         startReply();
     }
 
+    /**
+     * Roughly how full the model's context window is with the open chat
+     * (0 = empty, 1 = full; can exceed 1). Past about 0.8 the oldest messages
+     * are about to be dropped by Ollama — the moment to suggest /compact.
+     */
+    public double contextFill() {
+        String model = currentModel();
+        int ctx = runnerOptions(model).optInt("num_ctx", DEFAULT_CTX);
+        if (ctx <= 0) return 0;
+        return conv.estimateTokens(systemPrompt(), !Boolean.FALSE.equals(supportsVision(model))) / (double) ctx;
+    }
+
     public String systemPrompt() {
         StringBuilder sb = new StringBuilder(settings.systemPrompt().trim());
         List<String> facts = settings.facts();
@@ -2892,7 +2904,8 @@ public final class Engine {
         String blocked = notifier().blockedReason();
         notice("Timer set for " + Fmt.duration(secs) + " — *" + t.message + "*. " + (blocked.length() == 0
                 ? "It rings here, or as a notification while OmniDeck is in the background."
-                : "It rings while OmniDeck is open. " + blocked + " Then it also rings in the background."), "ok");
+                : "It rings while OmniDeck is open, but can't notify you in the background: "
+                + Character.toLowerCase(blocked.charAt(0)) + blocked.substring(1)), "ok");
         log("info", "Timer set · " + Fmt.duration(secs) + " · " + t.message);
         if (visible) {
             main.removeCallbacks(timerTick);

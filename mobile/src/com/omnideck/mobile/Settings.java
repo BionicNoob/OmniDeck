@@ -131,7 +131,16 @@ public final class Settings {
     public void setBridgePort(int v) { put("bridge_port", v > 0 && v < 65536 ? v : BridgeClient.DEFAULT_PORT); }
 
     public String bridgeToken() { return s("bridge_token", ""); }
-    public void setBridgeToken(String v) { put("bridge_token", v.trim()); }
+    /**
+     * Saves the bridge token. A different token is no longer bound to the old
+     * PC: pairing (or its first use) binds it to its host again.
+     */
+    public void setBridgeToken(String v) {
+        String t = v == null ? "" : v.trim();
+        SharedPreferences.Editor ed = sp.edit().putString("bridge_token", t);
+        if (!t.equals(bridgeToken())) ed.putString("bridge_token_host", "");
+        ed.apply();
+    }
 
     /**
      * Where LaunchBridge runs: "" = the same PC as the AI (default), else a

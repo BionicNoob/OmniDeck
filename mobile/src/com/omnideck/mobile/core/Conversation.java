@@ -123,6 +123,27 @@ public final class Conversation {
         return arr;
     }
 
+    /** Rough context cost of one image for vision models (LLaVA-style: 576 patches). */
+    public static final int IMAGE_TOKENS = 576;
+
+    /**
+     * Rough size in tokens of the next request's prompt: about four
+     * characters per token, a few tokens of framing per message, and a fixed
+     * cost per image when images are sent. Good enough to warn before the
+     * context window fills up (Ollama then silently drops the oldest turns).
+     */
+    public int estimateTokens(String systemPrompt, boolean includeImages) {
+        long chars = systemPrompt == null ? 0 : systemPrompt.trim().length();
+        long tokens = chars > 0 ? 4 : 0;
+        for (ChatMessage m : messages) {
+            if (!m.sentToModel()) continue;
+            chars += m.content.length();
+            tokens += 4;
+            if (includeImages) tokens += (long) IMAGE_TOKENS * m.images.size();
+        }
+        return (int) Math.min(Integer.MAX_VALUE, tokens + (chars + 3) / 4);
+    }
+
     /** Stands in for images a text-only model isn't sent. */
     public static String imageMarker(int count) {
         return count == 1 ? "[An image was attached here. The current model can't see images, so it wasn't sent.]"

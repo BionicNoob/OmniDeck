@@ -53,6 +53,22 @@ public class ConversationTest {
     }
 
     @Test
+    public void estimatesThePromptSize() {
+        Conversation c = new Conversation();
+        assertEquals(0, c.estimateTokens("", true));
+        c.messages.add(new ChatMessage(ChatMessage.USER, "12345678")); // 8 chars ≈ 2 tokens + 4 framing
+        assertEquals(6, c.estimateTokens(null, true));
+        assertEquals("a system prompt adds its text and framing", 6 + 4 + 1, c.estimateTokens("abcd", true));
+        c.messages.add(ChatMessage.notice("notices are never sent, whatever their length", "info"));
+        assertEquals(6, c.estimateTokens(null, true));
+        ChatMessage img = new ChatMessage(ChatMessage.USER, "");
+        img.images.add("AAAA");
+        c.messages.add(img);
+        assertEquals(6 + 4 + Conversation.IMAGE_TOKENS, c.estimateTokens(null, true));
+        assertEquals("text-only models get no images", 6 + 4, c.estimateTokens(null, false));
+    }
+
+    @Test
     public void chatModelAndErrorKindArePersisted() throws Exception {
         ConversationStore store = new ConversationStore(tmp.newFolder("chats"));
         Conversation c = withImages();

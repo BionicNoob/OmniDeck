@@ -320,6 +320,14 @@ public class EngineFixesTest extends Harness {
         engine().setBridgeToken("");
         assertFalse(engine().bridgePaired());
         assertEquals("", engine().settings.bridgeTokenHost());
+        // A new token saved straight into the settings drops the old binding (bound again on first use).
+        engine().setBridgeToken(bridge.token);
+        engine().settings.setBridgeToken("another-token");
+        assertEquals("", engine().settings.bridgeTokenHost());
+        engine().settings.setBridgeToken("another-token");
+        engine().settings.setBridgeTokenHost("127.0.0.1");
+        engine().settings.setBridgeToken("another-token");
+        assertEquals("the same token keeps its PC", "127.0.0.1", engine().settings.bridgeTokenHost());
     }
 
     @Test
