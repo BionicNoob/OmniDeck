@@ -936,8 +936,8 @@ public final class CommandScreen extends Screen {
             ui.toast("Nothing to summarize yet. Start a conversation in Comms first.");
             return;
         }
-        if (e.isBusy()) {
-            ui.toast("Wait for the current reply to finish.");
+        if (e.isWorking()) {
+            ui.toast("Wait for the current reply or model task to finish.");
             return;
         }
         e.summarize();
@@ -1431,6 +1431,8 @@ public final class CommandScreen extends Screen {
             ChatMessage m = e.streamingMessage();
             return m != null && m.content.length() > 0 ? CoreView.STREAMING : CoreView.THINKING;
         }
+        // A benchmark or compaction runs on the model: the core works too.
+        if (e.isWorking()) return CoreView.THINKING;
         if (speaking()) return CoreView.SPEAKING;
         return CoreView.IDLE;
     }
@@ -1455,7 +1457,7 @@ public final class CommandScreen extends Screen {
                 ink = dotColor = t.warn;
                 break;
             case CoreView.THINKING:
-                state = "Thinking";
+                state = e.isBusy() ? "Thinking" : "Working";
                 ink = t.engagedInk;
                 dotColor = t.engaged;
                 break;
@@ -1547,6 +1549,7 @@ public final class CommandScreen extends Screen {
                 && !deepModel.equals(e.currentModel());
         switch (mode) {
             case CoreView.THINKING:
+                if (m == null) return "Running a model task"; // a benchmark or compaction
                 return deep ? "Thinking · deep model" : "Thinking";
             case CoreView.STREAMING:
                 return deep ? "Replying · deep model" : "Replying";
@@ -1580,6 +1583,8 @@ public final class CommandScreen extends Screen {
                 String rate = el > 0.4 ? "~" + Fmt.oneDecimal(tok / el) + " tok/s · " : "";
                 line = caps(rate + Math.round(tok) + " tok");
             }
+        } else if (e.isWorking()) {
+            line = caps("New messages wait until it finishes");
         } else if (talking) {
             line = ""; // the headline says it; this row holds the Stop control
         } else if (e.pulling() && e.pullState() != null) {

@@ -639,6 +639,25 @@ public class CommandFixesTest extends Harness {
         waitFor("stopped", () -> !engine().isBusy());
     }
 
+    /** A benchmark (or compaction) is real work on the model: the core shows it too. */
+    @Test
+    public void aBenchmarkShowsOnTheCore() throws Exception {
+        launch("cyber", MainActivity.TAB_COMMAND);
+        waitOnline();
+        advance(300);
+        ollama.tokenDelayMs = 150; // keep the benchmark running long enough to look at
+        click("Benchmark");
+        waitFor("working", () -> engine().isWorking());
+        idle();
+        assertFalse(engine().isBusy());
+        assertEquals(CoreView.THINKING, core().mode());
+        assertNotNull(commandText("RUNNING A MODEL TASK"));
+        assertNotNull(commandText("WORKING"));
+        waitFor("done", () -> !engine().isWorking());
+        advance(300);
+        assertEquals(CoreView.IDLE, core().mode());
+    }
+
     // ------------------------------------------------------------------
     // Quick actions: the PC power strip
     // ------------------------------------------------------------------
