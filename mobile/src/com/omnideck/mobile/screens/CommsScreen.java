@@ -78,7 +78,7 @@ public final class CommsScreen extends Screen {
     /** Context fill (of num_ctx) at which Comms warns and offers /compact. */
     static final double CONTEXT_WARN = 0.8;
     /** Hands-free: how long to wait for the spoken reply to start before listening anyway. */
-    static final long SPEECH_START_WAIT_MS = 6000;
+    public static final long SPEECH_START_WAIT_MS = 6000;
     static final long RELISTEN_POLL_MS = 350;
     /** A message typed while offline is sent when the link returns within this long. */
     static final long OFFLINE_SEND_MS = 10 * 60 * 1000;
@@ -1557,6 +1557,8 @@ public final class CommsScreen extends Screen {
         if (!on) {
             relistenPending = false;
             handler.removeCallbacks(relisten);
+            voiceApproval = null;
+            handler.removeCallbacks(listenForApproval);
             ui.toast("Hands-free off");
             return;
         }
@@ -1994,10 +1996,75 @@ public final class CommsScreen extends Screen {
         approvalShown = req;
         s.show();
         ui.tick(a.getWindow().getDecorView());
-        // A spoken conversation: the question is spoken too.
+        // A spoken conversation: the question is spoken too — and hands-free, answered by voice
+        // (not a destructive one: that takes a tap).
         ChatMessage reply = e.streamingMessage();
-        if (reply != null && reply.id.equals(voiceReplyId)) e.speakNow(req.sentence() + ". Allow?");
+        if (reply != null && reply.id.equals(voiceReplyId)) {
+            e.speakNow(req.sentence() + ". Allow?");
+            if (e.settings.handsFree() && !req.destructive) {
+                voiceApproval = req;
+                voiceApprovalSpoke = false;
+                voiceApprovalDeadline = SystemClock.uptimeMillis() + SPEECH_START_WAIT_MS;
+                handler.removeCallbacks(listenForApproval);
+                handler.postDelayed(listenForApproval, RELISTEN_POLL_MS);
+            }
+        }
         return true;
+    }
+
+    /** Hands-free: the approval question waiting to be answered by voice. */
+    private ToolApproval voiceApproval;
+    private boolean voiceApprovalSpoke;
+    private long voiceApprovalDeadline;
+
+    /** Once the question has been spoken (or never started), listens for "yes" or "no". */
+    private final Runnable listenForApproval = new Runnable() {
+        @Override
+        public void run() {
+            final ToolApproval req = voiceApproval;
+            if (req == null || !req.isPending() || !isAppVisible()) {
+                voiceApproval = null;
+                return;
+            }
+            if (e.speaking()) {
+                voiceApprovalSpoke = true;
+                handler.postDelayed(this, RELISTEN_POLL_MS);
+                return;
+            }
+            if (!voiceApprovalSpoke && SystemClock.uptimeMillis() < voiceApprovalDeadline) {
+                handler.postDelayed(this, RELISTEN_POLL_MS);
+                return;
+            }
+            voiceApproval = null;
+            a.startVoice("Allow? Say yes or no", new MainActivity.TextResult() {
+                @Override
+                public void onText(String text) {
+                    if (!req.isPending()) return;
+                    int answer = yesOrNo(text);
+                    if (answer > 0) req.allow();
+                    else if (answer < 0) req.deny();
+                    else ui.toast("Didn't catch a yes or no — tap Allow or Deny.");
+                }
+            });
+        }
+    };
+
+    private static final String[] SAID_NO = {"no", "nope", "deny", "don't", "dont", "do not", "cancel", "stop",
+            "negative", "never", "not now"};
+    private static final String[] SAID_YES = {"yes", "yeah", "yep", "yup", "sure", "allow", "do it", "go ahead",
+            "okay", "ok", "confirm", "affirmative", "please do", "proceed"};
+
+    /** 1 for a spoken yes ("yes please", "go ahead"), -1 for a no ("no", "don't"), 0 when unclear. */
+    public static int yesOrNo(String said) {
+        String s = " " + (said == null ? "" : said.toLowerCase(Locale.US).replaceAll("[^a-z' ]", " ")
+                .replaceAll("\\s+", " ").trim()) + " ";
+        for (String w : SAID_NO) {
+            if (s.contains(" " + w + " ")) return -1;
+        }
+        for (String w : SAID_YES) {
+            if (s.contains(" " + w + " ")) return 1;
+        }
+        return 0;
     }
 
     /** One line of the approval sheet's spec block: micro-caps key, mono value. */

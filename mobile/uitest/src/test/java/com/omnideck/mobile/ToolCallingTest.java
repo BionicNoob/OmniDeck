@@ -10,6 +10,7 @@ import com.omnideck.mobile.core.ChatMessage;
 import com.omnideck.mobile.core.ToolCall;
 import com.omnideck.mobile.core.ToolKit;
 import com.omnideck.mobile.mock.MockOllama;
+import com.omnideck.mobile.screens.CommsScreen;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 
@@ -621,6 +622,44 @@ public class ToolCallingTest extends Harness {
         String said = org.robolectric.Shadows.shadowOf(tts).getLastSpokenText();
         assertEquals("the answer, never the tool's JSON", "The volume is at 40 percent now.", said);
         assertEquals(40, bridge.volume);
+    }
+
+    @Test
+    public void handsFreeApprovesByVoice() throws Exception {
+        org.robolectric.shadows.ShadowTextToSpeech.addLanguageAvailability(Locale.getDefault());
+        org.robolectric.shadows.ShadowTextToSpeech.addLanguageAvailability(Locale.US);
+        tools();
+        prefs().edit().putBoolean("hands_free", true).commit();
+        launch("cyber", MainActivity.TAB_COMMS);
+        waitOnline();
+        act.comms().submitVoice("set the volume to 40");
+        waitForApproval();
+        // Robolectric's voice never reports speaking: the phone listens once the wait for it runs out.
+        advance(CommsScreen.SPEECH_START_WAIT_MS + 1000);
+        org.robolectric.shadows.ShadowActivity.IntentForResult r;
+        do {
+            r = org.robolectric.Shadows.shadowOf(act).getNextStartedActivityForResult();
+        } while (r != null && !android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH.equals(r.intent.getAction()));
+        assertNotNull("listening for the answer", r);
+        act.onActivityResult(r.requestCode, android.app.Activity.RESULT_OK, new android.content.Intent()
+                .putStringArrayListExtra(android.speech.RecognizerIntent.EXTRA_RESULTS,
+                        new ArrayList<>(Collections.singletonList("yes go ahead"))));
+        waitReplyDone();
+        assertEquals(40, bridge.volume);
+        assertNull(act.comms().approvalDialog());
+        assertEquals(ToolCall.DONE, reply().tools.get(0).state);
+    }
+
+    @Test
+    public void spokenAnswersAreRead() {
+        assertEquals(1, CommsScreen.yesOrNo("Yes please"));
+        assertEquals(1, CommsScreen.yesOrNo("sure, go ahead"));
+        assertEquals(1, CommsScreen.yesOrNo("OK"));
+        assertEquals(-1, CommsScreen.yesOrNo("no"));
+        assertEquals(-1, CommsScreen.yesOrNo("Don't do it"));
+        assertEquals(-1, CommsScreen.yesOrNo("not now, thanks"));
+        assertEquals(0, CommsScreen.yesOrNo("what was that?"));
+        assertEquals(0, CommsScreen.yesOrNo("nobody knows"));
     }
 
     @Test
