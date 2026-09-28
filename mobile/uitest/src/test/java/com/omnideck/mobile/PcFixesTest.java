@@ -187,6 +187,16 @@ public class PcFixesTest extends PcBaseTest {
             waitFor("A's apps", () -> button("Open Discord") != null);
             click("Tool runner");
             waitFor("A's tools", () -> button("Run list_processes") != null);
+            // Something opened on A becomes one of A's recent apps.
+            click("Open Discord");
+            positive(latestAlert());
+            waitFor("recent on A", () -> button("Open Discord again") != null);
+
+            // A slow vitals answer from A is still on its way when the tab moves to B.
+            bridge.toolDelayMs.put("get_system_info", 2500);
+            int polls = toolCalls("get_system_info");
+            click("Refresh PC link");
+            waitFor("A's slow poll out", () -> toolCalls("get_system_info") > polls);
 
             // Point the tab at PC B.
             click("PC link options");
@@ -200,14 +210,22 @@ public class PcFixesTest extends PcBaseTest {
             click("Pair with this PC");
             waitFor("paired with B", () -> other.token.equals(engine().settings.bridgeToken()));
             waitFor("B's apps", () -> button("Open Notepad") != null);
+            waitFor("B's vitals", () -> shows("210 GB free"));
+            // Let A's late answer land: it must not show on B's screen.
+            for (int i = 0; i < 12; i++) {
+                advance(250);
+                Thread.sleep(250);
+            }
             assertNull("A's apps are gone", button("Open Discord"));
+            assertNull("A's recent apps stay with A", button("Open Discord again"));
             assertNull("A's tools are gone", button("Run list_processes"));
-            assertFalse(shows("ATLAS-PC"));
+            assertFalse("A's name never shows for B", shows("ATLAS-PC"));
+            assertTrue(shows("210 GB free"));
 
             click("Open Notepad");
             positive(latestAlert());
             waitFor("launched on B", () -> other.launched.contains("Notepad"));
-            assertTrue("nothing went to A", bridge.launched.isEmpty());
+            assertEquals("nothing else went to A", 1, bridge.launched.size());
         } finally {
             other.stop();
         }
