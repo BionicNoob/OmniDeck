@@ -49,6 +49,7 @@ public abstract class Harness {
     @Before
     public void harnessSetUp() throws Exception {
         Engine.reset();
+        MainActivity.skipBoot = true;
         // Sweep a small loopback "LAN" instead of the build machine's network.
         Engine.testSubnets = Collections.singletonList(
                 new LanScanner.Subnet("wlan0", LanScanner.parseIp("127.0.3.1"), 28));

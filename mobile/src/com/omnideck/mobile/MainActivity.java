@@ -38,6 +38,7 @@ import com.omnideck.mobile.screens.PcScreen;
 import com.omnideck.mobile.screens.Screen;
 import com.omnideck.mobile.screens.SettingsScreen;
 import com.omnideck.mobile.ui.Backdrop;
+import com.omnideck.mobile.ui.BootOverlay;
 import com.omnideck.mobile.ui.IconDrawable;
 import com.omnideck.mobile.ui.Panel;
 import com.omnideck.mobile.ui.Theme;
@@ -60,6 +61,10 @@ public final class MainActivity extends Activity implements Engine.Listener {
     public static final int TAB_COMMS = 1;
     public static final int TAB_MODELS = 2;
     public static final int TAB_PC = 3;
+    /** Tests turn the cold-start boot sequence off. */
+    public static boolean skipBoot;
+    private static boolean bootShown;
+
     public static final String[] TAB_NAMES = {"Command", "Comms", "Models", "PC"};
     static final int[] TAB_ICONS = {IconDrawable.NAV_COMMAND, IconDrawable.NAV_COMMS, IconDrawable.NAV_MODELS,
             IconDrawable.NAV_PC};
@@ -198,6 +203,10 @@ public final class MainActivity extends Activity implements Engine.Listener {
         onStateChanged();
         onTelemetry();
         handleShareIntent(getIntent());
+        if (!bootShown && savedInstanceState == null && !skipBoot && !engine.settings.reduceMotion()) {
+            bootShown = true;
+            new BootOverlay(this, theme).play((ViewGroup) findViewById(android.R.id.content));
+        }
     }
 
     @Override
