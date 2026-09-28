@@ -115,7 +115,25 @@ public class ToolShotsTest extends Harness {
     }
 
     @Test
-    public void destructiveApprovalCyberAndLight() throws Exception {
+    public void aScreenshotInTheReplyCyber() throws Exception {
+        withBridge(true);
+        bridge.rich = true;
+        ollama.addModel(new MockOllama.Model("llava:7b", 4_700_000_000L, "7B", "Q4_0", false).caps("tools"));
+        ollama.script = new MockOllama.ToolScript().on("screen", "screenshot", new JSONObject());
+        launch("cyber", MainActivity.TAB_COMMS);
+        waitOnline();
+        submit("/model llava");
+        waitFor("llava", () -> "llava:7b".equals(engine().currentModel())
+                && Boolean.TRUE.equals(engine().supportsTools("llava:7b")));
+        submit("What's on my screen?");
+        waitFor("answered", () -> !engine().isWorking() && reply() != null && !reply().streaming);
+        assertTrue(reply().tools.get(0).image.length() > 0);
+        advance(300);
+        shoot("tools-cyber-screenshot");
+    }
+
+    @Test
+    public void destructiveApprovalCyber() throws Exception {
         java.util.List<String> ran = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
         com.sun.net.httpserver.HttpServer pc = ToolCallingTest.destructiveBridge(ran);
         try {
