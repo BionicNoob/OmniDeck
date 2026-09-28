@@ -21,6 +21,9 @@ public final class ToolKit {
     public static final String OPEN_APP = "open_app";
     /** Tool rounds per user message; after that the model must answer without tools. */
     public static final int MAX_ROUNDS = 5;
+    /** Calls one response may make; any beyond fail without running. */
+    public static final int MAX_CALLS_PER_ROUND = 8;
+    public static final String TOO_MANY_RESULT = "Not run: too many tool calls at once. Call fewer tools per step.";
     /** A tool result is cut to about this many characters before it goes to the model. */
     public static final int RESULT_MAX = 4000;
 

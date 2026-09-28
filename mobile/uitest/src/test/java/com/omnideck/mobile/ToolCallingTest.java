@@ -580,6 +580,77 @@ public class ToolCallingTest extends Harness {
     }
 
     @Test
+    public void aSpokenRequestHearsTheQuestionAndOnlyTheAnswer() throws Exception {
+        org.robolectric.shadows.ShadowTextToSpeech.addLanguageAvailability(Locale.getDefault());
+        org.robolectric.shadows.ShadowTextToSpeech.addLanguageAvailability(Locale.US);
+        withBridge(true);
+        bridge.rich = true;
+        ollama.script = req -> {
+            JSONArray msgs = req.optJSONArray("messages");
+            JSONObject last = msgs.optJSONObject(msgs.length() - 1);
+            if ("tool".equals(last.optString("role"))) return MockOllama.Turn.text("The volume is at 40 percent now.");
+            try {
+                return new MockOllama.Turn().call("set_volume", new JSONObject().put("level", 40));
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        };
+        launch("dark", MainActivity.TAB_COMMS);
+        waitOnline();
+        click("Voice input");
+        org.robolectric.shadows.ShadowActivity.IntentForResult r;
+        do {
+            r = org.robolectric.Shadows.shadowOf(act).getNextStartedActivityForResult();
+        } while (r != null && !android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH.equals(r.intent.getAction()));
+        assertNotNull("the recognizer opened", r);
+        act.onActivityResult(r.requestCode, android.app.Activity.RESULT_OK, new android.content.Intent()
+                .putStringArrayListExtra(android.speech.RecognizerIntent.EXTRA_RESULTS,
+                        new ArrayList<>(Collections.singletonList("turn the volume up to forty"))));
+        idle();
+        AlertDialog d = waitForApproval();
+        android.speech.tts.TextToSpeech tts = org.robolectric.shadows.ShadowTextToSpeech.getLastTextToSpeechInstance();
+        assertNotNull(tts);
+        org.robolectric.Shadows.shadowOf(tts).getOnInitListener().onInit(android.speech.tts.TextToSpeech.SUCCESS);
+        idle();
+        String asked = org.robolectric.Shadows.shadowOf(tts).getLastSpokenText();
+        assertNotNull("a spoken request hears the question", asked);
+        assertTrue(asked, asked.contains("wants to set volume to 40"));
+        d.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+        waitReplyDone();
+        advance(300);
+        String said = org.robolectric.Shadows.shadowOf(tts).getLastSpokenText();
+        assertEquals("the answer, never the tool's JSON", "The volume is at 40 percent now.", said);
+        assertEquals(40, bridge.volume);
+    }
+
+    @Test
+    public void aRunawayResponseRunsAtMostEightCalls() throws Exception {
+        withBridge(true);
+        bridge.rich = true;
+        ollama.script = req -> {
+            JSONArray msgs = req.optJSONArray("messages");
+            JSONObject last = msgs.optJSONObject(msgs.length() - 1);
+            if ("tool".equals(last.optString("role"))) return MockOllama.Turn.text("Checked.");
+            MockOllama.Turn t = new MockOllama.Turn();
+            for (int i = 0; i < 10; i++) t.call("get_volume", null);
+            return t;
+        };
+        launch("light", MainActivity.TAB_COMMS);
+        waitOnline();
+        submit("Check the volume a lot");
+        waitReplyDone();
+        List<ToolCall> calls = reply().tools;
+        assertEquals(10, calls.size());
+        int ran = 0;
+        for (ToolCall c : calls) {
+            if (ToolCall.DONE.equals(c.state)) ran++;
+        }
+        assertEquals(ToolKit.MAX_CALLS_PER_ROUND, ran);
+        assertEquals(ToolKit.TOO_MANY_RESULT, calls.get(9).result);
+        assertEquals(ToolKit.MAX_CALLS_PER_ROUND, Collections.frequency(bridge.ranTools, "get_volume"));
+    }
+
+    @Test
     public void callsTheBridgeDoesNotHaveFailCleanly() throws Exception {
         tools();
         ollama.script = req -> {

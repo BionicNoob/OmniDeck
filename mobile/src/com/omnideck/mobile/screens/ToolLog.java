@@ -152,11 +152,22 @@ final class ToolLog extends LinearLayout {
         icon.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
         r.addView(icon, new LayoutParams(ui.dp(16), ui.dp(16)));
 
+        LinearLayout words = ui.vbox();
+        words.setPadding(ui.dp(10), 0, ui.dp(8), 0);
         TextView label = ui.text(c.label.length() > 0 ? c.label : c.name, 13.5f, t.ink, t.bodyMedium);
         label.setSingleLine(true);
         label.setEllipsize(TextUtils.TruncateAt.END);
-        label.setPadding(ui.dp(10), 0, ui.dp(8), 0);
-        r.addView(label, Ui.weight(1));
+        words.addView(label, Ui.fillW());
+        // Why a call failed or didn't run, without opening it.
+        String why = note(c);
+        if (why.length() > 0) {
+            TextView n = ui.text(why, 12, ToolCall.FAILED.equals(c.state) ? t.danger : t.dim, t.body);
+            n.setSingleLine(true);
+            n.setEllipsize(TextUtils.TruncateAt.END);
+            n.setPadding(0, ui.dp(2), 0, 0);
+            words.addView(n, Ui.fillW());
+        }
+        r.addView(words, Ui.weight(1));
 
         int color = stateColor(c.state);
         Widgets.StatusDot dot = new Widgets.StatusDot(getContext());
@@ -222,6 +233,19 @@ final class ToolLog extends LinearLayout {
         v.setTextIsSelectable(false);
         b.addView(v, Ui.fillW());
         return b;
+    }
+
+    /** A failure's error, or why a call didn't run (not for a plain "no" — the state says that). */
+    static String note(ToolCall c) {
+        if (ToolCall.FAILED.equals(c.state)) {
+            String r = c.result.startsWith("Error: ") ? c.result.substring(7) : c.result;
+            return Fmt.ellipsize(r, 120);
+        }
+        if (ToolCall.DECLINED.equals(c.state)) {
+            if (ToolKit.UNAVAILABLE_RESULT.equals(c.result)) return "Not approved: the app wasn't open to ask";
+            if (ToolKit.STOPPED_RESULT.equals(c.result)) return "Not run: the reply was stopped";
+        }
+        return "";
     }
 
     /** "85 ms" under a second, else "1.4s" / "1m 5s". */

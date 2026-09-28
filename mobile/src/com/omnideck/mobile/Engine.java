@@ -1671,11 +1671,17 @@ public final class Engine {
         j.round++;
         int at = j.target.content.length();
         StringBuilder names = new StringBuilder();
-        for (ToolCall tc : calls) {
+        for (int i = 0; i < calls.size(); i++) {
+            ToolCall tc = calls.get(i);
             tc.round = j.round;
             tc.at = at;
             tc.state = ToolCall.QUEUED;
             tc.label = ToolKit.label(ToolKit.find(j.catalog, tc.name), tc.name, tc.args);
+            if (i >= ToolKit.MAX_CALLS_PER_ROUND) {
+                // A runaway response: the extra calls are answered, not run.
+                tc.state = ToolCall.FAILED;
+                tc.result = ToolKit.TOO_MANY_RESULT;
+            }
             j.target.tools.add(tc);
             if (names.length() > 0) names.append(", ");
             names.append(tc.name);
@@ -1960,11 +1966,25 @@ public final class Engine {
         changed(j);
     }
 
-    /** A call ended — maybe after the reply was stopped: show it, keep it, and carry on if the reply still runs. */
+    /**
+     * A call ended: show it and carry on. After the reply ended (stopped, or
+     * its chat left) the late result is still kept — in the open chat, or in
+     * the reopened copy of it; a chat that is closed (or was deleted) isn't
+     * written again.
+     */
     private void afterCall(Job j) {
         changed(j);
-        if (job == j) nextCall(j);
-        else save(j.conv);
+        if (job == j) {
+            nextCall(j);
+        } else if (j.conv == conv) {
+            save(conv);
+        } else if (j.conv.id.equals(conv.id)) {
+            ChatMessage open = conv.find(j.target.id);
+            if (open == null) return;
+            open.tools = j.target.tools;
+            if (listener != null) listener.onMessageChanged(open);
+            save(conv);
+        }
     }
 
     /** Redraws the reply (its action log) when its chat is on screen. */

@@ -45,12 +45,13 @@ import com.omnideck.mobile.core.ModelInfo;
 import com.omnideck.mobile.core.ReplyError;
 import com.omnideck.mobile.core.ToolApproval;
 import com.omnideck.mobile.core.ToolCall;
-import com.omnideck.mobile.ui.Sheet;
+import com.omnideck.mobile.core.ToolKit;
 import com.omnideck.mobile.ui.BubbleLayout;
 import com.omnideck.mobile.ui.ChatScrollView;
 import com.omnideck.mobile.ui.IconDrawable;
 import com.omnideck.mobile.ui.MarkdownRenderer;
 import com.omnideck.mobile.ui.Panel;
+import com.omnideck.mobile.ui.Sheet;
 import com.omnideck.mobile.ui.Theme;
 import com.omnideck.mobile.ui.Ui;
 import com.omnideck.mobile.ui.Widgets;
@@ -716,7 +717,7 @@ public final class CommsScreen extends Screen {
             @Override
             public void onClick(View v) {
                 v.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
-                if (e.isWorking()) {
+                if (e.isWorking() && !typedCommand()) {
                     // A reply (and its PC actions), or a compact / benchmark.
                     e.stop();
                 } else if (input.getText().toString().trim().length() == 0 && pendingImages.isEmpty()) {
@@ -1450,9 +1451,15 @@ public final class CommsScreen extends Screen {
     // Composer
     // ------------------------------------------------------------------
 
+    /** A slash command is typed (and no image): it runs even while OMNI works. */
+    private boolean typedCommand() {
+        return pendingImages.isEmpty() && Commands.parse(input.getText().toString()) != null;
+    }
+
     private void updateSendButton() {
         if (sendBtn == null) return;
-        boolean busy = e.isWorking();
+        // Stop while OMNI works on anything — unless a command is typed: /stop, /ps… always run.
+        boolean busy = e.isWorking() && !typedCommand();
         boolean has = input.getText().toString().trim().length() > 0 || !pendingImages.isEmpty();
         int kind = busy ? IconDrawable.STOP : has ? IconDrawable.SEND : IconDrawable.MIC;
         IconDrawable d = new IconDrawable(kind, t.onAccent, t.onAccent, ui.dp(22));
@@ -1915,7 +1922,7 @@ public final class CommsScreen extends Screen {
         spec.setBackground(ui.rounded(t.input, t.hud ? t.edge : t.hair, 8));
         spec.addView(specRow("Tool", req.tool), Ui.fillW());
         if (req.detail.length() > 0 && !"none".equals(req.detail)) {
-            boolean app = com.omnideck.mobile.core.ToolKit.OPEN_APP.equals(req.tool);
+            boolean app = ToolKit.OPEN_APP.equals(req.tool);
             String key = !app ? "Arguments" : req.detail.indexOf('\\') >= 0 || req.detail.indexOf('/') >= 0 ? "Path" : "App id";
             spec.addView(specRow(key, req.detail), Ui.fillW());
         }
@@ -1943,7 +1950,7 @@ public final class CommsScreen extends Screen {
         } else {
             always = ui.toggle(false, null);
             always.setContentDescription("Allow for this chat");
-            String generic = com.omnideck.mobile.core.ToolKit.label(null, req.tool, null);
+            String generic = ToolKit.label(null, req.tool, null);
             LinearLayout row = ui.settingRow("Allow for this chat", "Don't ask again for “" + generic
                     + "” in this conversation.", always);
             LinearLayout.LayoutParams rl = Ui.fillW();
