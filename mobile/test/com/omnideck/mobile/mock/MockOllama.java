@@ -27,8 +27,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 /**
  * A stand-in for an Ollama server that reproduces the shapes of the real API
  * (GET /, /api/version, /api/tags, /api/ps, POST /api/show, /api/chat with
- * chunked NDJSON streaming, /api/pull). Used by the JVM and Robolectric
- * tests; also runnable on its own: {@code java MockOllama [port]}.
+ * chunked NDJSON streaming, /api/pull, /api/embed, DELETE /api/delete). Used by the JVM
+ * and Robolectric tests; also runnable on its own: {@code java MockOllama [port]}.
  */
 public final class MockOllama {
     private static final Charset UTF8 = Charset.forName("UTF-8");
@@ -40,12 +40,44 @@ public final class MockOllama {
         final String quant;
         final boolean thinking;
 
+        // Optional metadata (defaults are derived from the name; see showJson).
+        volatile String family = "";
+        volatile String modifiedAt = "2026-09-01T10:00:00Z";
+        volatile int contextLength = 131072;
+        final List<String> extraCaps = new ArrayList<String>();
+
         public Model(String name, long size, String params, String quant, boolean thinking) {
             this.name = name;
             this.size = size;
             this.params = params;
             this.quant = quant;
             this.thinking = thinking;
+        }
+
+        /** Overrides the family reported by /api/tags and /api/show. */
+        public Model family(String f) {
+            family = f;
+            return this;
+        }
+
+        /** Sets modified_at (RFC 3339). */
+        public Model modified(String iso) {
+            modifiedAt = iso;
+            return this;
+        }
+
+        /** Sets the context length in /api/show's model_info. */
+        public Model context(int tokens) {
+            contextLength = tokens;
+            return this;
+        }
+
+        /** Adds capabilities to /api/show (e.g. "vision", "tools", "embedding"). */
+        public Model caps(String... c) {
+            synchronized (extraCaps) {
+                Collections.addAll(extraCaps, c);
+            }
+            return this;
         }
     }
 
@@ -66,6 +98,12 @@ public final class MockOllama {
     public volatile List<String> rawContentChunks = null;
     public volatile Replier replier = null;
     public volatile String version = "0.12.6";
+    /** Delay between /api/pull progress lines (negative = use tokenDelayMs). */
+    public volatile long pullDelayMs = -1;
+    /** Bytes a mock /api/pull reports (and the pulled model's size). */
+    public volatile long pullTotal = 1000000;
+    /** Delay before answering /api/tags (to observe loading states). */
+    public volatile long tagsDelayMs = 0;
 
     public MockOllama(InetAddress bind, int port) throws IOException {
         server = HttpServer.create(new InetSocketAddress(bind, port), 64);
@@ -114,6 +152,10 @@ public final class MockOllama {
         return loaded.contains(name);
     }
 
+    public synchronized boolean hasModel(String name) {
+        return models.containsKey(name);
+    }
+
     public JSONObject lastChatRequest() {
         synchronized (chatRequests) {
             return chatRequests.isEmpty() ? null : chatRequests.get(chatRequests.size() - 1);
@@ -128,6 +170,7 @@ public final class MockOllama {
         } else if ("GET".equals(method) && "/api/version".equals(path)) {
             sendJson(ex, 200, new JSONObject().put("version", version).toString());
         } else if ("GET".equals(method) && "/api/tags".equals(path)) {
+            sleep(tagsDelayMs);
             JSONArray arr = new JSONArray();
             synchronized (this) {
                 for (Model m : models.values()) arr.put(modelJson(m));
@@ -155,10 +198,36 @@ public final class MockOllama {
                 sendJson(ex, 404, "{\"error\":\"model '" + req.optString("model") + "' not found\"}");
                 return;
             }
-            JSONArray caps = new JSONArray().put("completion");
-            if (m.thinking) caps.put("thinking");
-            JSONObject info = new JSONObject().put("general.architecture", "llama").put("llama.context_length", 131072);
-            sendJson(ex, 200, new JSONObject().put("capabilities", caps).put("model_info", info).toString());
+            sendJson(ex, 200, showJson(m).toString());
+        } else if ("POST".equals(method) && "/api/embed".equals(path)) {
+            JSONObject req = new JSONObject(readBody(ex));
+            Model m = model(req.optString("model", ""));
+            if (m == null) {
+                sendJson(ex, 404, "{\"error\":\"model '" + req.optString("model") + "' not found\"}");
+                return;
+            }
+            Object keepAlive = req.opt("keep_alive");
+            if (keepAlive != null && "0".equals(String.valueOf(keepAlive))) loaded.remove(m.name);
+            else loaded.add(m.name);
+            JSONArray input = req.optJSONArray("input");
+            int n = input != null ? input.length() : req.has("input") ? 1 : 0;
+            JSONArray vectors = new JSONArray();
+            for (int i = 0; i < n; i++) vectors.put(new JSONArray().put(0.12).put(-0.4).put(0.33));
+            sendJson(ex, 200, new JSONObject().put("model", m.name).put("embeddings", vectors).toString());
+        } else if ("DELETE".equals(method) && "/api/delete".equals(path)) {
+            JSONObject req = new JSONObject(readBody(ex));
+            String name = req.optString("model", req.optString("name", ""));
+            Model m = model(name);
+            if (m == null) {
+                sendJson(ex, 404, "{\"error\":\"model '" + name + "' not found\"}");
+                return;
+            }
+            synchronized (this) {
+                models.remove(m.name);
+            }
+            loaded.remove(m.name);
+            loadedCtx.remove(m.name);
+            send(ex, 200, "application/json; charset=utf-8", "");
         } else if ("POST".equals(method) && "/api/chat".equals(path)) {
             chat(ex, new JSONObject(readBody(ex)));
         } else if ("POST".equals(method) && "/api/pull".equals(path)) {
@@ -175,11 +244,57 @@ public final class MockOllama {
     }
 
     private static JSONObject modelJson(Model m) throws JSONException {
-        JSONObject d = new JSONObject().put("format", "gguf").put("family", "llama")
+        JSONObject d = new JSONObject().put("format", "gguf").put("family", familyOf(m))
                 .put("parameter_size", m.params).put("quantization_level", m.quant);
         return new JSONObject().put("name", m.name).put("model", m.name).put("size", m.size)
                 .put("digest", "sha256:" + Integer.toHexString(m.name.hashCode())).put("details", d)
-                .put("modified_at", "2026-09-01T10:00:00Z");
+                .put("modified_at", m.modifiedAt);
+    }
+
+    /** The model family: set explicitly, or guessed from the name the way Ollama reports it. */
+    static String familyOf(Model m) {
+        if (m.family.length() > 0) return m.family;
+        String n = m.name.toLowerCase(java.util.Locale.US);
+        if (n.startsWith("qwen3")) return "qwen3";
+        if (n.startsWith("qwen")) return "qwen2";
+        if (n.startsWith("gemma")) return "gemma3";
+        if (n.startsWith("phi")) return "phi3";
+        if (n.contains("embed")) return "nomic-bert";
+        return "llama";
+    }
+
+    /** POST /api/show: capabilities, details, model_info (context length), license, parameters. */
+    static JSONObject showJson(Model m) throws JSONException {
+        String n = m.name.toLowerCase(java.util.Locale.US);
+        boolean embed = n.contains("embed");
+        JSONArray caps = new JSONArray();
+        caps.put(embed ? "embedding" : "completion");
+        if (!embed && (n.contains("llava") || n.contains("vision") || n.startsWith("gemma3") || n.contains("-vl"))) {
+            caps.put("vision");
+        }
+        if (m.thinking) caps.put("thinking");
+        if (n.startsWith("qwen3") || n.startsWith("llama3") || n.startsWith("mistral")) caps.put("tools");
+        synchronized (m.extraCaps) {
+            for (String c : m.extraCaps) {
+                boolean dup = false;
+                for (int i = 0; i < caps.length(); i++) dup |= c.equals(caps.optString(i));
+                if (!dup) caps.put(c);
+            }
+        }
+        String family = familyOf(m);
+        JSONObject info = new JSONObject().put("general.architecture", family)
+                .put(family + ".context_length", m.contextLength);
+        JSONObject details = new JSONObject().put("format", "gguf").put("family", family)
+                .put("parameter_size", m.params).put("quantization_level", m.quant);
+        String license = n.startsWith("llama")
+                ? "LLAMA 3.2 COMMUNITY LICENSE AGREEMENT\nLlama 3.2 Version Release Date: September 25, 2024"
+                : n.startsWith("gemma") ? "Gemma Terms of Use\nLast modified: February 21, 2024"
+                : "Apache License\nVersion 2.0, January 2004";
+        String params = n.startsWith("qwen3")
+                ? "repeat_penalty 1\nstop \"<|im_start|>\"\nstop \"<|im_end|>\"\ntemperature 0.6\ntop_k 20\ntop_p 0.95"
+                : "stop \"<|start_header_id|>\"\nstop \"<|end_header_id|>\"\nstop \"<|eot_id|>\"";
+        return new JSONObject().put("capabilities", caps).put("model_info", info).put("details", details)
+                .put("license", license).put("parameters", params).put("modified_at", m.modifiedAt);
     }
 
     private void chat(HttpExchange ex, JSONObject req) throws IOException, JSONException {
@@ -286,11 +401,12 @@ public final class MockOllama {
         OutputStream os = ex.getResponseBody();
         try {
             writeLine(os, new JSONObject().put("status", "pulling manifest"));
-            long total = 1000000;
-            for (long done = 0; done <= total; done += 250000) {
+            long total = Math.max(4, pullTotal);
+            long delay = pullDelayMs >= 0 ? pullDelayMs : tokenDelayMs;
+            for (long done = 0; done <= total; done += total / 4) {
                 writeLine(os, new JSONObject().put("status", "pulling 6a0746a1ec1a").put("digest", "sha256:6a0746a1ec1a")
                         .put("total", total).put("completed", done));
-                sleep(tokenDelayMs);
+                sleep(delay);
             }
             writeLine(os, new JSONObject().put("status", "verifying sha256 digest"));
             writeLine(os, new JSONObject().put("status", "writing manifest"));
