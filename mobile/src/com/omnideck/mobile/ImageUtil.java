@@ -1,12 +1,14 @@
 package com.omnideck.mobile;
 
 import android.content.ContentResolver;
+import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Matrix;
-import android.media.ExifInterface;
 import android.net.Uri;
 import android.util.Base64;
+
+import com.omnideck.mobile.core.ExifOrientation;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -76,25 +78,54 @@ final class ImageUtil {
         }
     }
 
-    private static int orientation(ContentResolver cr, Uri uri) {
-        // ExifInterface(InputStream) is API 24; on older phones fall back to file paths.
-        if ("file".equals(uri.getScheme())) {
-            try {
-                return new ExifInterface(uri.getPath()).getAttributeInt(ExifInterface.TAG_ORIENTATION,
-                        ExifInterface.ORIENTATION_NORMAL);
-            } catch (IOException e) {
-                return ExifInterface.ORIENTATION_NORMAL;
+    /**
+     * The photo's EXIF orientation, read from the JPEG's first bytes for any
+     * Uri (the picker hands out content:// Uris), else MediaStore's
+     * "orientation" column (also filled by the system photo picker).
+     */
+    static int orientation(ContentResolver cr, Uri uri) {
+        int o = ExifOrientation.UNDEFINED;
+        InputStream in = null;
+        try {
+            in = cr.openInputStream(uri);
+            if (in != null) o = ExifOrientation.read(in);
+        } catch (IOException e) {
+            o = ExifOrientation.UNDEFINED;
+        } catch (RuntimeException e) {
+            o = ExifOrientation.UNDEFINED;
+        } finally {
+            if (in != null) {
+                try {
+                    in.close();
+                } catch (IOException ignored) {
+                }
             }
         }
-        return ExifInterface.ORIENTATION_NORMAL;
+        return o != ExifOrientation.UNDEFINED ? o : mediaStoreOrientation(cr, uri);
     }
 
-    private static Bitmap rotate(Bitmap b, int exif) {
-        int deg = exif == ExifInterface.ORIENTATION_ROTATE_90 ? 90 : exif == ExifInterface.ORIENTATION_ROTATE_180 ? 180
-                : exif == ExifInterface.ORIENTATION_ROTATE_270 ? 270 : 0;
-        if (deg == 0) return b;
+    private static int mediaStoreOrientation(ContentResolver cr, Uri uri) {
+        if (!ContentResolver.SCHEME_CONTENT.equals(uri.getScheme())) return ExifOrientation.NORMAL;
+        Cursor c = null;
+        try {
+            c = cr.query(uri, new String[]{"orientation"}, null, null, null);
+            if (c != null && c.moveToFirst() && !c.isNull(0)) return ExifOrientation.fromDegrees(c.getInt(0));
+        } catch (RuntimeException ignored) {
+            // The provider has no such column.
+        } finally {
+            if (c != null) c.close();
+        }
+        return ExifOrientation.NORMAL;
+    }
+
+    /** Turns (and for mirrored orientations flips) the pixels upright. */
+    private static Bitmap rotate(Bitmap b, int orientation) {
+        int deg = ExifOrientation.degrees(orientation);
+        boolean mirror = ExifOrientation.mirrored(orientation);
+        if (deg == 0 && !mirror) return b;
         Matrix m = new Matrix();
-        m.postRotate(deg);
+        if (deg != 0) m.postRotate(deg);
+        if (mirror) m.postScale(-1, 1);
         Bitmap r = Bitmap.createBitmap(b, 0, 0, b.getWidth(), b.getHeight(), m, true);
         if (r != b) b.recycle();
         return r;

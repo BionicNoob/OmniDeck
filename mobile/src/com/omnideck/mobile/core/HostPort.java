@@ -66,4 +66,16 @@ public final class HostPort {
     public String label(int defaultPort) {
         return port == defaultPort ? host : Http.hostPort(host, port);
     }
+
+    /** Same machine address: case-insensitive, IPv6 brackets ignored, "" never matches. */
+    public static boolean sameHost(String a, String b) {
+        String x = bare(a), y = bare(b);
+        return x.length() > 0 && x.equalsIgnoreCase(y);
+    }
+
+    private static String bare(String h) {
+        String s = h == null ? "" : h.trim();
+        if (s.startsWith("[") && s.endsWith("]")) s = s.substring(1, s.length() - 1);
+        return s;
+    }
 }

@@ -16,8 +16,21 @@ import java.util.Map;
  */
 public final class Http {
     public static final Charset UTF8 = Charset.forName("UTF-8");
+    /** Largest reply body read into memory (a PC screenshot is the biggest thing fetched). */
+    public static final int MAX_BODY = 8 * 1024 * 1024;
 
     private Http() {}
+
+    /** A reply body over the reader's limit. Thrown instead of returning a cut-off body. */
+    public static final class TooLargeException extends IOException {
+        private static final long serialVersionUID = 1L;
+        public final int limit;
+
+        public TooLargeException(int limit) {
+            super("The reply is larger than " + (limit >= 1024 * 1024 ? (limit >> 20) + " MB" : limit + " bytes") + ".");
+            this.limit = limit;
+        }
+    }
 
     /** Opens connections; the Android layer swaps in one that routes LAN hosts over Wi-Fi. */
     public interface Opener {
@@ -114,19 +127,20 @@ public final class Http {
         InputStream in = code >= 400 ? c.getErrorStream() : c.getInputStream();
         if (in == null) return "";
         try {
-            return readAll(in, 8 * 1024 * 1024);
+            return readAll(in, MAX_BODY);
         } finally {
             try { in.close(); } catch (IOException ignored) { }
         }
     }
 
+    /** Reads the whole stream as UTF-8; throws {@link TooLargeException} past {@code maxBytes}. */
     public static String readAll(InputStream in, int maxBytes) throws IOException {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         byte[] buf = new byte[8192];
         int n;
         while ((n = in.read(buf)) != -1) {
             out.write(buf, 0, n);
-            if (out.size() > maxBytes) break;
+            if (out.size() > maxBytes) throw new TooLargeException(maxBytes);
         }
         return new String(out.toByteArray(), UTF8);
     }

@@ -39,12 +39,30 @@ public final class BridgeClient {
     private final int port;
     private final String token;
     private final String base;
+    private final String unpairedHint;
 
     public BridgeClient(String host, int port, String token) {
+        this(host, port, token, null);
+    }
+
+    /**
+     * {@code unpairedHint}, when set, is the error for calls that need a token
+     * while none is sent — e.g. the phone is paired with a different PC.
+     */
+    public BridgeClient(String host, int port, String token, String unpairedHint) {
         this.host = host;
         this.port = port;
         this.token = token == null ? "" : token.trim();
         this.base = Http.baseUrl(host, port);
+        this.unpairedHint = unpairedHint;
+    }
+
+    public String host() {
+        return host;
+    }
+
+    public int port() {
+        return port;
     }
 
     public String where() {
@@ -136,7 +154,8 @@ public final class BridgeClient {
     private JSONObject call(String method, String path, JSONObject body, boolean auth, int readTimeoutMs)
             throws BridgeException {
         if (auth && !paired()) {
-            throw new BridgeException("Not paired with the PC bridge yet — run /pair first.", 401);
+            throw new BridgeException(unpairedHint != null ? unpairedHint
+                    : "Not paired with the PC bridge yet — run /pair first.", 401);
         }
         Map<String, String> headers = new HashMap<String, String>();
         if (auth) headers.put("X-Bridge-Token", token);
@@ -148,6 +167,9 @@ public final class BridgeClient {
                 r = Http.postJson(base + path, body == null ? "{}" : body.toString(), CONNECT_TIMEOUT_MS,
                         readTimeoutMs, headers);
             }
+        } catch (Http.TooLargeException e) {
+            throw new BridgeException("The PC bridge's reply was too large for the phone (over "
+                    + Math.max(1, e.limit >> 20) + " MB).", 0);
         } catch (IOException e) {
             throw new BridgeException("Can't reach the PC bridge (LaunchBridge) at " + where()
                     + ". On the PC it has to listen on the network, not just 127.0.0.1.", 0);
@@ -169,7 +191,13 @@ public final class BridgeClient {
                     OllamaClient.str(data, "message"), OllamaClient.str(data, "error"));
             throw new BridgeException(m.length() > 0 ? m : "Bridge returned HTTP " + r.code + ".", r.code);
         }
-        return data == null ? new JSONObject() : data;
+        if (data == null) {
+            if (r.code == 204) return new JSONObject();
+            // LaunchBridge always answers JSON: this is some other server on the port.
+            throw new BridgeException("The PC bridge at " + where() + " sent a reply this app can't read — is "
+                    + "something other than LaunchBridge using that port?", r.code);
+        }
+        return data;
     }
 
     private static String firstNonEmpty(String... s) {

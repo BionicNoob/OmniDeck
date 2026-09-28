@@ -426,8 +426,32 @@ public final class Engine {
         return bridgeOnline;
     }
 
+    /**
+     * True when the phone holds a bridge token for the PC bridge in use. A
+     * token only ever goes to the PC that issued it, so after moving to
+     * another network (or another PC) this is false until pairing again.
+     */
     public boolean bridgePaired() {
-        return settings.bridgeToken().length() > 0;
+        return bridgeTokenFor(bridgeHost()).length() > 0;
+    }
+
+    /** The token to send to {@code host}: the saved one when that host issued it (or it isn't bound yet), else "". */
+    private String bridgeTokenFor(String host) {
+        String tok = settings.bridgeToken();
+        if (tok.length() == 0) return "";
+        String bound = settings.bridgeTokenHost();
+        return bound.length() == 0 || HostPort.sameHost(bound, host) ? tok : "";
+    }
+
+    /**
+     * Saves a bridge token typed by the user, bound to the bridge host in use
+     * (so it is never sent anywhere else); "" unpairs.
+     */
+    public void setBridgeToken(String token) {
+        String t = token == null ? "" : token.trim();
+        settings.setBridgeToken(t);
+        settings.setBridgeTokenHost(t.length() > 0 ? bridgeHost() : "");
+        notifyState();
     }
 
     public Vitals lastVitals() {
@@ -1527,8 +1551,27 @@ public final class Engine {
         if (speech == null) {
             speech = new Speech(app);
             speech.setRate(settings.speechRate());
+            speech.setListener(new Speech.Listener() {
+                @Override
+                public void onUnavailable(String reason) {
+                    // Said once for read-aloud in the background; every time the user asks directly.
+                    if (!speechWarned || speechAsked) toast(reason);
+                    if (!speechWarned) log("warn", "Voice unavailable · no working text-to-speech voice");
+                    speechWarned = true;
+                    speechAsked = false;
+                }
+            });
         }
         return speech;
+    }
+
+    private boolean speechWarned;
+    /** The user just asked for speech (test voice, read a message, read-aloud on): report failures. */
+    private boolean speechAsked;
+
+    /** False once the phone's text-to-speech turned out to be missing or broken (true while unknown). */
+    public boolean speechAvailable() {
+        return speech == null || speech.available();
     }
 
     /** Turns read-aloud on or off (the /mute command and the speaker toggles). */
@@ -1537,8 +1580,12 @@ public final class Engine {
         if (!on) {
             speechStop();
         } else {
-            speech().setRate(settings.speechRate());
-            if (job != null) speech().skip(job.target.id, job.target.content.length());
+            Speech s = speech();
+            speechAsked = true;
+            s.retry();
+            s.setRate(settings.speechRate());
+            s.prepare();
+            if (job != null) s.skip(job.target.id, job.target.content.length());
         }
         notifyState();
     }
@@ -1561,6 +1608,8 @@ public final class Engine {
     public void speakNow(String text) {
         if (text == null || text.trim().length() == 0) return;
         Speech s = speech();
+        speechAsked = true;
+        s.retry();
         s.setRate(settings.speechRate());
         s.stop();
         s.say(text);
@@ -2056,8 +2105,9 @@ public final class Engine {
         });
     }
 
-    /** Pairs with the bridge; callback gets the token. */
+    /** Pairs with the bridge; callback gets the token (saved, bound to the host that issued it). */
     public void bridgePair(final Callback<String> cb) {
+        final String host = bridgeHost();
         bridgeAsync(new BridgeCall<String>() {
             @Override
             public String run(BridgeClient b) throws BridgeClient.BridgeException {
@@ -2068,6 +2118,7 @@ public final class Engine {
             public void done(String token, String error) {
                 if (token != null) {
                     settings.setBridgeToken(token);
+                    settings.setBridgeTokenHost(host);
                     bridgeOnline = Boolean.TRUE;
                     log("ok", "PC bridge paired");
                     notifyState();
@@ -2319,10 +2370,25 @@ public final class Engine {
         return server != null ? server.host : settings.lastHost();
     }
 
+    /**
+     * A client for the bridge host in use. The token is attached only when
+     * that host issued it: the Ollama host (and so the default bridge host)
+     * can be any machine on a foreign network, and the token opens the PC.
+     */
     private BridgeClient bridge() {
         String host = bridgeHost();
         if (host.length() == 0) return null;
-        return new BridgeClient(host, settings.bridgePort(), settings.bridgeToken());
+        String saved = settings.bridgeToken();
+        if (saved.length() > 0 && settings.bridgeTokenHost().length() == 0) {
+            // A token from before tokens were bound (or typed in Settings): bind it to the PC it's
+            // first used with, so it is never sent to another host afterwards.
+            settings.setBridgeTokenHost(host);
+        }
+        String token = bridgeTokenFor(host);
+        String hint = saved.length() > 0 && token.length() == 0
+                ? "This phone is paired with the PC bridge at " + settings.bridgeTokenHost() + ", not " + host
+                + " — run /pair to pair with this PC." : null;
+        return new BridgeClient(host, settings.bridgePort(), token, hint);
     }
 
     private interface BridgeCall<T> {
