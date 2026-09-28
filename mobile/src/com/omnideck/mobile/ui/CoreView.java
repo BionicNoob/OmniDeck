@@ -10,6 +10,7 @@ import android.graphics.RadialGradient;
 import android.graphics.RectF;
 import android.graphics.Shader;
 import android.graphics.SweepGradient;
+import android.os.Build;
 import android.os.SystemClock;
 import android.view.View;
 import android.view.animation.LinearInterpolator;
@@ -22,13 +23,16 @@ import android.view.animation.LinearInterpolator;
  * <p>
  * Its motion mirrors the AI ({@link #setMode}): slow rotation when idle, a
  * radar sweep while scanning, fast counter-rotation while thinking, a pulse
- * per streamed burst ({@link #pulse}), ripples while speaking, and dim broken
- * rings in the danger color when offline. Modes blend into each other.
+ * per streamed burst ({@link #pulse}), ripples while speaking. Offline it
+ * goes dark like an unpowered instrument: broken steel rings, and only the
+ * centre pip lit in the danger color (the fault lamp). Modes blend into each
+ * other.
  * <p>
  * A single ValueAnimator drives the frames, and only while
- * {@link #setRunning} is on and reduce motion is off (it also rests once the
- * offline look has settled); otherwise the core renders one static frame per
- * state change.
+ * {@link #setRunning} is on, the view is really on screen, reduce motion is
+ * off and the phone's animations are on (it also rests once the offline look
+ * has settled). Otherwise the core renders one static frame per state
+ * change, so the drawing always matches the current mode.
  */
 public final class CoreView extends View {
     public static final int OFFLINE = 0;
@@ -52,7 +56,11 @@ public final class CoreView extends View {
 
     private final float d;
     private final int primary, data, track, coreHot, danger;
-    private final boolean hudGlow;
+    /** The offline ink: steel at ~60%, the look of an instrument with no power. */
+    private final int dead;
+    private final boolean hud;
+    /** Cyber's bloom and glow pass (Settings › HUD effects); see {@link #setHudEffects}. */
+    private boolean hudGlow;
 
     private final Paint stroke = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -67,6 +75,13 @@ public final class CoreView extends View {
     private int mode = IDLE;
     private boolean running;
     private boolean reduceMotion;
+    /**
+     * The phone's animations are off (Accessibility › Remove animations, or an
+     * animator duration scale of 0): a loop would end on its first frame, so
+     * the core renders static frames exactly like reduce motion. Checked again
+     * each time the core starts running.
+     */
+    private boolean animatorsOff;
     private ValueAnimator loop;
     private long loopStarted;
     /** Settled offline: nothing moves, so the loop is off until the mode changes. */
@@ -107,7 +122,9 @@ public final class CoreView extends View {
             track = Theme.alpha(t.ink, 0x26);
             coreHot = t.data;
         }
-        hudGlow = t.hud && hudEffects;
+        dead = Theme.alpha(t.faint, 0x99);
+        hud = t.hud;
+        hudGlow = hud && hudEffects;
         stroke.setStyle(Paint.Style.STROKE);
         stroke.setStrokeCap(Paint.Cap.BUTT);
         fill.setStyle(Paint.Style.FILL);
@@ -130,17 +147,20 @@ public final class CoreView extends View {
     public void setMode(int m) {
         if (m == mode) return;
         mode = m;
-        if (!animating()) applyTargets(true);
         if (parked) {
             parked = false;
             updateLoop();
         }
+        // Without a live frame loop nothing would ever ease the levels toward the
+        // new look: snap them now, so a static core never shows a stale mode.
+        if (!framesFlow()) applyTargets(true);
         invalidate();
     }
 
     /** A burst of streamed text arrived: kick the core and (rate-limited) send out a wave. */
     public void pulse() {
-        if (!animating()) return;
+        // Only a running loop decays a pulse; without one it would pile up and stick.
+        if (!framesFlow()) return;
         long now = SystemClock.uptimeMillis();
         if (now - lastPulse < 120) return;
         lastPulse = now;
@@ -152,10 +172,16 @@ public final class CoreView extends View {
         }
     }
 
-    /** Runs the animation loop (call with true only while the screen is visible). */
+    /**
+     * Runs the animation loop (call with true only while the screen is
+     * visible). Each start checks again whether the phone's animations are on.
+     */
     public void setRunning(boolean on) {
+        if (on && !running) animatorsOff = !systemAnimationsOn(getContext());
         running = on;
+        if (!animating()) applyTargets(true);
         updateLoop();
+        invalidate();
     }
 
     /** Static rendering with no animators (Settings › Reduce motion). */
@@ -167,18 +193,81 @@ public final class CoreView extends View {
         invalidate();
     }
 
+    /**
+     * Cyber's soft bloom and glow ring follow Settings › HUD effects, which
+     * can change while this view lives (Settings is a page over the tabs).
+     */
+    public void setHudEffects(boolean on) {
+        boolean g = hud && on;
+        if (g == hudGlow) return;
+        hudGlow = g;
+        invalidate();
+    }
+
+    /** Whether the bloom and glow ring are drawn (Cyber with HUD effects on). */
+    public boolean hudGlow() {
+        return hudGlow;
+    }
+
     /** Whether the frame loop is live (running, or about to restart). */
     public boolean isAnimating() {
         return loop != null || restartPending;
     }
 
+    /**
+     * The mode the drawing has fully settled into, or -1 while it is still
+     * blending between looks (a static core must always report its mode).
+     */
+    public int shownMode() {
+        boolean settled = near(lvThink, mode == THINKING ? 1f : mode == STREAMING ? 0.5f : 0f)
+                && near(lvSpeak, mode == SPEAKING ? 1f : 0f) && near(lvScan, mode == SCANNING ? 1f : 0f)
+                && near(lvOff, mode == OFFLINE ? 1f : 0f) && near(lvEnergy, tEnergy()) && pulse < 0.01f;
+        return settled ? mode : -1;
+    }
+
+    private static boolean near(float a, float b) {
+        return Math.abs(a - b) < 0.01f;
+    }
+
+    /** Motion is wanted: running, reduce motion off, and the phone's animations on. */
     private boolean animating() {
-        return running && !reduceMotion;
+        return running && !reduceMotion && !animatorsOff;
+    }
+
+    /** Frames are actually being produced (or resume shortly), so levels ease on their own. */
+    private boolean framesFlow() {
+        return animating() && (loop != null || restartPending);
+    }
+
+    /**
+     * False when the phone's animator duration scale is 0 (Developer options,
+     * or Accessibility › Remove animations): ValueAnimators then end on their
+     * first frame. API 26+ asks ValueAnimator; older phones read the setting.
+     */
+    public static boolean systemAnimationsOn(Context c) {
+        if (Build.VERSION.SDK_INT >= 26) {
+            try {
+                Object on = ValueAnimator.class.getMethod("areAnimatorsEnabled").invoke(null);
+                if (on instanceof Boolean) return (Boolean) on;
+            } catch (Exception ignored) {
+                // Fall through to the setting.
+            }
+        }
+        try {
+            return android.provider.Settings.Global.getFloat(c.getContentResolver(),
+                    android.provider.Settings.Global.ANIMATOR_DURATION_SCALE, 1f) != 0f;
+        } catch (RuntimeException e) {
+            return true;
+        }
     }
 
     private void updateLoop() {
-        boolean want = animating() && !parked && isAttachedToWindow();
+        // Like Widgets.Animated: no frames unless the core is really on screen.
+        boolean want = animating() && !parked && isAttachedToWindow() && getWindowVisibility() == VISIBLE
+                && isShown();
         if (want && loop == null) {
+            removeCallbacks(restart);
+            restartPending = false;
             lastFrame = 0;
             loopStarted = SystemClock.uptimeMillis();
             final ValueAnimator l = ValueAnimator.ofFloat(0f, 1f);
@@ -200,9 +289,12 @@ public final class CoreView extends View {
                     loop = null;
                     // Ending on its own means something capped the repeats: start again
                     // shortly (posted, never from inside the frame). Ending at once
-                    // means system animations are off: stay static.
+                    // means the phone's animations are off: from now on the core is
+                    // static like reduce motion, so every later mode change and pulse
+                    // takes the static path instead of waiting for frames.
                     if (SystemClock.uptimeMillis() - loopStarted < 500) {
-                        applyTargets(false);
+                        animatorsOff = true;
+                        applyTargets(true);
                         invalidate();
                     } else {
                         restartPending = true;
@@ -212,7 +304,8 @@ public final class CoreView extends View {
             });
             loop = l;
             l.start();
-        } else if (!want && (loop != null || restartPending)) {
+        } else if (!want) {
+            // No frames from here on: settle every level at the mode's look.
             stopLoop();
             applyTargets(false);
             invalidate();
@@ -265,7 +358,19 @@ public final class CoreView extends View {
     @Override
     protected void onDetachedFromWindow() {
         super.onDetachedFromWindow();
-        stopLoop();
+        updateLoop();
+    }
+
+    @Override
+    protected void onWindowVisibilityChanged(int visibility) {
+        super.onWindowVisibilityChanged(visibility);
+        updateLoop();
+    }
+
+    @Override
+    protected void onVisibilityChanged(View changedView, int visibility) {
+        super.onVisibilityChanged(changedView, visibility);
+        updateLoop();
     }
 
     // Per-mode targets -------------------------------------------------
@@ -434,9 +539,10 @@ public final class CoreView extends View {
         long now = SystemClock.uptimeMillis();
         float off = lvOff;
         float live = 1f - off;
-        int prim = blend(primary, danger, off);
-        int dat = blend(data, danger, off);
-        int trk = blend(track, Theme.alpha(danger, 0x33), off);
+        // Offline the instrument goes dark (steel, ~60%); only the centre pip keeps the danger color.
+        int prim = blend(primary, dead, off);
+        int dat = blend(data, dead, off);
+        int trk = blend(track, scaleAlpha(dead, 0.4f), off);
         float breathS = (float) Math.sin(breath * Math.PI * 2);
         float energy = Math.min(1f, lvEnergy + pulse * 0.45f);
 
@@ -528,7 +634,7 @@ public final class CoreView extends View {
         }
         if (off > 0.01f) {
             stroke.setStrokeWidth(segW * 0.85f);
-            stroke.setColor(scaleAlpha(danger, 0.62f * off));
+            stroke.setColor(scaleAlpha(dead, off));
             for (int i = 0; i < BROKEN.length; i += 2) arc(rs, -90 + BROKEN[i], BROKEN[i + 1], stroke, c);
         }
 
@@ -572,20 +678,17 @@ public final class CoreView extends View {
         float rc = R * R_CORE * (1f + 0.035f * breathS * (1f - off) + 0.09f * pulse);
         c.save();
         c.scale(rc, rc);
-        coreFill.setAlpha(Math.round(255 * (0.22f + 0.78f * energy) * (0.35f + 0.65f * live)));
+        coreFill.setAlpha(Math.round(255 * (0.22f + 0.78f * energy) * (0.08f + 0.92f * live)));
         c.drawCircle(0, 0, 1f, coreFill);
         c.restore();
-        if (off > 0.01f) {
-            fill.setColor(scaleAlpha(danger, 0.1f * off));
-            c.drawCircle(0, 0, rc, fill);
-        }
         stroke.setStrokeWidth(1.4f * d);
         stroke.setColor(scaleAlpha(prim, 0.85f * (0.55f + 0.45f * live)));
         c.drawCircle(0, 0, rc, stroke);
         stroke.setStrokeWidth(Math.max(1f, 0.8f * d));
         stroke.setColor(scaleAlpha(prim, 0.4f));
         c.drawCircle(0, 0, rc * 0.64f, stroke);
-        fill.setColor(scaleAlpha(off > 0.5f ? danger : coreHot, 0.5f + 0.5f * energy));
+        // The pip: the core's hot centre, or offline the one lit fault lamp.
+        fill.setColor(off > 0.5f ? danger : scaleAlpha(coreHot, 0.5f + 0.5f * energy));
         c.drawCircle(0, 0, rc * (0.2f + 0.05f * pulse), fill);
 
         c.restoreToCount(save);
