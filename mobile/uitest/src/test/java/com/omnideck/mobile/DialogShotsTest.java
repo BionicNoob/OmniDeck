@@ -155,6 +155,18 @@ public class DialogShotsTest extends Harness {
         close.performClick();
         idle();
         assertFalse(sheet.isShowing());
+
+        // The shell's own sheet: the status pill → connection details.
+        waitOnline();
+        click("Connection status");
+        AlertDialog link = ShadowAlertDialog.getLatestAlertDialog();
+        assertTrue(link.isShowing());
+        assertNotNull(dialogText(link, "Connected"));
+        assertNotNull(link.getButton(AlertDialog.BUTTON_NEUTRAL));
+        shootDialog("dialog-" + theme + "-connection");
+        link.getButton(AlertDialog.BUTTON_NEGATIVE).performClick();
+        idle();
+        assertFalse(link.isShowing());
     }
 
     @Test
