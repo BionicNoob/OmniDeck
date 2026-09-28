@@ -22,6 +22,7 @@ import com.omnideck.mobile.core.HostPort;
 import com.omnideck.mobile.core.LanScanner;
 import com.omnideck.mobile.core.ModelInfo;
 import com.omnideck.mobile.core.OllamaClient;
+import com.omnideck.mobile.core.ReplyError;
 import com.omnideck.mobile.core.ServerInfo;
 import com.omnideck.mobile.core.Telemetry;
 import com.omnideck.mobile.core.Vitals;
@@ -130,6 +131,8 @@ public final class Engine {
     private final List<ModelInfo> models = new ArrayList<ModelInfo>();
     private final Map<String, ModelInfo> running = new LinkedHashMap<String, ModelInfo>();
     private final Map<String, Boolean> thinkSupport = new LinkedHashMap<String, Boolean>();
+    /** Models that rejected a request because of its images (text-only, whatever /api/show said). */
+    private final java.util.Set<String> noVision = new java.util.HashSet<String>();
     private List<ServerInfo> lastScan = new ArrayList<ServerInfo>();
     private List<LanScanner.Subnet> subnets = new ArrayList<LanScanner.Subnet>();
     private boolean scanning;
@@ -163,7 +166,10 @@ public final class Engine {
         public long total;
         public double bytesPerSec;
         public boolean done;
+        /** The raw failure ("stopped" when cancelled); null while fine. */
         public String error;
+        /** The failure in plain words with what to do (e.g. check the name); null unless it failed. */
+        public String reason;
         final long startedAt = System.currentTimeMillis();
         long lastBytes;
         long lastAt = startedAt;
@@ -413,6 +419,7 @@ public final class Engine {
 
     /** True / false once known, null while unknown. */
     public Boolean supportsVision(String model) {
+        if (noVision.contains(model)) return Boolean.FALSE;
         OllamaClient.ModelDetails d = details.get(model);
         return d == null ? null : d.supports("vision");
     }
@@ -768,6 +775,7 @@ public final class Engine {
         if (changed) {
             running.clear();
             thinkSupport.clear();
+            noVision.clear();
             details.clear();
         }
         boolean wasOnline = state == State.ONLINE;
@@ -944,6 +952,7 @@ public final class Engine {
         models.clear();
         running.clear();
         thinkSupport.clear();
+        noVision.clear();
         details.clear();
         if (scanCancel != null) scanCancel.cancel();
         scanning = false;
@@ -1121,6 +1130,14 @@ public final class Engine {
                         }
                         conv = c;
                         settings.setCurrentChat(c.id);
+                        // The chat continues on the model it was used with, if that's still installed.
+                        String m = resolveExact(c.model);
+                        if (m != null && !m.equals(currentModel()) && !isEmbeddingOnly(m)) {
+                            settings.setModel(m);
+                            ensureCapabilities(m);
+                            log("info", "Model → " + m + " (the model this chat used)");
+                            notifyState();
+                        }
                         if (listener != null) listener.onConversationReplaced();
                     }
                 });
@@ -1209,6 +1226,8 @@ public final class Engine {
         /** ms from request to the first token; -1 until it arrives. */
         final java.util.concurrent.atomic.AtomicLong ttft = new java.util.concurrent.atomic.AtomicLong(-1);
         int numCtx;
+        /** Whether the request that went out carried images (explains a rejected request). */
+        volatile boolean sentImages;
 
         Job(ChatMessage target, Conversation conv) {
             this.target = target;
@@ -1290,8 +1309,16 @@ public final class Engine {
         boolean deep = deepFor(lastUser);
         final String model = routeModel(lastUser, lu != null && !lu.images.isEmpty());
         ensureCapabilities(model);
+        conv.model = currentModel();
 
-        JSONArray msgs = conv.toRequestMessages(systemPrompt(), null);
+        // A model that can't see images rejects the whole request when any message carries one,
+        // so text-only models get a marker instead. When that isn't known yet, the request asks
+        // /api/show first (off the main thread) and picks the right variant.
+        final Boolean vision = supportsVision(model);
+        final boolean chatHasImages = conv.hasImages();
+        final boolean withImages = chatHasImages && !Boolean.FALSE.equals(vision);
+        JSONArray msgs = conv.toRequestMessages(systemPrompt(), null, withImages);
+        JSONArray textOnly = withImages && vision == null ? conv.toRequestMessages(systemPrompt(), null, false) : null;
         final ChatMessage target = new ChatMessage(ChatMessage.ASSISTANT, "");
         target.model = model;
         target.streaming = true;
@@ -1301,7 +1328,10 @@ public final class Engine {
         JSONObject opts = runnerOptions(model);
         addGenerationOptions(opts);
         j.numCtx = opts.optInt("num_ctx", 0);
-        final JSONObject body = OllamaClient.chatBody(model, msgs, thinkFor(model, deep), keepAlive(), opts);
+        final Object think = thinkFor(model, deep);
+        final JSONObject body = OllamaClient.chatBody(model, msgs, think, keepAlive(), opts);
+        final JSONObject textBody = textOnly == null ? null
+                : OllamaClient.chatBody(model, textOnly, think, keepAlive(), opts);
         final boolean wasLoaded = running.containsKey(model);
         if (settings.readAloud()) speech().stop();
         final OllamaClient c = client;
@@ -1315,7 +1345,23 @@ public final class Engine {
         io.execute(new Runnable() {
             @Override
             public void run() {
-                c.chat(body, j.cancel, new OllamaClient.ChatListener() {
+                JSONObject send = body;
+                if (textBody != null) {
+                    final OllamaClient.ModelDetails d = showQuietly(c, model);
+                    if (d != null) {
+                        if (!d.supports("vision")) send = textBody;
+                        main.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                if (c != client) return;
+                                details.put(model, d);
+                                thinkSupport.put(model, d.supports("thinking"));
+                            }
+                        });
+                    }
+                }
+                j.sentImages = send == body && withImages;
+                c.chat(send, j.cancel, new OllamaClient.ChatListener() {
                     @Override
                     public void onThinking(String delta) {
                         j.firstToken();
@@ -1358,6 +1404,15 @@ public final class Engine {
         });
     }
 
+    /** /api/show on the calling (worker) thread; null when it fails. */
+    private static OllamaClient.ModelDetails showQuietly(OllamaClient c, String model) {
+        try {
+            return c.show(model);
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
     private void finish(Job j, ChatStats stats, String error, boolean cancelled, boolean wasLoaded) {
         if (job != j) return;
         main.removeCallbacks(j);
@@ -1382,8 +1437,12 @@ public final class Engine {
             log("warn", "Reply stopped · " + t.model);
             speechStop();
         } else {
+            ReplyError why = ReplyError.explain(error, t.model, j.sentImages);
             t.error = true;
-            t.stats = error == null ? "failed" : error;
+            t.errorKind = why.kind;
+            t.stats = why.stats();
+            // Retrying (regenerate) then leaves the images out for this model.
+            if (ReplyError.NO_VISION.equals(why.kind)) noVision.add(t.model);
             telemetry.errors++;
             log("error", "Reply failed · " + (error == null ? "unknown error" : Fmt.ellipsize(error, 90)));
             speechStop();
@@ -1930,9 +1989,13 @@ public final class Engine {
                                 pullCancel = null;
                                 ps.done = true;
                                 ps.error = cancelled ? "stopped" : message;
+                                ReplyError why = cancelled ? null : ReplyError.explainPull(message, n0);
+                                ps.reason = why == null ? null : ReplyError.plain(why.message);
                                 if (listener != null) listener.onPull();
                                 updateNotice(owner, n, cancelled ? "Download of **" + n0 + "** stopped."
-                                        : "Download of **" + n0 + "** failed: " + message, cancelled ? "warn" : "error");
+                                        : "Download of **" + n0 + "** failed: " + why.message
+                                        + (why.kind.equals(ReplyError.OTHER) ? "" : "\n`" + message + "`"),
+                                        cancelled ? "warn" : "error");
                                 log(cancelled ? "warn" : "error", (cancelled ? "Download stopped · " : "Download failed · ") + n0);
                             }
                         });
@@ -2228,7 +2291,7 @@ public final class Engine {
         }
         final Conversation target = conv;
         final String model = currentModel();
-        JSONArray msgs = conv.toRequestMessages(systemPrompt(), null);
+        JSONArray msgs = conv.toRequestMessages(systemPrompt(), null, Boolean.TRUE.equals(supportsVision(model)));
         try {
             msgs.put(new JSONObject().put("role", "user").put("content", COMPACT_PROMPT));
         } catch (JSONException ignored) {

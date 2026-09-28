@@ -13,6 +13,8 @@ public final class Conversation {
     public String title = "";
     public long created;
     public long updated;
+    /** The model this chat was last used with ("" = none yet); reopening the chat switches back to it. */
+    public String model = "";
     public final List<ChatMessage> messages = new ArrayList<ChatMessage>();
 
     public Conversation() {
@@ -76,9 +78,19 @@ public final class Conversation {
     /**
      * The messages array for /api/chat: an optional system prompt, then every
      * entry that belongs in context, up to (not including) {@code stopBefore}
-     * when given.
+     * when given. Images are included.
      */
     public JSONArray toRequestMessages(String systemPrompt, ChatMessage stopBefore) {
+        return toRequestMessages(systemPrompt, stopBefore, true);
+    }
+
+    /**
+     * As above; with {@code includeImages} false (a model that can't see
+     * images — Ollama rejects the whole request otherwise) every image is left
+     * out and its message says so in a short marker, so the model still knows
+     * an image was shared.
+     */
+    public JSONArray toRequestMessages(String systemPrompt, ChatMessage stopBefore, boolean includeImages) {
         JSONArray arr = new JSONArray();
         try {
             if (systemPrompt != null && systemPrompt.trim().length() > 0) {
@@ -92,11 +104,16 @@ public final class Conversation {
                 if (!m.sentToModel()) continue;
                 JSONObject o = new JSONObject();
                 o.put("role", m.role);
-                o.put("content", m.content);
-                if (!m.images.isEmpty()) {
+                if (m.images.isEmpty()) {
+                    o.put("content", m.content);
+                } else if (includeImages) {
+                    o.put("content", m.content);
                     JSONArray imgs = new JSONArray();
                     for (String img : m.images) imgs.put(img);
                     o.put("images", imgs);
+                } else {
+                    String marker = imageMarker(m.images.size());
+                    o.put("content", m.content.length() > 0 ? m.content + "\n\n" + marker : marker);
                 }
                 arr.put(o);
             }
@@ -106,12 +123,19 @@ public final class Conversation {
         return arr;
     }
 
+    /** Stands in for images a text-only model isn't sent. */
+    public static String imageMarker(int count) {
+        return count == 1 ? "[An image was attached here. The current model can't see images, so it wasn't sent.]"
+                : "[" + count + " images were attached here. The current model can't see images, so they weren't sent.]";
+    }
+
     public JSONObject toJson() throws JSONException {
         JSONObject o = new JSONObject();
         o.put("id", id);
         o.put("title", title);
         o.put("created", created);
         o.put("updated", updated);
+        if (model.length() > 0) o.put("model", model);
         JSONArray arr = new JSONArray();
         for (ChatMessage m : messages) {
             if (m.streaming) continue;
@@ -127,6 +151,7 @@ public final class Conversation {
         c.title = OllamaClient.str(o, "title");
         c.created = o.optLong("created", System.currentTimeMillis());
         c.updated = o.optLong("updated", c.created);
+        c.model = OllamaClient.str(o, "model");
         JSONArray arr = o.optJSONArray("messages");
         if (arr != null) {
             for (int i = 0; i < arr.length(); i++) {

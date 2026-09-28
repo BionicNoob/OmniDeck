@@ -31,6 +31,8 @@ public final class ChatMessage {
     /** Notices: "info" | "ok" | "warn" | "error". */
     public String tone = "info";
     public boolean error;
+    /** For failed replies: the {@link ReplyError} kind (e.g. "model_missing"), "" when unknown. */
+    public String errorKind = "";
     public boolean stopped;
     /** Base64 PNG/JPEG shown under the text (screenshots from the PC). */
     public String image = "";
@@ -98,6 +100,7 @@ public final class ChatMessage {
         if (stats.length() > 0) o.put("stats", stats);
         if (!"info".equals(tone)) o.put("tone", tone);
         if (error) o.put("error", true);
+        if (errorKind.length() > 0) o.put("error_kind", errorKind);
         if (stopped) o.put("stopped", true);
         if (image.length() > 0) o.put("image", image);
         if (!images.isEmpty()) {
@@ -119,6 +122,7 @@ public final class ChatMessage {
         String tone = OllamaClient.str(o, "tone");
         m.tone = tone.length() > 0 ? tone : "info";
         m.error = o.optBoolean("error", false);
+        m.errorKind = OllamaClient.str(o, "error_kind");
         m.stopped = o.optBoolean("stopped", false);
         m.image = OllamaClient.str(o, "image");
         JSONArray a = o.optJSONArray("images");

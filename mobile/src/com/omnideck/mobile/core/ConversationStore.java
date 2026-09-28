@@ -19,12 +19,15 @@ public final class ConversationStore {
         public final String title;
         public final long updated;
         public final int count;
+        /** The model the chat was last used with ("" = unknown). */
+        public final String model;
 
-        Entry(String id, String title, long updated, int count) {
+        Entry(String id, String title, long updated, int count, String model) {
             this.id = id;
             this.title = title;
             this.updated = updated;
             this.count = count;
+            this.model = model == null ? "" : model;
         }
     }
 
@@ -105,7 +108,7 @@ public final class ConversationStore {
             for (ChatMessage m : c.messages) {
                 if (!m.isNotice()) count++;
             }
-            out.add(new Entry(c.id, c.title.length() > 0 ? c.title : "Untitled chat", c.updated, count));
+            out.add(new Entry(c.id, c.title.length() > 0 ? c.title : "Untitled chat", c.updated, count, c.model));
         }
         Collections.sort(out, new Comparator<Entry>() {
             @Override
