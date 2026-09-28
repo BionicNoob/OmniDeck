@@ -489,6 +489,68 @@ public class ToolCallingTest extends Harness {
     }
 
     @Test
+    public void theQuestionSurvivesARecreate() throws Exception {
+        tools();
+        launch("dark", MainActivity.TAB_COMMS);
+        waitOnline();
+        submit("Set the PC volume to 40");
+        waitForApproval();
+        MainActivity old = act;
+        // The phone switches to dark mode (or the user changes Appearance) while OMNI asks.
+        ctl.recreate();
+        act = ctl.get();
+        idle();
+        assertTrue(old != act);
+        AlertDialog d = waitForApproval();
+        assertTrue("shown again on the new screen", dialogShows(d, "OMNI wants to set volume to 40%"));
+        assertEquals(ToolCall.ASKING, reply().tools.get(0).state);
+        d.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+        waitReplyDone();
+        assertEquals(40, bridge.volume);
+    }
+
+    @Test
+    public void stopWhileReadingThePcsToolList() throws Exception {
+        tools();
+        launch("light", MainActivity.TAB_COMMS);
+        waitOnline();
+        // No tool list read yet, and a slow bridge: the reply waits for it.
+        assertNull(engine().toolCatalog());
+        bridge.delayMs = 1500;
+        int before = ollama.chatRequests.size();
+        submit("Set the PC volume to 40");
+        waitFor("working", () -> engine().isWorking());
+        engine().stop();
+        idle();
+        assertFalse("stops at once", engine().isWorking());
+        assertTrue(reply().stopped);
+        Thread.sleep(1800);
+        advance(200);
+        assertEquals("nothing went to the model", before, ollama.chatRequests.size());
+    }
+
+    @Test
+    public void aLateResultDoesNotBringBackADeletedChat() throws Exception {
+        tools();
+        launch("dark", MainActivity.TAB_COMMS);
+        waitOnline();
+        bridge.delayMs = 1200;
+        submit("How is the system doing?");
+        waitFor("running", () -> reply() != null && !reply().tools.isEmpty()
+                && ToolCall.RUNNING.equals(reply().tools.get(0).state));
+        String id = engine().conversation().id;
+        java.io.File f = new java.io.File(new java.io.File(act.getFilesDir(), "chats"), id + ".json");
+        waitFor("saved", f::exists);
+        engine().deleteChat(id);
+        waitFor("deleted", () -> !f.exists());
+        Thread.sleep(1600);
+        advance(500);
+        assertTrue("the bridge did answer", bridge.ranTools.contains("get_system_info"));
+        assertFalse("the chat stays deleted", f.exists());
+        assertFalse(engine().isWorking());
+    }
+
+    @Test
     public void nobodyToAskMeansNo() throws Exception {
         tools();
         launch("light", MainActivity.TAB_COMMS);
