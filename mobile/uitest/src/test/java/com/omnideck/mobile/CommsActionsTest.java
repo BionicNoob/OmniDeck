@@ -257,6 +257,40 @@ public class CommsActionsTest extends Harness {
         assertNull("Retry is only offered on the latest reply", button("Retry this reply"));
     }
 
+    @Test
+    public void aMessageTypedOfflineSendsWhenTheLinkIsBack() throws Exception {
+        launch("dark", MainActivity.TAB_COMMS);
+        waitOnline();
+        int port = ollama.port();
+        ollama.stop();
+        waitFor("link lost", () -> engine().state() != Engine.State.ONLINE);
+        submit("are you back?");
+        assertTrue(act.comms().waitingForLink());
+        assertTrue(shows("Waiting for your AI"));
+        assertEquals("kept in the composer", "are you back?", composer().getText().toString());
+        advance(300);
+        shoot("comms-dark-waiting");
+        ollama = MockOllama.start("127.0.0.1", port);
+        waitFor("sent once the link is back", () -> last(ChatMessage.USER) != null
+                && "are you back?".equals(last(ChatMessage.USER).content));
+        waitFor("reply", () -> !engine().isBusy() && last(ChatMessage.ASSISTANT) != null);
+        assertFalse(act.comms().waitingForLink());
+        assertEquals("", composer().getText().toString());
+
+        // Cancel (or emptying the composer) means it isn't sent.
+        ollama.stop();
+        waitFor("link lost again", () -> engine().state() != Engine.State.ONLINE);
+        submit("never mind");
+        assertTrue(act.comms().waitingForLink());
+        click("Don't send when the link is back");
+        assertFalse(act.comms().waitingForLink());
+        ollama = MockOllama.start("127.0.0.1", port);
+        waitFor("back", () -> engine().state() == Engine.State.ONLINE && !engine().models().isEmpty());
+        advance(500);
+        assertEquals("are you back?", last(ChatMessage.USER).content);
+        assertEquals("never mind", composer().getText().toString());
+    }
+
     // ------------------------------------------------------------------
     // Context window
     // ------------------------------------------------------------------

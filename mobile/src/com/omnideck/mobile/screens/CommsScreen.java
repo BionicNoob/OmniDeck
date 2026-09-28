@@ -74,6 +74,8 @@ public final class CommsScreen extends Screen {
     /** Hands-free: how long to wait for the spoken reply to start before listening anyway. */
     static final long SPEECH_START_WAIT_MS = 6000;
     static final long RELISTEN_POLL_MS = 350;
+    /** A message typed while offline is sent when the link returns within this long. */
+    static final long OFFLINE_SEND_MS = 10 * 60 * 1000;
 
     private MarkdownRenderer md;
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -93,6 +95,10 @@ public final class CommsScreen extends Screen {
     private boolean sawSpeech;
     private long relistenDeadline;
     private boolean speakingNow;
+    // Sent while offline: goes out when the link is back.
+    private boolean waitingForLink;
+    private boolean waitingVoice;
+    private long waitingSince;
 
     private TextView chatTitle;
     private TextView chatSub;
@@ -105,6 +111,7 @@ public final class CommsScreen extends Screen {
     private View jumpBtn;
     private LinearLayout ctxWarn;
     private TextView ctxWarnText;
+    private LinearLayout linkWait;
     private ScrollView suggestScroll;
     private LinearLayout suggestBox;
     private HorizontalScrollView attachScroll;
@@ -379,6 +386,9 @@ public final class CommsScreen extends Screen {
         ctxWarn = buildContextWarning();
         ctxWarn.setVisibility(View.GONE);
         column.addView(ctxWarn, Ui.fillW());
+        linkWait = buildLinkWait();
+        linkWait.setVisibility(View.GONE);
+        column.addView(linkWait, Ui.fillW());
 
         suggestScroll = new ScrollView(a);
         suggestScroll.setBackgroundColor(Theme.flatten(t.surface2, t.bg));
@@ -457,7 +467,6 @@ public final class CommsScreen extends Screen {
         chatSub.setPadding(0, ui.dp(3), 0, 0);
         titles.addView(chatSub);
         titles.setClickable(true);
-        titles.setContentDescription("Switch model");
         titles.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -576,6 +585,44 @@ public final class CommsScreen extends Screen {
         return bar;
     }
 
+    /** "Waiting for your AI" with Cancel, above the composer, while an offline message waits. */
+    private LinearLayout buildLinkWait() {
+        LinearLayout bar = ui.hbox();
+        // 10 + the ghost button's 4dp = the 14dp gutter.
+        bar.setPadding(ui.dp(14), ui.dp(8), ui.dp(10), ui.dp(8));
+        bar.setBackgroundColor(Theme.flatten(t.accentSoft, t.hud ? t.surface2 : t.surface));
+        ImageView icon = new ImageView(a);
+        icon.setImageDrawable(new IconDrawable(IconDrawable.WIFI, t.id == Theme.DARK ? t.data : t.accent,
+                t.id == Theme.DARK ? t.data : t.accent, ui.dp(18)));
+        icon.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        bar.addView(icon, new LinearLayout.LayoutParams(ui.dp(18), ui.dp(18)));
+        TextView text = ui.text("Waiting for your AI — this sends when the link is back.", 13, t.ink, t.body);
+        text.setLineSpacing(0, 1.15f);
+        text.setPadding(ui.dp(10), 0, ui.dp(8), 0);
+        bar.addView(text, Ui.weight(1));
+        TextView cancel = ui.button("Cancel", 0, Ui.GHOST, new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                setWaitingForLink(false, false);
+            }
+        });
+        cancel.setContentDescription("Don't send when the link is back");
+        bar.addView(cancel);
+        return bar;
+    }
+
+    private void setWaitingForLink(boolean on, boolean voice) {
+        waitingForLink = on;
+        waitingVoice = on && voice;
+        waitingSince = on ? SystemClock.uptimeMillis() : 0;
+        if (linkWait != null) linkWait.setVisibility(on ? View.VISIBLE : View.GONE);
+    }
+
+    /** True while a message typed offline waits for the link (tests). */
+    public boolean waitingForLink() {
+        return waitingForLink;
+    }
+
     private View buildComposer() {
         LinearLayout wrap = ui.vbox();
         View line = ui.divider();
@@ -624,6 +671,10 @@ public final class CommsScreen extends Screen {
             public void afterTextChanged(Editable s) {
                 updateSuggestions();
                 updateSendButton();
+                // Emptied while waiting for the link: nothing left to send.
+                if (waitingForLink && s.toString().trim().length() == 0 && pendingImages.isEmpty()) {
+                    setWaitingForLink(false, false);
+                }
             }
         });
         composer.addView(input, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
@@ -1096,7 +1147,26 @@ public final class CommsScreen extends Screen {
     public void onStateChanged() {
         updateEmptyState();
         updateHeader();
+        // The link is back (and the model list with it): send what waited.
+        if (waitingForLink && e.state() == Engine.State.ONLINE && !e.models().isEmpty()) {
+            handler.removeCallbacks(sendWaiting);
+            handler.post(sendWaiting);
+        }
     }
+
+    private final Runnable sendWaiting = new Runnable() {
+        @Override
+        public void run() {
+            if (!waitingForLink || e.state() != Engine.State.ONLINE || e.isWorking()) return;
+            boolean fresh = SystemClock.uptimeMillis() - waitingSince < OFFLINE_SEND_MS;
+            boolean voice = waitingVoice;
+            setWaitingForLink(false, false);
+            if (!fresh) return;
+            if (input.getText().toString().trim().length() == 0 && pendingImages.isEmpty()) return;
+            voiceArmed = voice;
+            submit();
+        }
+    };
 
     @Override
     public void onConversationReplaced() {
@@ -1282,6 +1352,7 @@ public final class CommsScreen extends Screen {
             return;
         }
         if (e.send(msg, pendingImages.isEmpty() ? null : new ArrayList<String>(pendingImages))) {
+            setWaitingForLink(false, false);
             clearInput();
             clearAttachments();
             scroll.stickToBottom(false);
@@ -1290,6 +1361,9 @@ public final class CommsScreen extends Screen {
                 voiceReplyId = reply != null ? reply.id : null;
             }
             a.onUserSent();
+        } else if (e.state() != Engine.State.ONLINE) {
+            // Offline: the text stays in the composer and goes out when the link is back.
+            setWaitingForLink(true, voiceTurn);
         }
     }
 
