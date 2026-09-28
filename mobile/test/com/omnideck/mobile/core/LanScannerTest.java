@@ -128,4 +128,31 @@ public class LanScannerTest {
     public void interfaceSubnetsNeverThrows() {
         assertNotNull(LanScanner.interfaceSubnets());
     }
+
+    @Test
+    public void sameSubnetsIgnoresOrderAndInterfaceNames() {
+        List<LanScanner.Subnet> a = new ArrayList<LanScanner.Subnet>();
+        a.add(subnet("192.168.1.37", 24));
+        a.add(subnet("10.0.0.5", 16));
+        List<LanScanner.Subnet> b = new ArrayList<LanScanner.Subnet>();
+        b.add(new LanScanner.Subnet("eth0", LanScanner.parseIp("10.0.0.5"), 16));
+        b.add(subnet("192.168.1.37", 24));
+        assertTrue(LanScanner.sameSubnets(a, b));
+        assertTrue(LanScanner.sameSubnets(new ArrayList<LanScanner.Subnet>(), new ArrayList<LanScanner.Subnet>()));
+
+        // Another address, another prefix, or one network more: the phone moved.
+        assertFalse(LanScanner.sameSubnets(a, Collections.singletonList(subnet("192.168.1.37", 24))));
+        List<LanScanner.Subnet> c = new ArrayList<LanScanner.Subnet>(a);
+        c.set(0, subnet("192.168.1.38", 24));
+        assertFalse(LanScanner.sameSubnets(a, c));
+        c.set(0, subnet("192.168.1.37", 23));
+        assertFalse(LanScanner.sameSubnets(a, c));
+        // Duplicates can't make different lists look alike.
+        List<LanScanner.Subnet> d = new ArrayList<LanScanner.Subnet>();
+        d.add(subnet("192.168.1.37", 24));
+        d.add(subnet("192.168.1.37", 24));
+        assertFalse(LanScanner.sameSubnets(a, d));
+        assertFalse(LanScanner.sameSubnets(a, null));
+        assertTrue(LanScanner.sameSubnets(null, null));
+    }
 }

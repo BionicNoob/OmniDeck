@@ -119,6 +119,26 @@ public final class LanScanner {
         return out;
     }
 
+    /**
+     * True when both lists hold the same networks (address and prefix; order
+     * and interface names don't matter) — i.e. the phone hasn't moved.
+     */
+    public static boolean sameSubnets(List<Subnet> a, List<Subnet> b) {
+        if (a == null || b == null) return a == b;
+        if (a.size() != b.size()) return false;
+        for (Subnet s : a) {
+            boolean found = false;
+            for (Subnet t : b) found |= s.address == t.address && s.prefix == t.prefix;
+            if (!found) return false;
+        }
+        for (Subnet t : b) {
+            boolean found = false;
+            for (Subnet s : a) found |= s.address == t.address && s.prefix == t.prefix;
+            if (!found) return false;
+        }
+        return true;
+    }
+
     public static void sortSubnets(List<Subnet> list) {
         Collections.sort(list, new java.util.Comparator<Subnet>() {
             @Override

@@ -133,7 +133,12 @@ public final class Engine {
     private List<ServerInfo> lastScan = new ArrayList<ServerInfo>();
     private List<LanScanner.Subnet> subnets = new ArrayList<LanScanner.Subnet>();
     private boolean scanning;
+    /** Whether the running scan is a full sweep (/scan), so a restart keeps it one. */
+    private boolean scanFull;
+    private int scanPort;
     private Cancellable scanCancel;
+    /** Wall-clock ms when the link came up; 0 while not online. */
+    private long onlineSince;
     private int healthFailures;
     private boolean visible;
     private int offlineRetryMs = 10000;
@@ -181,7 +186,14 @@ public final class Engine {
     // Chat
     private Conversation conv;
     private Job job;
+    /** A background model task (compact, benchmark) is running; see {@link #startAux}. */
     private boolean auxBusy;
+    private Cancellable auxCancel;
+    /** "Compaction" / "Benchmark": names the running task in stop notices. */
+    private String auxWhat = "";
+    private ChatMessage auxNotice;
+    private Conversation auxOwner;
+    private boolean auxCompacts;
     private Cancellable pullCancel;
     public String draft = "";
     private final List<long[]> timerEnds = new ArrayList<long[]>();
@@ -212,6 +224,7 @@ public final class Engine {
 
     void shutdown() {
         if (job != null) job.cancel.cancel();
+        if (auxCancel != null) auxCancel.cancel();
         if (scanCancel != null) scanCancel.cancel();
         if (pullCancel != null) pullCancel.cancel();
         main.removeCallbacksAndMessages(null);
@@ -247,6 +260,21 @@ public final class Engine {
 
     public boolean isScanning() {
         return scanning;
+    }
+
+    /**
+     * The port the current (or last) network search probes. Before the first
+     * search: the port it will use (manual address, else the last server's,
+     * else Ollama's default).
+     */
+    public int scanPort() {
+        return scanPort > 0 ? scanPort : sweepPort(HostPort.parse(settings.server(), OllamaClient.DEFAULT_PORT));
+    }
+
+    /** Milliseconds since the link to the AI came up; -1 while not online. */
+    public long linkUptimeMs() {
+        if (state != State.ONLINE || onlineSince <= 0) return -1;
+        return Math.max(0, System.currentTimeMillis() - onlineSince);
     }
 
     public List<ModelInfo> models() {
@@ -472,6 +500,8 @@ public final class Engine {
     }
 
     private void setState(State s, String detail) {
+        if (s != State.ONLINE) onlineSince = 0;
+        else if (state != State.ONLINE || onlineSince == 0) onlineSince = System.currentTimeMillis();
         state = s;
         stateDetail = detail;
         notifyState();
@@ -520,10 +550,14 @@ public final class Engine {
         public void run() {
             if (!visible) return;
             if (scanning) {
-                // The network moved under a running scan; start over on the new one.
+                // Android also reports the networks that already exist right after the
+                // callback is registered: only a real move (other subnets) restarts the
+                // scan, and a full sweep (/scan) stays a full sweep.
+                List<LanScanner.Subnet> now = testSubnets != null ? testSubnets : Net.refresh(app);
+                if (LanScanner.sameSubnets(now, subnets)) return;
                 if (scanCancel != null) scanCancel.cancel();
                 scanning = false;
-                discover(false);
+                discover(scanFull);
             } else if (state == State.ONLINE) {
                 checkHealth();
             } else {
@@ -592,19 +626,22 @@ public final class Engine {
     public void discover(final boolean full) {
         if (scanning) return;
         scanning = true;
+        scanFull = full;
         main.removeCallbacks(offlineRetry);
+        final HostPort manual = HostPort.parse(settings.server(), OllamaClient.DEFAULT_PORT);
         if (state != State.ONLINE || full) {
-            setState(State.SEARCHING, full ? "Scanning the network…" : "Looking for your AI on this network…");
+            setState(State.SEARCHING, full ? "Scanning the network…" : manual != null
+                    ? "Connecting to " + manual.label(OllamaClient.DEFAULT_PORT) + "…"
+                    : "Looking for your AI on this network…");
         } else {
             notifyState();
         }
         final Cancellable c = scanCancel = new Cancellable();
-        final HostPort manual = HostPort.parse(settings.server(), OllamaClient.DEFAULT_PORT);
         final String lastHost = settings.lastHost();
         final int lastPort = settings.lastPort();
         final List<LanScanner.Subnet> nets = testSubnets != null ? testSubnets : Net.refresh(app);
         subnets = nets;
-        final int scanPort = manual != null ? manual.port : lastPort > 0 ? lastPort : OllamaClient.DEFAULT_PORT;
+        final int scanPort = this.scanPort = sweepPort(manual);
         io.execute(new Runnable() {
             @Override
             public void run() {
@@ -667,6 +704,13 @@ public final class Engine {
                 });
             }
         });
+    }
+
+    /** Port the LAN sweep uses: the manual address's, else the last server's, else Ollama's default. */
+    private int sweepPort(HostPort manual) {
+        if (manual != null) return manual.port;
+        int last = settings.lastPort();
+        return last > 0 ? last : OllamaClient.DEFAULT_PORT;
     }
 
     private void announceScan(List<ServerInfo> all) {
@@ -876,8 +920,11 @@ public final class Engine {
         models.clear();
         running.clear();
         thinkSupport.clear();
+        details.clear();
         if (scanCancel != null) scanCancel.cancel();
         scanning = false;
+        // Leave ONLINE right away: nothing may start a request while there is no client.
+        setState(State.SEARCHING, a.length() > 0 ? "Connecting to " + a + "…" : "Looking for your AI on this network…");
         discover(false);
     }
 
@@ -899,16 +946,62 @@ public final class Engine {
         return m;
     }
 
-    private void updateNotice(ChatMessage m, String text, String tone) {
+    /**
+     * Rewrites a notice once its task finishes (download, load, benchmark…).
+     * {@code owner} is the chat the notice was posted in: when the user has
+     * switched chats since, the update still lands in that chat — the
+     * reopened copy when it is open again, else the saved file.
+     */
+    private void updateNotice(Conversation owner, ChatMessage m, String text, String tone) {
         m.content = text;
         if (tone != null) m.tone = tone;
-        if (listener != null) listener.onMessageChanged(m);
-        save();
+        if (owner == conv) {
+            if (listener != null && conv.messages.contains(m)) listener.onMessageChanged(m);
+            save(conv);
+        } else if (owner.id.equals(conv.id)) {
+            ChatMessage open = conv.find(m.id);
+            if (open == null) return;
+            open.content = text;
+            if (tone != null) open.tone = tone;
+            if (listener != null) listener.onMessageChanged(open);
+            save(conv);
+        } else {
+            patchSaved(owner.id, m.id, text, tone);
+        }
+    }
+
+    /** Live progress text for a notice; drawn only while its chat is on screen (saved when it finishes). */
+    private void showProgress(ChatMessage m, String text) {
+        m.content = text;
+        if (listener != null && conv.messages.contains(m)) listener.onMessageChanged(m);
+    }
+
+    /** Updates one notice inside a saved chat that is no longer open. */
+    private void patchSaved(final String chatId, final String messageId, final String text, final String tone) {
+        if (settings.incognito()) return;
+        disk.execute(new Runnable() {
+            @Override
+            public void run() {
+                Conversation c = store.load(chatId);
+                ChatMessage m = c == null ? null : c.find(messageId);
+                if (m == null) return;
+                m.content = text;
+                if (tone != null) m.tone = tone;
+                try {
+                    store.save(c);
+                } catch (IOException ignored) {
+                }
+            }
+        });
     }
 
     public void save() {
-        if (settings.incognito()) return;
-        final Conversation c = conv;
+        save(conv);
+    }
+
+    /** Saves {@code c} (serialized here, written on the disk thread); skipped while incognito. */
+    private void save(Conversation c) {
+        if (settings.incognito() || c == null) return;
         if (c.isEmpty()) return;
         final String json;
         try {
@@ -929,11 +1022,47 @@ public final class Engine {
     }
 
     public void newChat() {
-        if (job != null) stop();
-        save();
+        leaveChat();
         conv = new Conversation();
         settings.setCurrentChat(conv.id);
         if (listener != null) listener.onConversationReplaced();
+    }
+
+    /**
+     * Before the open chat is replaced: a streaming reply ends now and keeps
+     * its partial text (as "stopped") in this chat, a compaction of it is
+     * cancelled, and the chat is saved.
+     */
+    private void leaveChat() {
+        settleJob();
+        if (auxCompacts && auxOwner == conv) stopAux();
+        save(conv);
+    }
+
+    /**
+     * Ends the streaming reply synchronously: cancels the request and marks
+     * the partial reply "stopped" in the chat it belongs to. The request's own
+     * late finish() is ignored afterwards (it no longer owns {@link #job}).
+     * Callers save the chat. Returns the reply, or null when none streamed.
+     */
+    private ChatMessage settleJob() {
+        final Job j = job;
+        if (j == null) return null;
+        j.cancel.cancel();
+        main.removeCallbacks(j);
+        j.copy();
+        ChatMessage t = j.target;
+        t.thinking = t.thinking.trim();
+        t.streaming = false;
+        t.stopped = true;
+        t.stats = "stopped";
+        t.ttftMs = j.ttft.get();
+        job = null;
+        log("warn", "Reply stopped · " + t.model);
+        speechStop();
+        if (listener != null && j.conv == conv) listener.onMessageChanged(t);
+        notifyBusy();
+        return t;
     }
 
     public void listChats(final Callback<List<ConversationStore.Entry>> cb) {
@@ -954,8 +1083,7 @@ public final class Engine {
 
     public void openChat(final String id) {
         if (id.equals(conv.id)) return;
-        if (job != null) stop();
-        save();
+        leaveChat();
         disk.execute(new Runnable() {
             @Override
             public void run() {
@@ -979,7 +1107,8 @@ public final class Engine {
     public void deleteChat(final String id) {
         final boolean current = id.equals(conv.id);
         if (current) {
-            if (job != null) stop();
+            settleJob();
+            if (auxCompacts && auxOwner == conv) stopAux();
             conv = new Conversation();
             settings.setCurrentChat(conv.id);
             if (listener != null) listener.onConversationReplaced();
@@ -1021,7 +1150,7 @@ public final class Engine {
     }
 
     public void deleteMessage(ChatMessage m) {
-        if (job != null && job.target == m) stop();
+        if (job != null && job.target == m) settleJob();
         if (conv.messages.remove(m)) {
             if (listener != null) listener.onMessageRemoved(m);
             save();
@@ -1030,7 +1159,7 @@ public final class Engine {
 
     /** Drops this user message and everything after it; returns its text for re-editing. */
     public String editFrom(ChatMessage m) {
-        if (job != null) stop();
+        settleJob();
         int i = conv.messages.indexOf(m);
         if (i < 0) return m.content;
         while (conv.messages.size() > i) conv.messages.remove(conv.messages.size() - 1);
@@ -1046,6 +1175,8 @@ public final class Engine {
     /** A reply being streamed. Tokens accumulate off the main thread and are flushed to the UI per frame. */
     private final class Job implements Runnable {
         final ChatMessage target;
+        /** The chat the reply belongs to (saved when it ends, even after a chat switch). */
+        final Conversation conv;
         final Cancellable cancel = new Cancellable();
         final StringBuilder content = new StringBuilder();
         final StringBuilder thinking = new StringBuilder();
@@ -1055,8 +1186,9 @@ public final class Engine {
         final java.util.concurrent.atomic.AtomicLong ttft = new java.util.concurrent.atomic.AtomicLong(-1);
         int numCtx;
 
-        Job(ChatMessage target) {
+        Job(ChatMessage target, Conversation conv) {
             this.target = target;
+            this.conv = conv;
         }
 
         void firstToken() {
@@ -1077,9 +1209,14 @@ public final class Engine {
             if (settings.readAloud()) speech().feed(target.id, target.content, false);
         }
 
+        /**
+         * Copies the buffers into the message. Leading blank lines (common after
+         * an inline think block) are dropped here, on every flush, so the text
+         * read aloud while streaming and the final text share one set of offsets.
+         */
         void copy() {
             synchronized (this) {
-                target.content = content.toString();
+                target.content = stripLeadingBlank(content.toString());
                 target.thinking = thinking.toString();
             }
         }
@@ -1136,7 +1273,7 @@ public final class Engine {
         target.streaming = true;
         target.startedAt = System.currentTimeMillis();
         add(target);
-        final Job j = job = new Job(target);
+        final Job j = job = new Job(target, conv);
         JSONObject opts = runnerOptions(model);
         addGenerationOptions(opts);
         j.numCtx = opts.optInt("num_ctx", 0);
@@ -1202,7 +1339,6 @@ public final class Engine {
         main.removeCallbacks(j);
         j.copy();
         ChatMessage t = j.target;
-        t.content = stripLeadingBlank(t.content);
         t.thinking = t.thinking.trim();
         t.streaming = false;
         t.ttftMs = j.ttft.get();
@@ -1229,9 +1365,9 @@ public final class Engine {
             speechStop();
         }
         job = null;
-        if (listener != null) listener.onMessageChanged(t);
+        if (listener != null && j.conv == conv) listener.onMessageChanged(t);
         notifyBusy();
-        save();
+        save(j.conv);
         if (stats != null && wasLoaded && stats.reloaded() && !reloadHintShown) {
             reloadHintShown = true;
             notice("The PC had to reload **" + t.model + "** (" + Fmt.seconds(stats.loadMs) + "). That happens when "
@@ -1248,8 +1384,59 @@ public final class Engine {
         return s.substring(i);
     }
 
+    /** Stops the reply that's streaming, and a compaction or benchmark in progress. */
     public void stop() {
         if (job != null) job.cancel.cancel();
+        stopAux();
+    }
+
+    /**
+     * Marks a background model task (compact, benchmark) as running: new
+     * messages wait for it ({@link #isWorking()}) and {@link #stop()} cancels
+     * it. {@code notice} is the chat notice that reports on it.
+     */
+    private Cancellable startAux(String what, ChatMessage notice, boolean compacts) {
+        auxBusy = true;
+        auxCancel = new Cancellable();
+        auxWhat = what;
+        auxNotice = notice;
+        auxOwner = conv;
+        auxCompacts = compacts;
+        notifyBusy();
+        return auxCancel;
+    }
+
+    /**
+     * Called when a background task's request returns. False when the task
+     * was stopped meanwhile — the stop already cleared it and reported it, so
+     * the late result is dropped.
+     */
+    private boolean endAux(Cancellable c) {
+        if (c != auxCancel || c.isCancelled()) return false;
+        clearAux();
+        return true;
+    }
+
+    private void clearAux() {
+        auxBusy = false;
+        auxCancel = null;
+        auxNotice = null;
+        auxOwner = null;
+        auxCompacts = false;
+        notifyBusy();
+    }
+
+    /** Cancels the running compact / benchmark right away and says so in its notice. */
+    private void stopAux() {
+        Cancellable c = auxCancel;
+        if (c == null) return;
+        c.cancel();
+        String what = auxWhat;
+        ChatMessage n = auxNotice;
+        Conversation owner = auxOwner;
+        clearAux();
+        log("warn", what + " stopped");
+        if (n != null && owner != null) updateNotice(owner, n, what + " stopped.", "warn");
     }
 
     public void regenerate() {
@@ -1476,6 +1663,7 @@ public final class Engine {
     public void warm() {
         if (!requireOnline()) return;
         final String model = currentModel();
+        final Conversation owner = conv;
         final ChatMessage n = notice("Loading **" + model + "** into memory…", "info");
         final OllamaClient c = client;
         final JSONObject opts = runnerOptions(model);
@@ -1496,10 +1684,10 @@ public final class Engine {
                     @Override
                     public void run() {
                         if (fErr != null) {
-                            updateNotice(n, "Couldn't load **" + model + "**: " + fErr, "error");
+                            updateNotice(owner, n, "Couldn't load **" + model + "**: " + fErr, "error");
                             log("error", "Load failed · " + model);
                         } else {
-                            updateNotice(n, "**" + model + "** is loaded and ready (" + Fmt.seconds(fMs) + ").", "ok");
+                            updateNotice(owner, n, "**" + model + "** is loaded and ready (" + Fmt.seconds(fMs) + ").", "ok");
                             log("ok", "Model online · " + model + " (" + Fmt.seconds(fMs) + ")");
                             telemetry.lastLoadMs = fMs;
                             notifyTelemetry();
@@ -1514,6 +1702,7 @@ public final class Engine {
     public void unload(String name) {
         if (!requireOnline()) return;
         final String model = name == null || name.trim().length() == 0 ? currentModel() : resolveOrSelf(name);
+        final Conversation owner = conv;
         final ChatMessage n = notice("Unloading **" + model + "**…", "info");
         final OllamaClient c = client;
         final boolean embed = isEmbeddingOnly(model);
@@ -1532,9 +1721,9 @@ public final class Engine {
                     @Override
                     public void run() {
                         if (fErr != null) {
-                            updateNotice(n, "Couldn't unload **" + model + "**: " + fErr, "error");
+                            updateNotice(owner, n, "Couldn't unload **" + model + "**: " + fErr, "error");
                         } else {
-                            updateNotice(n, "Unloaded **" + model + "** — its memory is free on the PC.", "ok");
+                            updateNotice(owner, n, "Unloaded **" + model + "** — its memory is free on the PC.", "ok");
                             log("info", "Model offline · " + model + " (memory released)");
                         }
                         refreshModels(null);
@@ -1624,6 +1813,7 @@ public final class Engine {
         final PullState ps = pullState = new PullState(n0);
         if (listener != null) listener.onPull();
         log("info", "Download started · " + n0);
+        final Conversation owner = conv;
         final ChatMessage n = notice("Downloading **" + n0 + "** onto the PC…", "info");
         final OllamaClient c = client;
         final long[] lastUi = {0};
@@ -1661,8 +1851,7 @@ public final class Engine {
                         main.post(new Runnable() {
                             @Override
                             public void run() {
-                                n.content = text;
-                                if (listener != null) listener.onMessageChanged(n);
+                                showProgress(n, text);
                             }
                         });
                     }
@@ -1677,7 +1866,7 @@ public final class Engine {
                                 ps.status = "success";
                                 ps.completed = ps.total;
                                 if (listener != null) listener.onPull();
-                                updateNotice(n, "**" + n0 + "** is downloaded. Use it with `/model " + n0 + "`.", "ok");
+                                updateNotice(owner, n, "**" + n0 + "** is downloaded. Use it with `/model " + n0 + "`.", "ok");
                                 log("ok", "Download complete · " + n0);
                                 refreshModels(null);
                             }
@@ -1693,7 +1882,7 @@ public final class Engine {
                                 ps.done = true;
                                 ps.error = cancelled ? "stopped" : message;
                                 if (listener != null) listener.onPull();
-                                updateNotice(n, cancelled ? "Download of **" + n0 + "** stopped."
+                                updateNotice(owner, n, cancelled ? "Download of **" + n0 + "** stopped."
                                         : "Download of **" + n0 + "** failed: " + message, cancelled ? "warn" : "error");
                                 log(cancelled ? "warn" : "error", (cancelled ? "Download stopped · " : "Download failed · ") + n0);
                             }
@@ -1895,9 +2084,10 @@ public final class Engine {
             toast("Already working on it.");
             return;
         }
-        auxBusy = true;
         final String model = currentModel();
+        final Conversation owner = conv;
         final ChatMessage n = notice("Benchmarking **" + model + "**…", "info");
+        final Cancellable cancel = startAux("Benchmark", n, false);
         final OllamaClient c = client;
         JSONObject opts = runnerOptions(model);
         try {
@@ -1916,7 +2106,7 @@ public final class Engine {
             public void run() {
                 final ChatStats[] st = new ChatStats[1];
                 final String[] err = new String[1];
-                c.chat(body, new Cancellable(), new OllamaClient.ChatListener() {
+                c.chat(body, cancel, new OllamaClient.ChatListener() {
                     @Override
                     public void onThinking(String delta) {
                     }
@@ -1938,13 +2128,13 @@ public final class Engine {
                 main.post(new Runnable() {
                     @Override
                     public void run() {
-                        auxBusy = false;
+                        if (!endAux(cancel)) return;
                         if (st[0] == null) {
-                            updateNotice(n, "Benchmark failed: " + err[0], "error");
+                            updateNotice(owner, n, "Benchmark failed: " + err[0], "error");
                             return;
                         }
                         ChatStats s = st[0];
-                        updateNotice(n, "**Benchmark — " + model + "**\n"
+                        updateNotice(owner, n, "**Benchmark — " + model + "**\n"
                                 + "Load: " + Fmt.seconds(s.loadMs) + "\n"
                                 + "Prompt: " + s.promptTokens + " tok @ " + Fmt.oneDecimal(s.promptTokensPerSecond()) + " tok/s\n"
                                 + "Generate: " + s.evalTokens + " tok @ " + Fmt.oneDecimal(s.tokensPerSecond()) + " tok/s\n"
@@ -1985,7 +2175,6 @@ public final class Engine {
             notice("Nothing to compact yet — the chat is still short.", "info");
             return;
         }
-        auxBusy = true;
         final Conversation target = conv;
         final String model = currentModel();
         JSONArray msgs = conv.toRequestMessages(systemPrompt(), null);
@@ -1993,7 +2182,10 @@ public final class Engine {
             msgs.put(new JSONObject().put("role", "user").put("content", COMPACT_PROMPT));
         } catch (JSONException ignored) {
         }
+        // Everything already in the chat; what's added while the summary is written is kept after it.
+        final List<ChatMessage> before = new ArrayList<ChatMessage>(conv.messages);
         final ChatMessage n = notice("Compacting the conversation…", "info");
+        final Cancellable cancel = startAux("Compaction", n, true);
         final JSONObject body = OllamaClient.chatBody(model, msgs, thinkFor(model, false), keepAlive(),
                 runnerOptions(model));
         final OllamaClient c = client;
@@ -2002,7 +2194,7 @@ public final class Engine {
             public void run() {
                 final StringBuilder out = new StringBuilder();
                 final String[] err = new String[1];
-                c.chat(body, new Cancellable(), new OllamaClient.ChatListener() {
+                c.chat(body, cancel, new OllamaClient.ChatListener() {
                     @Override
                     public void onThinking(String delta) {
                     }
@@ -2024,13 +2216,26 @@ public final class Engine {
                 main.post(new Runnable() {
                     @Override
                     public void run() {
-                        auxBusy = false;
+                        if (!endAux(cancel)) return;
                         String summary = out.toString().trim();
                         if (err[0] != null || summary.length() == 0) {
-                            updateNotice(n, "Couldn't compact: " + (err[0] != null ? err[0] : "empty summary"), "error");
+                            updateNotice(target, n, "Couldn't compact: " + (err[0] != null ? err[0] : "empty summary"),
+                                    "error");
                             return;
                         }
                         if (conv != target) return;
+                        for (ChatMessage m : sent) {
+                            if (!conv.messages.contains(m)) {
+                                // Edited or deleted meanwhile: rewriting now would bring it back.
+                                updateNotice(target, n, "Compaction skipped — the chat changed while the summary "
+                                        + "was written. Run `/compact` again.", "warn");
+                                return;
+                            }
+                        }
+                        List<ChatMessage> added = new ArrayList<ChatMessage>();
+                        for (ChatMessage m : conv.messages) {
+                            if (m != n && !before.contains(m)) added.add(m);
+                        }
                         List<ChatMessage> keep = new ArrayList<ChatMessage>();
                         int keepFrom = Math.max(0, sent.size() - 2);
                         if (!sent.get(keepFrom).isUser() && keepFrom + 1 < sent.size()) keepFrom++;
@@ -2042,6 +2247,8 @@ public final class Engine {
                         conv.messages.addAll(keep);
                         conv.messages.add(ChatMessage.notice("Compacted " + dropped
                                 + " messages into a summary to free up context.", "ok"));
+                        conv.messages.addAll(added);
+                        log("ok", "Chat compacted · " + dropped + " messages → summary");
                         if (listener != null) listener.onConversationReplaced();
                         save();
                     }
@@ -2414,6 +2621,7 @@ public final class Engine {
         final int threads = settings.numThread();
         final Object keepAlive = keepAlive();
         final String speed = lastSpeed;
+        final Conversation owner = conv;
         final ChatMessage n = notice("Running diagnostics…", "info");
         io.execute(new Runnable() {
             @Override
@@ -2455,7 +2663,7 @@ public final class Engine {
                 main.post(new Runnable() {
                     @Override
                     public void run() {
-                        updateNotice(n, text, "info");
+                        updateNotice(owner, n, text, "info");
                     }
                 });
             }
