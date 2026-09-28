@@ -143,13 +143,17 @@ public final class SpeechText {
         return end;
     }
 
-    /** Strips Markdown so the voice reads prose, not symbols. */
+    /**
+     * Strips Markdown so the voice reads prose, not symbols. Runs on the main
+     * thread for every streamed chunk, so every pattern stays linear even on
+     * degenerate model output (bounded repeats, no nested quantifiers).
+     */
     public static String clean(String s) {
-        String t = s.replaceAll("!?\\[([^\\]]+)\\]\\([^)]*\\)", "$1");   // [text](url) → text
+        String t = s.replaceAll("!?\\[([^\\]\\n]{1,200})\\]\\([^)\\n]{0,500}\\)", "$1"); // [text](url) → text
         t = t.replaceAll("https?://\\S+", "a link");
-        t = t.replaceAll("</?[A-Za-z][A-Za-z0-9]*[^<>\\n]{0,40}>", " ");  // <br>, <sub>…
-        t = t.replaceAll("(?m)^[ \\t|:-]*-{3,}[ \\t|:-]*$", " ");         // rules, table separators
-        t = t.replaceAll("(?m)^[ \\t]*[-+*][ \\t]+", "");                  // list bullets
+        t = t.replaceAll("</?[A-Za-z][A-Za-z0-9]{0,20}[^<>\\n]{0,40}>", " ");  // <br>, <sub>…
+        t = t.replaceAll("(?m)^(?=[^\\n]*---)[ \\t|:-]+$", " ");               // rules, table separators
+        t = t.replaceAll("(?m)^[ \\t]*[-+*][ \\t]+", "");                      // list bullets
         t = t.replaceAll("(?<=\\w)_(?=\\w)", " ");                         // snake_case → words
         t = t.replaceAll("[*_`#>|~]+", "");
         t = t.replaceAll("\\s+", " ");

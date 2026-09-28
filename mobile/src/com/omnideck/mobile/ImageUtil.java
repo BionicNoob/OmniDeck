@@ -83,7 +83,7 @@ final class ImageUtil {
      * Uri (the picker hands out content:// Uris), else MediaStore's
      * "orientation" column (also filled by the system photo picker).
      */
-    static int orientation(ContentResolver cr, Uri uri) {
+    private static int orientation(ContentResolver cr, Uri uri) {
         int o = ExifOrientation.UNDEFINED;
         InputStream in = null;
         try {

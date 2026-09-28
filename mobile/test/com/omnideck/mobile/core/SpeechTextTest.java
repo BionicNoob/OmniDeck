@@ -93,6 +93,21 @@ public class SpeechTextTest {
     }
 
     @Test
+    public void degenerateOutputIsCleanedQuickly() {
+        StringBuilder dashes = new StringBuilder();
+        for (int i = 0; i < 200000; i++) dashes.append('-');
+        StringBuilder brackets = new StringBuilder();
+        for (int i = 0; i < 100000; i++) brackets.append("[a");
+        long t0 = System.nanoTime();
+        assertEquals("x", SpeechText.clean(dashes + "x").replace("-", ""));
+        assertEquals("", SpeechText.clean(dashes.toString()));
+        assertTrue(SpeechText.clean(brackets + "](").length() > 0);
+        assertEquals("ok", SpeechText.speakable(dashes + "\nok"));
+        long ms = (System.nanoTime() - t0) / 1000000L;
+        assertTrue("took " + ms + " ms", ms < 3000);
+    }
+
+    @Test
     public void legacySentenceEnds() {
         assertEquals(4, SpeechText.lastSentenceEnd("Hi.\nOk", 0));
         assertEquals(-1, SpeechText.lastSentenceEnd("3.14 is pi", 0));

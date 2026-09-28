@@ -89,8 +89,9 @@ final class Notifier {
 
     /** A /timer went off while the app was in the background (each timer gets its own notification). */
     void timer(long id, String message) {
-        post(ID_TIMER + (int) (id % 100000), CHANNEL_TIMERS, IconDrawable.HISTORY, "Time's up", message,
-                Notification.CATEGORY_ALARM, MainActivity.TAB_COMMS, "Time's up");
+        int nid = ID_TIMER + (int) ((id ^ (id >>> 32)) & 0xFFFFFF);
+        post(nid, CHANNEL_TIMERS, IconDrawable.HISTORY, "Time's up", message, Notification.CATEGORY_ALARM,
+                MainActivity.TAB_COMMS, "Time's up");
     }
 
     /** Takes back the reply / download notifications (the user is looking at the app now). */

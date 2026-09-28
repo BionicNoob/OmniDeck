@@ -750,7 +750,8 @@ public final class Engine {
                                     + " in Settings › Connection.");
                             if (!loggedOffline) {
                                 loggedOffline = true;
-                                log("warn", "Refused by " + who + " · API key " + (key.length() > 0 ? "rejected" : "missing"));
+                                log("warn", "Refused by " + who + " · API key "
+                                        + (key.length() > 0 ? "rejected" : "missing"));
                             }
                             scheduleOfflineRetry();
                         } else {
@@ -2542,6 +2543,12 @@ public final class Engine {
                             return;
                         }
                         if (conv != target) return;
+                        if (job != null) {
+                            // A reply streams into this chat: rewriting it now would detach that reply.
+                            updateNotice(target, n, "Compaction skipped — a reply started meanwhile. Run `/compact` "
+                                    + "again when it's done.", "warn");
+                            return;
+                        }
                         for (ChatMessage m : sent) {
                             if (!conv.messages.contains(m)) {
                                 // Edited or deleted meanwhile: rewriting now would bring it back.
