@@ -132,6 +132,55 @@ light → Light, dark → Dark. Always read colors from `Theme t` fields and nev
   - **Voice:** `setReadAloud`, `speakNow`, `speechStop`, `announce`.
   - **Settings:** `e.settings` holds every preference.
 
+### 3.1 Kit additions (review round 1). Use these instead of hand-rolled versions
+
+- **Dialogs:** never use a raw `AlertDialog.Builder`. Build `Ui.Sheet s = ui.sheet(eyebrow, title)` and populate it:
+  - `s.body` is a scrolling column with 18dp side padding.
+  - Content: `s.message(text)`.
+  - Buttons: `s.positive(label, Ui.PRIMARY|DANGER…, [autoDismiss,] r)`, `s.negative(label, r)`, `s.neutral(label, r)`.
+  - Options: `s.closeButton(desc)`, `s.showKeyboard(field)`, `s.onDismiss(r)`, `s.show()`, `s.dismiss()`.
+  - `s.dialog.getButton(...)` returns the themed buttons.
+  - `ui.pick(eyebrow, title, rows, …)` and `ui.confirm(title, msg, yes, danger, r)` are built on it; `Ui.Row` supports `.icon(kind)` and `.danger()`. `ui.prompt(…)` is too.
+  - Check `ui.canShowDialogs()` before showing a dialog from an async callback.
+- **Text:**
+  - Identifiers (model tags, commands, tool ids, hosts) are never upper-cased. Use `ui.mono(s)`, `ui.identOrText(s)` or `ui.labelIdent(words, ident)`.
+  - `t.labelUnits(s)` upper-cases words but keeps unit symbols (ms, s, tok/s) lower-case.
+  - Timestamps go through `ui.clock(ms, withSeconds)`, which follows the phone's 12/24-hour setting.
+- **Chips and buttons:**
+  - `ui.actionChip(text, mono, l)` is THE suggestion/action chip.
+  - `ui.chip(text, color, mono)` is a status chip.
+  - `ui.button(label, icon, style, mono, l)` returns a real Button; icon and label center together when stretched.
+  - Stroked `IconDrawable.SEND_LINE` / `PLAY_LINE` go inside buttons. Also available: `WARN`, `HEADSET`, `STOP_CIRCLE`.
+- **Live and empty states:**
+  - `ui.liveTag()` gives the one live-feed badge: `update(live, ageMs)` shows "Live · 2s", "Paused · 2m" or "Offline".
+  - `ui.setCapLive(capCard, live)` pulses the cap dot.
+  - `Sparkline.setEmptyLabel("No samples")` and `Gauge.setEmptyLabel(…)` give the shared empty look.
+- **Tokens:**
+  - `t.engagedInk` is for amber TEXT (engaged states); `t.engaged` is fills only.
+  - `t.logoCore` is the emblem core.
+  - `t.faint` is decoration only. Small text that carries information uses `t.dim` (or `t.label` for micro-caps).
+- **Animation:** extend `Widgets.Animated` (`wantsLoop()` / `makeLoop()`). The loop then runs only while the view is really on screen.
+- **Screen lifecycle:**
+  - `isShown()` is false while the app is in the background.
+  - `isSelected()` means "selected tab".
+  - `onSpeechChanged(boolean)` fires when the phone starts or stops speaking.
+- **MainActivity:**
+  - `ensureNotificationPermission()`, `stopSpeaking()`, `isSpeaking()`, `downscaleImage(b64, maxSide, cb)`.
+  - `comms().submitVoice(text)` is a spoken turn (the reply is read aloud).
+  - Comms also has `comms().addAttachment(b64, preview)` and `comms().talk()`.
+- **Engine additions:**
+  - **Link and chat:** `isWorking()` (a reply or compact/bench is running; `stop()` cancels both), `routeModel(prompt, hasImages)`, `scanPort()`, `linkUptimeMs()`, `contextFill()` (0–1+).
+  - **Voice:** `speechAvailable()`.
+  - **Keys and tokens:** `setApiKey(k)`, `setBridgeToken(t)` (binds the token to `bridgeHost()`; "" unpairs).
+  - **PC bridge:**
+    - `bridgeHost()` returns Settings' bridge address, else the AI's host.
+    - `bridgePaired()` is true only for the host the token belongs to.
+    - `bridgeTools(cb)` returns `core.BridgeTool`: name, description, params, `label()`, `summary()`, `destructive()`, `category()`, `template()`.
+    - `wakePc(cb)` (Wake-on-LAN to `settings.pcMac()`), `lockPc(cb)`.
+  - **Background:** `timers()`, `notificationsBlocked()` ("" or advice).
+  - **Errors:** `PullState.reason` is the plain-language failure. Failed replies carry `m.errorKind` (`core.ReplyError` kinds) and `m.stats = "plain · raw"`.
+  - **Preferences:** `settings.bridgeHost/pcMac/apiKey/aiTools/confirmPcActions/handsFree/notifications`.
+
 ## 4. Engineering rules
 
 - Java 8 **without lambdas** (anonymous classes), **no AndroidX**, and **minSdk 23**. Any API above 23 needs an `SDK_INT` guard.

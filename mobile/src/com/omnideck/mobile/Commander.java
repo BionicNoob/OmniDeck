@@ -65,8 +65,9 @@ public final class Commander {
             e.newChat();
             ui.toast("New chat");
         } else if ("/stop".equals(name)) {
-            if (e.isBusy()) e.stop();
-            else ui.toast("Nothing is streaming.");
+            // Also cancels a running compact / benchmark.
+            if (e.isWorking()) e.stop();
+            else ui.toast("Nothing is running.");
         } else if ("/regen".equals(name)) {
             e.regenerate();
         } else if ("/system".equals(name)) {
@@ -188,6 +189,25 @@ public final class Commander {
             e.bridgeTool("screenshot", args, "Screenshot");
         } else if ("/pcclip".equals(name)) {
             e.bridgeTool("get_clipboard", null, "PC clipboard");
+        } else if ("/wol".equals(name)) {
+            e.wakePc(new Engine.Callback<String>() {
+                @Override
+                public void done(String v, String error) {
+                    if (error != null) e.notice(error, "warn");
+                    else e.notice(v, "ok");
+                }
+            });
+        } else if ("/lock".equals(name)) {
+            if (e.settings.confirmPcActions()) {
+                ui.confirm("Lock the PC?", "The PC's screen locks right away.", "Lock", new Runnable() {
+                    @Override
+                    public void run() {
+                        lockPc();
+                    }
+                });
+            } else {
+                lockPc();
+            }
         } else if ("/pair".equals(name)) {
             e.bridgePair();
         } else if ("/desk".equals(name)) {
@@ -414,6 +434,16 @@ public final class Commander {
                     }
                 }
                 e.notice("No saved chat matches “" + name + "”. `/history` lists them.", "warn");
+            }
+        });
+    }
+
+    private void lockPc() {
+        e.lockPc(new Engine.Callback<String>() {
+            @Override
+            public void done(String v, String error) {
+                if (error != null) e.notice(error, "warn");
+                else e.notice(v, "ok");
             }
         });
     }

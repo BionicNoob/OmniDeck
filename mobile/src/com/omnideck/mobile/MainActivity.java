@@ -1004,6 +1004,14 @@ public final class MainActivity extends Activity implements Engine.Listener, The
 
     private void handleIntent(Intent intent) {
         if (intent == null) return;
+        // A tapped notification names the tab it belongs to (reply → Comms, download → Models).
+        int notifTab = intent.getIntExtra(Notifier.EXTRA_TAB, -1);
+        if (notifTab >= 0) {
+            intent.removeExtra(Notifier.EXTRA_TAB);
+            if (settingsOpen) closeSettings();
+            select(Math.max(0, Math.min(3, notifTab)), false);
+            return;
+        }
         String sc = intent.getStringExtra(EXTRA_SHORTCUT);
         if (sc != null) {
             intent.removeExtra(EXTRA_SHORTCUT);

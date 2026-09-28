@@ -8,6 +8,7 @@ import android.view.View;
 
 import com.omnideck.mobile.core.ChatMessage;
 
+import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.RobolectricTestRunner;
@@ -19,6 +20,7 @@ import org.robolectric.shadows.ShadowTextToSpeech;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Locale;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -37,6 +39,14 @@ import static org.robolectric.Shadows.shadowOf;
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 @LooperMode(LooperMode.Mode.PAUSED)
 public class VoiceLoopTest extends Harness {
+
+    /** Robolectric's TTS reports no installed voices; Speech (rightly) refuses to talk without one. */
+    @Before
+    public void installVoice() {
+        ShadowTextToSpeech.addLanguageAvailability(Locale.getDefault());
+        ShadowTextToSpeech.addLanguageAvailability(Locale.US);
+    }
+
 
     private ChatMessage last(String role) {
         return engine().conversation().lastOfRole(role);
