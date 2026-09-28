@@ -91,7 +91,7 @@ public final class Sheet {
             kicker.addView(rail, rl);
         }
         heads.addView(kicker, Ui.fillW());
-        title = ui.text(titleText == null ? "" : titleText, 17, t.inkStrong, t.bodySemi);
+        title = ui.text(titleText == null ? "" : ui.identOrText(titleText), 17, t.inkStrong, t.bodySemi);
         title.setMaxLines(3);
         title.setEllipsize(TextUtils.TruncateAt.END);
         title.setLineSpacing(0, 1.12f);

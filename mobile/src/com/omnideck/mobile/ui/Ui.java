@@ -196,6 +196,23 @@ public final class Ui {
         return sp;
     }
 
+    /**
+     * A lone identifier — no spaces, and a ':' '/' '_' or '.' in it ("llava:7b",
+     * "list_processes", "/help", "192.168.1.20") — as a {@link #mono} span;
+     * anything else (or already styled text) is returned as is. Dialog titles
+     * and pick rows go through this, so model tags look the same everywhere.
+     */
+    public CharSequence identOrText(CharSequence s) {
+        if (s == null || s instanceof Spanned || s.length() == 0 || s.length() > 80) return s;
+        String str = s.toString();
+        for (int i = 0; i < str.length(); i++) {
+            if (Character.isWhitespace(str.charAt(i))) return s;
+        }
+        boolean marked = str.indexOf(':') >= 0 || str.indexOf('/') >= 0 || str.indexOf('_') >= 0
+                || (str.indexOf('.') > 0 && str.indexOf('.') < str.length() - 1);
+        return marked ? mono(str) : s;
+    }
+
     /** Micro-caps words followed by an identifier in mono: "OMNI // llama3.2:3b". */
     public CharSequence labelIdent(String words, String ident) {
         SpannableStringBuilder sb = new SpannableStringBuilder(t.label(words));
@@ -789,7 +806,7 @@ public final class Ui {
             row.setGravity(Gravity.CENTER_VERTICAL);
             row.setBackground(pressableRow(r.highlight ? t.accentSoft : 0));
             int ink = r.danger ? t.danger : r.highlight ? hl : t.ink;
-            TextView tt = text(r.title, 15, ink, r.highlight ? t.bodySemi : t.bodyMedium);
+            TextView tt = text(identOrText(r.title), 15, ink, r.highlight ? t.bodySemi : t.bodyMedium);
             if (r.icon != 0 || r.highlight) {
                 IconDrawable lead = r.icon != 0 ? new IconDrawable(r.icon, r.danger ? t.danger : t.dim,
                         r.danger ? t.danger : t.dim, dp(18)) : null;

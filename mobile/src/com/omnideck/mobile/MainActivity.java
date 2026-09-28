@@ -430,7 +430,7 @@ public final class MainActivity extends Activity implements Engine.Listener, The
         sub.setPadding(0, ui.dp(4), 0, 0);
         subtitle = ui.label("");
         sub.addView(subtitle, Ui.wrap());
-        subtitleAddr = ui.readout("", 11, theme.dim);
+        subtitleAddr = ui.readout("", 10.5f, theme.dim);
         subtitleAddr.setEllipsize(TextUtils.TruncateAt.MIDDLE);
         subtitleAddr.setPadding(ui.dp(5), 0, 0, 0);
         sub.addView(subtitleAddr, Ui.weight(1));
@@ -440,8 +440,7 @@ public final class MainActivity extends Activity implements Engine.Listener, The
         stopSpeech = ui.iconButton(IconDrawable.STOP_CIRCLE, "Stop speaking", theme.accent, new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                engine.speechStop();
-                setSpeaking(false);
+                stopSpeaking();
             }
         });
         stopSpeech.setLayoutParams(new LinearLayout.LayoutParams(ui.dp(40), ui.dp(40)));
@@ -449,7 +448,7 @@ public final class MainActivity extends Activity implements Engine.Listener, The
         bar.addView(stopSpeech);
 
         pill = ui.hbox();
-        pill.setPadding(ui.dp(9), ui.dp(6), ui.dp(11), ui.dp(6));
+        pill.setPadding(ui.dp(9), ui.dp(6), ui.dp(10), ui.dp(6));
         dot = new Widgets.StatusDot(this);
         pill.addView(dot, new LinearLayout.LayoutParams(ui.dp(14), ui.dp(14)));
         pillText = ui.text("", theme.hud ? 10 : 12, theme.ok, theme.hud ? theme.labelFace : theme.bodySemi);
@@ -458,8 +457,8 @@ public final class MainActivity extends Activity implements Engine.Listener, The
         pill.addView(pillText);
         latencyText = ui.readout("", 11, theme.dim);
         latencyText.setPadding(ui.dp(7), 0, 0, 0);
-        // A fixed-width readout: the pill doesn't jitter as the number grows a digit.
-        latencyText.setMinWidth(ui.dp(7) + Math.round(latencyText.getPaint().measureText("999 ms")));
+        // A fixed-width readout (LAN latency is one or two digits): the pill doesn't jitter per sample.
+        latencyText.setMinWidth(ui.dp(7) + Math.round(latencyText.getPaint().measureText("99 ms")));
         latencyText.setGravity(Gravity.END);
         pill.addView(latencyText);
         pill.setContentDescription("Connection status");
@@ -579,8 +578,6 @@ public final class MainActivity extends Activity implements Engine.Listener, The
                 navIcons[i].setBackground(on ? ui.rounded(theme.accentSoft, 0, 15) : null);
             }
             navItems[i].setSelected(on);
-            boolean badged = navBadges[i].getVisibility() == View.VISIBLE;
-            navItems[i].setContentDescription(badged ? TAB_NAMES[i] + ", new reply" : TAB_NAMES[i]);
         }
         updateSpeakingUi();
     }
@@ -588,7 +585,14 @@ public final class MainActivity extends Activity implements Engine.Listener, The
     public void setBadge(int tabIndex, boolean on) {
         if (navBadges[tabIndex] == null) return;
         navBadges[tabIndex].setVisibility(on ? View.VISIBLE : View.GONE);
-        navItems[tabIndex].setContentDescription(on ? TAB_NAMES[tabIndex] + ", new reply" : TAB_NAMES[tabIndex]);
+        // TalkBack: "Comms, new reply" (View.setStateDescription is API 30).
+        if (Build.VERSION.SDK_INT >= 30) {
+            try {
+                View.class.getMethod("setStateDescription", CharSequence.class)
+                        .invoke(navItems[tabIndex], on ? "new reply" : null);
+            } catch (Exception ignored) {
+            }
+        }
     }
 
     /** Whether a tab's "unread" dot is lit. */
@@ -782,6 +786,13 @@ public final class MainActivity extends Activity implements Engine.Listener, The
 
     /** Tests: stands in for the TTS engine, whose Robolectric shadow never reports speaking. */
     Boolean speakingOverride;
+
+    /** Silences the phone now (the Stop speaking controls). */
+    public void stopSpeaking() {
+        engine.speechStop();
+        if (speakingOverride != null) speakingOverride = false;
+        setSpeaking(false);
+    }
 
     private void setSpeaking(boolean s) {
         if (s == speaking) return;

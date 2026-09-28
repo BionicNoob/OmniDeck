@@ -108,6 +108,7 @@ public final class Widgets {
             base.setColor(baseline);
             base.setStrokeWidth(Math.max(1f, d * 0.6f));
             empty = new EmptyMark(c, baseline);
+            setContentDescription(empty.label);
         }
 
         public void setColor(int c) {
@@ -126,6 +127,7 @@ public final class Widgets {
         /** The note shown while there is no data (default "No samples"). */
         public void setEmptyLabel(String s) {
             empty.label = s == null ? "" : s;
+            if (data.length == 0) setContentDescription(empty.label);
             invalidate();
         }
 
@@ -213,6 +215,7 @@ public final class Widgets {
             ticks.setColor(trackColor);
             ticks.setStrokeWidth(Math.max(1, d));
             empty = new EmptyMark(c, trackColor);
+            setContentDescription(empty.label);
         }
 
         public void setValueColor(int c) {
@@ -223,6 +226,7 @@ public final class Widgets {
         /** The note shown while there is no data (default "No samples"). */
         public void setEmptyLabel(String s) {
             empty.label = s == null ? "" : s;
+            if (fraction < 0) setContentDescription(empty.label);
             invalidate();
         }
 

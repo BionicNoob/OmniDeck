@@ -40,6 +40,7 @@ import com.omnideck.mobile.core.Commands;
 import com.omnideck.mobile.core.Conversation;
 import com.omnideck.mobile.core.ConversationStore;
 import com.omnideck.mobile.core.Fmt;
+import com.omnideck.mobile.core.Markdown;
 import com.omnideck.mobile.core.ModelInfo;
 import com.omnideck.mobile.ui.BubbleLayout;
 import com.omnideck.mobile.ui.ChatScrollView;
@@ -213,11 +214,13 @@ public final class CommsScreen extends Screen {
             bubble.addView(footer, Ui.wrap());
 
             if (m.isAssistant()) {
-                retryRow = ui.hbox();
+                // Reason above, Retry below: a weighted side-by-side row would clip the text
+                // inside the wrap-content bubble.
+                retryRow = ui.vbox();
                 retryRow.setVisibility(View.GONE);
-                retryReason = ui.text("", 13.5f, t.ink, t.body);
-                retryReason.setLineSpacing(0, 1.2f);
-                retryRow.addView(retryReason, Ui.weight(1));
+                retryReason = ui.text("", 14, t.ink, t.body);
+                retryReason.setLineSpacing(0, 1.25f);
+                retryRow.addView(retryReason, Ui.wrap());
                 retryBtn = ui.button("Retry", IconDrawable.REFRESH, Ui.SECONDARY, new View.OnClickListener() {
                     @Override
                     public void onClick(View v) {
@@ -226,9 +229,9 @@ public final class CommsScreen extends Screen {
                 });
                 retryBtn.setContentDescription("Retry this reply");
                 LinearLayout.LayoutParams blp = Ui.wrap();
-                blp.leftMargin = ui.dp(10);
+                blp.topMargin = ui.dp(10);
                 retryRow.addView(retryBtn, blp);
-                LinearLayout.LayoutParams rrl = Ui.fillW();
+                LinearLayout.LayoutParams rrl = Ui.wrap();
                 rrl.topMargin = ui.dp(10);
                 bubble.addView(retryRow, rrl);
             } else {
@@ -389,6 +392,8 @@ public final class CommsScreen extends Screen {
         attachStrip.setPadding(ui.dp(14), ui.dp(8), ui.dp(14), 0);
         attachScroll = new HorizontalScrollView(a);
         attachScroll.setHorizontalScrollBarEnabled(false);
+        // Part of the composer: same surface, so the thumbnails don't float over the chat.
+        attachScroll.setBackgroundColor(t.hud ? Theme.alpha(t.surface2, 0xE6) : t.surface);
         attachScroll.addView(attachStrip);
         attachScroll.setVisibility(View.GONE);
         column.addView(attachScroll, Ui.fillW());
@@ -479,8 +484,7 @@ public final class CommsScreen extends Screen {
             public void onClick(View v) {
                 if (speakingNow) {
                     // While the phone talks, this is its Stop control.
-                    e.speechStop();
-                    onSpeechChanged(false);
+                    a.stopSpeaking();
                     return;
                 }
                 e.setReadAloud(!e.settings.readAloud());
@@ -1068,8 +1072,7 @@ public final class CommsScreen extends Screen {
     private void showContextWarning(double fill) {
         if (ctxWarn == null) return;
         int pct = (int) Math.round(fill * 100);
-        ctxWarnText.setText("Context " + pct + "% full — the AI will start forgetting the beginning of this "
-                + "chat. Compact it to keep going.");
+        ctxWarnText.setText("Context " + pct + "% full — the start of this chat will soon drop out.");
         ctxWarn.setContentDescription("Context " + pct + " percent full");
         ctxWarn.setVisibility(View.VISIBLE);
     }
@@ -1107,6 +1110,14 @@ public final class CommsScreen extends Screen {
         updateEmptyState();
         updateHeader();
         if (m.isUser() || m.isNotice()) scroll.stickToBottom(false);
+        if (m.isAssistant()) refreshFailed();
+    }
+
+    /** Failed replies offer Retry only while they're the latest and nothing runs: re-check them. */
+    private void refreshFailed() {
+        for (Holder h : holders.values()) {
+            if (h.m.error) bind(h);
+        }
     }
 
     @Override
@@ -1140,10 +1151,7 @@ public final class CommsScreen extends Screen {
     @Override
     public void onBusyChanged() {
         updateSendButton();
-        // A failed reply's Retry shows once nothing else is running.
-        ChatMessage last = e.conversation().lastOfRole(ChatMessage.ASSISTANT);
-        Holder h = last == null ? null : holders.get(last.id);
-        if (h != null && last.error) bind(h);
+        refreshFailed();
     }
 
     @Override
@@ -1177,6 +1185,8 @@ public final class CommsScreen extends Screen {
 
     @Override
     protected void onShow() {
+        // Speech events only reach built pages: catch up (the top bar hides its Stop here).
+        speakingNow = a.isSpeaking();
         updateHeader();
         scroll.removeCallbacks(ticker);
         scroll.post(ticker);
@@ -1549,13 +1559,14 @@ public final class CommsScreen extends Screen {
         });
     }
 
-    /** The first line of a message, shortened, as the actions sheet's title. */
+    /** The first line of a message as plain text (no Markdown), shortened: the actions sheet's title. */
     private static String excerpt(ChatMessage m) {
         String s = m.content.trim();
         int nl = s.indexOf('\n');
         if (nl > 0) s = s.substring(0, nl);
+        if (!m.isUser()) s = Markdown.parse(s).text.trim();
         if (s.length() == 0) return m.images.isEmpty() && m.image.length() == 0 ? "Empty message" : "Image";
-        return "“" + Fmt.ellipsize(s, 64) + "”";
+        return "“" + Fmt.ellipsize(s, 56) + "”";
     }
 
     private void showMessageActions(final ChatMessage m) {
