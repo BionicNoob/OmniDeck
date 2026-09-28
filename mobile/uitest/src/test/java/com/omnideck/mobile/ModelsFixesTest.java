@@ -632,6 +632,20 @@ public class ModelsFixesTest extends Harness {
         View gemma = button("Suggest gemma3");
         assertEquals("gemma3", ((TextView) gemma).getText().toString());
         assertEquals(act.theme().mono, ((TextView) gemma).getTypeface());
+
+        // A model named inside a sentence is set as an identifier too.
+        pullField().setText("missing-qwen9");
+        click("Pull model");
+        waitFor("failed", () -> engine().pullState() != null && engine().pullState().done);
+        advance(100);
+        TextView reason = textView("no model called missing-qwen9");
+        assertNotNull(reason);
+        assertTrue(reason.getText() instanceof android.text.Spanned);
+        android.text.Spanned s = (android.text.Spanned) reason.getText();
+        int at = s.toString().indexOf("missing-qwen9");
+        com.omnideck.mobile.ui.Ui.IdentSpan[] spans = s.getSpans(at, at + 1, com.omnideck.mobile.ui.Ui.IdentSpan.class);
+        assertEquals(1, spans.length);
+        assertEquals(at + "missing-qwen9".length(), s.getSpanEnd(spans[0]));
     }
 
     @Test

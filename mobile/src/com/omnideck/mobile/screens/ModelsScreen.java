@@ -1334,8 +1334,10 @@ public final class ModelsScreen extends Screen {
         // A failure before any bytes arrived has no progress worth showing.
         tMeter.setVisibility(ps.done && ps.error != null && ps.total <= 0 ? View.GONE : View.VISIBLE);
         tNums.setVisibility(tBytes.length() == 0 && tRate.length() == 0 ? View.GONE : View.VISIBLE);
-        if (key.equals(tKey)) return;
-        tKey = key;
+        // The buttons act on this download: rebuild them for a new one even when its state matches.
+        String fullKey = key + "@" + System.identityHashCode(ps);
+        if (fullKey.equals(tKey)) return;
+        tKey = fullKey;
         tActions.removeAllViews();
         final Engine.PullState fps = ps;
         if ("run".equals(key)) {
