@@ -58,6 +58,16 @@ public final class IconDrawable extends Drawable {
     public static final int WIFI = 44;
     public static final int BRAIN = 45;
     public static final int STAR = 46;
+    /** Stroked paper dart (SEND is filled): for buttons next to other line icons. */
+    public static final int SEND_LINE = 47;
+    /** Stroked play triangle (PLAY is filled). */
+    public static final int PLAY_LINE = 48;
+    /** Alert triangle (warnings: context nearly full, failed reply). */
+    public static final int WARN = 49;
+    /** Headset: hands-free conversation. */
+    public static final int HEADSET = 50;
+    /** A stop square in a ring: stop speaking. */
+    public static final int STOP_CIRCLE = 51;
 
     private final int kind;
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -344,13 +354,46 @@ public final class IconDrawable extends Drawable {
             case EDIT:
                 poly(true, 16.5f, 3.5f, 20.5f, 7.5f, 8, 20, 3.5f, 20.5f, 4, 16);
                 break;
-            case REFRESH:
-                arc(12, 12, 8.5f, -30, 290);
-                poly(false, 20.5f, 3.5f, 20.5f, 8.6f, 15.4f, 8.6f);
+            case REFRESH: // rotate-cw: the arc runs into the arrowhead's corner
+                path.reset();
+                rf.set(3, 3, 21, 21);
+                path.arcTo(rf, 0, 270, true);
+                path.cubicTo(14.52f, 3, 16.93f, 4, 18.74f, 5.74f);
+                path.lineTo(21, 8);
+                c.drawPath(path, paint);
+                poly(false, 21, 3, 21, 8, 16, 8);
                 break;
             case PLAY:
                 fillStyle();
                 poly(true, 7, 4.5f, 19.5f, 12, 7, 19.5f);
+                break;
+            case PLAY_LINE:
+                poly(true, 6.5f, 3.8f, 19.5f, 12, 6.5f, 20.2f);
+                break;
+            case SEND_LINE:
+                poly(true, 4, 3.6f, 21, 12, 4, 20.4f, 6.6f, 12);
+                line(6.6f, 12, 12.5f, 12);
+                break;
+            case WARN:
+                poly(true, 12, 3.2f, 21.6f, 20, 2.4f, 20);
+                line(12, 9.5f, 12, 13.8f);
+                fillStyle();
+                circle(12, 16.9f, 1.15f);
+                break;
+            case HEADSET:
+                arc(12, 12.5f, 8.5f, 180, 180);
+                rrect(3.5f, 12.5f, 8, 18.5f, 1.8f);
+                rrect(16, 12.5f, 20.5f, 18.5f, 1.8f);
+                path.reset();
+                path.moveTo(18.25f, 18.5f);
+                path.quadTo(18.25f, 21.3f, 14.5f, 21.3f);
+                path.lineTo(12.5f, 21.3f);
+                c.drawPath(path, paint);
+                break;
+            case STOP_CIRCLE:
+                circle(12, 12, 9.5f);
+                fillStyle();
+                rrect(8.6f, 8.6f, 15.4f, 15.4f, 1.3f);
                 break;
             case BRAIN: // neural node graph
                 circle(5.5f, 6, 2.2f);

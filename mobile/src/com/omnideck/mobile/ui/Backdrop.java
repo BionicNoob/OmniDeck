@@ -37,6 +37,10 @@ public final class Backdrop extends Drawable {
             edge = 0xFF0F1216;
         }
         base.setColor(edge);
+        // The gradients span only a few color steps per channel (Dark: 7–9);
+        // dithering keeps them from drawing as concentric bands.
+        glow.setDither(true);
+        bloom.setDither(true);
         step = gridStepPx;
         grid.setColor(t.gridColor);
         grid.setStrokeWidth(1f);

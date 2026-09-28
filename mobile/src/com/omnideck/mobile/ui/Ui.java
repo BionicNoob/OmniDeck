@@ -1,34 +1,50 @@
 package com.omnideck.mobile.ui;
 
+import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Context;
-import android.content.DialogInterface;
+import android.content.ContextWrapper;
+import android.content.res.ColorStateList;
+import android.graphics.Canvas;
+import android.graphics.ColorFilter;
+import android.graphics.PixelFormat;
 import android.graphics.Typeface;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
-import android.content.res.ColorStateList;
+import android.graphics.drawable.StateListDrawable;
 import android.text.InputType;
+import android.text.Layout;
+import android.text.SpannableString;
+import android.text.SpannableStringBuilder;
+import android.text.Spanned;
+import android.text.TextPaint;
 import android.text.TextUtils;
+import android.text.style.MetricAffectingSpan;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.HapticFeedbackConstants;
+import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.inputmethod.EditorInfo;
+import android.widget.Button;
 import android.widget.EditText;
-import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.text.SimpleDateFormat;
+import java.util.Date;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * View-building kit shared by every screen, so they all speak the same
  * design language: text styles, HUD micro-caps labels, themed cards,
- * buttons, chips, toggles, inputs and dialogs.
+ * buttons, chips, toggles, inputs and dialogs (see {@link Sheet}).
  */
 public final class Ui {
     public static final int PRIMARY = 0;
@@ -41,6 +57,8 @@ public final class Ui {
     public final float density;
     /** Haptic ticks on buttons (Settings › Haptics). */
     public boolean haptics = true;
+    /** Settings › Reduce motion: dialogs appear without animation, status dots hold still. */
+    public boolean reduceMotion;
 
     public Ui(Context c, Theme t) {
         this.c = c;
@@ -134,7 +152,7 @@ public final class Ui {
 
     /** Screen / panel title in the display face. */
     public TextView title(String s, float sp) {
-        TextView v = text(t.hud ? s.toUpperCase(java.util.Locale.US) : s, sp, t.inkStrong, t.display);
+        TextView v = text(t.hud ? s.toUpperCase(Locale.US) : s, sp, t.inkStrong, t.display);
         v.setLetterSpacing(t.hud ? 0.08f : -0.01f);
         return v;
     }
@@ -167,6 +185,68 @@ public final class Ui {
         return v;
     }
 
+    /**
+     * An identifier (model tag, address, tool id, /command) to embed in other
+     * text: Share Tech Mono, original case, no tracking. Case-sensitive names
+     * are never upper-cased or set in the display face.
+     */
+    public CharSequence mono(String s) {
+        SpannableString sp = new SpannableString(s == null ? "" : s);
+        sp.setSpan(new IdentSpan(t.mono, t.hud ? 1.14f : 1.04f), 0, sp.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        return sp;
+    }
+
+    /** Micro-caps words followed by an identifier in mono: "OMNI // llama3.2:3b". */
+    public CharSequence labelIdent(String words, String ident) {
+        SpannableStringBuilder sb = new SpannableStringBuilder(t.label(words));
+        sb.append(mono(ident));
+        return sb;
+    }
+
+    /** A typeface span for identifiers inside tracked micro-caps text (drops the tracking). */
+    public static final class IdentSpan extends MetricAffectingSpan {
+        private final Typeface face;
+        private final float scale;
+
+        public IdentSpan(Typeface face, float scale) {
+            this.face = face;
+            this.scale = scale;
+        }
+
+        private void apply(TextPaint tp) {
+            tp.setTypeface(face);
+            tp.setLetterSpacing(0f);
+            tp.setTextSize(tp.getTextSize() * scale);
+        }
+
+        @Override
+        public void updateDrawState(TextPaint tp) {
+            apply(tp);
+        }
+
+        @Override
+        public void updateMeasureState(TextPaint tp) {
+            apply(tp);
+        }
+    }
+
+    private SimpleDateFormat clockFormat;
+    private String clockPattern = "";
+
+    /**
+     * A time of day in the phone's own 12/24-hour setting — the one clock
+     * format for every timestamp in the app ("19:36", "7:36 PM", "19:36:04").
+     */
+    public String clock(long ms, boolean withSeconds) {
+        boolean h24 = android.text.format.DateFormat.is24HourFormat(c);
+        String p = h24 ? (withSeconds ? "HH:mm:ss" : "HH:mm") : (withSeconds ? "h:mm:ss a" : "h:mm a");
+        if (clockFormat == null || !p.equals(clockPattern)) {
+            clockFormat = new SimpleDateFormat(p, Locale.getDefault());
+            clockPattern = p;
+        }
+        return clockFormat.format(new Date(ms));
+    }
+
     // ------------------------------------------------------------------
     // Surfaces
     // ------------------------------------------------------------------
@@ -194,30 +274,45 @@ public final class Ui {
 
     /**
      * A card with a header cap: micro-caps title on the left, optional view
-     * on the right. Returns the card; add content after the header.
+     * on the right. Returns the card; add content after the header. In Cyber
+     * a small status dot leads the title ({@link #setCapLive} makes it pulse).
      */
     public LinearLayout capCard(String title, View right) {
         LinearLayout l = vbox();
         l.setBackground(panel(true, 34));
         if (t.cardElevation > 0) l.setElevation(dp(t.cardElevation));
         LinearLayout head = hbox();
-        head.setPadding(dp(14), 0, dp(10), 0);
+        head.setPadding(dp(14), 0, dp(14), 0);
         head.setMinimumHeight(dp(34));
         if (t.hud) {
-            View tick = new View(c);
-            GradientDrawable g = new GradientDrawable();
-            g.setColor(t.accent);
-            g.setCornerRadius(dp(1));
-            tick.setBackground(g);
-            LinearLayout.LayoutParams tl = new LinearLayout.LayoutParams(dp(3), dp(10));
-            tl.rightMargin = dp(8);
-            head.addView(tick, tl);
+            Widgets.StatusDot dot = new Widgets.StatusDot(c);
+            dot.setColor(t.accent);
+            dot.setFade(true);
+            dot.setCoreFraction(1f);
+            dot.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+            LinearLayout.LayoutParams dl = new LinearLayout.LayoutParams(dp(5), dp(5));
+            dl.rightMargin = dp(8);
+            head.addView(dot, dl);
         }
         TextView tv = label(title);
         head.addView(tv, weight(1));
         if (right != null) head.addView(right);
         l.addView(head, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(34)));
         return l;
+    }
+
+    /** The cap's status dot of a {@link #capCard} (Cyber only; null otherwise). */
+    public static Widgets.StatusDot capDot(LinearLayout card) {
+        if (card == null || card.getChildCount() == 0 || !(card.getChildAt(0) instanceof LinearLayout)) return null;
+        LinearLayout head = (LinearLayout) card.getChildAt(0);
+        return head.getChildCount() > 0 && head.getChildAt(0) instanceof Widgets.StatusDot
+                ? (Widgets.StatusDot) head.getChildAt(0) : null;
+    }
+
+    /** Marks a capCard as a live feed: its cap dot breathes (unless motion is reduced). */
+    public void setCapLive(LinearLayout card, boolean live) {
+        Widgets.StatusDot d = capDot(card);
+        if (d != null) d.setPulsing(live && !reduceMotion);
     }
 
     /** Content padding inside a capCard. */
@@ -239,6 +334,14 @@ public final class Ui {
         return new RippleDrawable(ColorStateList.valueOf(rippleColor), content, null);
     }
 
+    /** A ripple-on-press background for a tappable row or card (mask = the row's bounds). */
+    public Drawable pressableRow(int fill) {
+        GradientDrawable mask = new GradientDrawable();
+        mask.setColor(0xFFFFFFFF);
+        return new RippleDrawable(ColorStateList.valueOf(Theme.alpha(t.accent, t.isDark ? 0x2E : 0x24)),
+                fill == 0 ? null : rounded(fill, 0, 0), mask);
+    }
+
     // ------------------------------------------------------------------
     // Controls
     // ------------------------------------------------------------------
@@ -247,8 +350,112 @@ public final class Ui {
         if (haptics && v != null) v.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
     }
 
+    /**
+     * A leading button icon that slides right by {@link #dx} so it stays next
+     * to the label when the button is stretched (see {@link UiButton}).
+     */
+    static final class ShiftedIcon extends Drawable {
+        final Drawable inner;
+        float dx;
+
+        ShiftedIcon(Drawable inner) {
+            this.inner = inner;
+        }
+
+        @Override
+        public void draw(Canvas canvas) {
+            int save = canvas.save();
+            canvas.translate(dx, 0);
+            inner.setBounds(getBounds());
+            inner.draw(canvas);
+            canvas.restoreToCount(save);
+        }
+
+        @Override
+        public int getIntrinsicWidth() {
+            return inner.getIntrinsicWidth();
+        }
+
+        @Override
+        public int getIntrinsicHeight() {
+            return inner.getIntrinsicHeight();
+        }
+
+        @Override
+        public void setAlpha(int alpha) {
+            inner.setAlpha(alpha);
+        }
+
+        @Override
+        public void setColorFilter(ColorFilter cf) {
+            inner.setColorFilter(cf);
+        }
+
+        @Override
+        public int getOpacity() {
+            return PixelFormat.TRANSLUCENT;
+        }
+    }
+
+    /**
+     * The themed push button (never the platform's ALL-CAPS Material one).
+     * Its padding is symmetric and the leading icon rides next to the label,
+     * so icon and label stay centred as one group however wide the button is
+     * stretched. The icon follows the text color.
+     */
+    static final class UiButton extends Button {
+        private int iconColor;
+
+        UiButton(Context c) {
+            super(c, null, 0, 0);
+            setAllCaps(false);
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            Drawable d = getCompoundDrawables()[0];
+            if (d instanceof ShiftedIcon) {
+                ShiftedIcon icon = (ShiftedIcon) d;
+                Layout l = getLayout();
+                float text = l != null && l.getLineCount() > 0 ? l.getLineWidth(0) : 0;
+                float space = getWidth() - getCompoundPaddingLeft() - getCompoundPaddingRight();
+                icon.dx = Math.max(0, (space - text) / 2f);
+                int col = getCurrentTextColor();
+                if (col != iconColor && icon.inner instanceof IconDrawable) {
+                    iconColor = col;
+                    ((IconDrawable) icon.inner).setColors(col, col);
+                }
+            }
+            super.onDraw(canvas);
+        }
+    }
+
     /** Button with optional leading icon (0 = none). */
     public TextView button(String label, int icon, int style, final View.OnClickListener l) {
+        return button(label, icon, style, false, l);
+    }
+
+    /**
+     * Button with optional leading icon (0 = none). {@code mono} sets the
+     * label in Share Tech Mono in its original case (labels that are, or end
+     * in, an identifier: "Pull llama3.2", "/pair"); otherwise Cyber shows
+     * Orbitron caps and Light/Dark Inter semibold.
+     */
+    public TextView button(CharSequence label, int icon, int style, boolean mono, final View.OnClickListener l) {
+        UiButton b = new UiButton(c);
+        styleButton(b, label, icon, style, mono);
+        b.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                tick(v);
+                if (l != null) l.onClick(v);
+            }
+        });
+        return b;
+    }
+
+    /** Applies a button style to a {@link UiButton} (also used by {@link Sheet}). */
+    void styleButton(UiButton b, CharSequence label, int icon, int style, boolean mono) {
         int fg, fill, stroke;
         switch (style) {
             case PRIMARY:
@@ -262,7 +469,7 @@ public final class Ui {
                 stroke = Theme.alpha(t.danger, 0x80);
                 break;
             case GHOST:
-                fg = t.hud ? t.accent : t.accent;
+                fg = t.accent;
                 fill = 0;
                 stroke = 0;
                 break;
@@ -272,29 +479,35 @@ public final class Ui {
                 stroke = t.hud ? t.hair : t.edge;
                 break;
         }
-        TextView b = text(t.hud ? label.toUpperCase(java.util.Locale.US) : label, t.hud ? 11 : 13.5f, fg,
-                t.hud ? t.labelFace : t.bodySemi);
-        if (t.hud) b.setLetterSpacing(0.1f);
+        boolean caps = t.hud && !mono && !(label instanceof Spanned);
+        b.setText(caps ? label.toString().toUpperCase(Locale.US) : label);
+        b.setTextSize(TypedValue.COMPLEX_UNIT_SP, mono ? 13 : t.hud ? 11 : 13.5f);
+        b.setTextColor(fg);
+        b.setTypeface(mono ? t.mono : t.hud ? t.labelFace : t.bodySemi);
+        b.setLetterSpacing(caps ? 0.1f : 0f);
+        b.setIncludeFontPadding(false);
         b.setGravity(Gravity.CENTER);
         b.setSingleLine(true);
-        b.setPadding(dp(icon != 0 ? 12 : 16), dp(10), dp(16), dp(10));
+        b.setEllipsize(TextUtils.TruncateAt.END);
+        int pad = style == GHOST ? 4 : icon != 0 ? 14 : 16;
+        b.setPadding(dp(pad), dp(10), dp(pad), dp(10));
         b.setMinHeight(dp(40));
+        b.setMinimumHeight(dp(40));
+        b.setMinWidth(dp(48));
+        b.setMinimumWidth(dp(48));
         if (icon != 0) {
-            IconDrawable d = new IconDrawable(icon, fg, fg, dp(16));
+            // Light and Dark pair line icons with a stroked dart / triangle; the filled ones stay for Cyber.
+            int kind = !t.hud && icon == IconDrawable.SEND ? IconDrawable.SEND_LINE
+                    : !t.hud && icon == IconDrawable.PLAY ? IconDrawable.PLAY_LINE : icon;
+            ShiftedIcon d = new ShiftedIcon(new IconDrawable(kind, fg, fg, dp(16)));
             d.setBounds(0, 0, dp(16), dp(16));
             b.setCompoundDrawables(d, null, null, null);
             b.setCompoundDrawablePadding(dp(7));
+        } else {
+            b.setCompoundDrawables(null, null, null, null);
         }
-        Drawable bg = rounded(fill, stroke, t.hud ? 8 : 8);
+        Drawable bg = rounded(fill, stroke, 8);
         b.setBackground(pressable(bg, Theme.alpha(style == PRIMARY ? t.onAccent : t.accent, 0x33)));
-        b.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                tick(v);
-                if (l != null) l.onClick(v);
-            }
-        });
-        return b;
     }
 
     /** Square icon-only button with a description for accessibility. */
@@ -319,25 +532,62 @@ public final class Ui {
 
     /** A small status chip ("LOADED", "VISION", "8.2B"). */
     public TextView chip(String s, int color) {
-        TextView v = text(t.hud ? s.toUpperCase(java.util.Locale.US) : s, t.hud ? 9 : 11, color,
-                t.hud ? t.labelFace : t.bodySemi);
-        if (t.hud) v.setLetterSpacing(0.1f);
+        return chip(s, color, false);
+    }
+
+    /**
+     * A small status chip. {@code mono} keeps the text's case and sets it in
+     * Share Tech Mono — for identifiers ("llama3.2:3b", "8.2B", "Q4_K_M").
+     * Status only: tappable suggestions use {@link #actionChip}.
+     */
+    public TextView chip(String s, int color, boolean mono) {
+        boolean caps = t.hud && !mono;
+        TextView v = text(caps ? s.toUpperCase(Locale.US) : s, mono ? 11.5f : t.hud ? 9 : 11, color,
+                mono ? t.mono : t.hud ? t.labelFace : t.bodySemi);
+        if (caps) v.setLetterSpacing(0.1f);
         v.setPadding(dp(7), dp(3), dp(7), dp(3));
         v.setBackground(rounded(Theme.alpha(color, t.isDark ? 0x1F : 0x17), Theme.alpha(color, 0x59), t.hud ? 4 : 6));
         return v;
     }
 
+    /**
+     * The one chip style for "tap to insert or run" suggestions: quiet
+     * fill, hairline edge, ink text. {@code mono} for identifiers
+     * (model tags, tool ids, /commands, in their own case), Inter for words.
+     */
+    public TextView actionChip(String s, boolean mono, final View.OnClickListener l) {
+        TextView v = text(s, mono ? 13 : 12.5f, t.ink, mono ? t.mono : t.bodyMedium);
+        v.setSingleLine(true);
+        v.setGravity(Gravity.CENTER);
+        v.setPadding(dp(11), dp(7), dp(11), dp(7));
+        v.setMinHeight(dp(34));
+        v.setBackground(pressable(rounded(t.chip, t.edge, 8), Theme.alpha(t.accent, 0x33)));
+        v.setContentDescription(s);
+        v.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                tick(view);
+                if (l != null) l.onClick(view);
+            }
+        });
+        return v;
+    }
+
+    /** The theme's switch: Cyber's glowing hub switch, Light's outlined one, Dark's monochrome one. */
     public Widgets.Toggle toggle(boolean on, Widgets.Toggle.OnChange l) {
         Widgets.Toggle tg;
         if (t.hud) {
-            tg = new Widgets.Toggle(c, t.accent, Theme.alpha(0xFF78A0C8, 0x1F), t.inkStrong, t.hair);
-            tg.setKnobColors(t.dim, t.onAccent);
-        } else if (t.isDark) {
-            // Monochrome, like the web Dark theme: light track + dark knob when on.
-            tg = new Widgets.Toggle(c, t.accent, 0xFF313944, 0xFF8F99A8, 0);
-            tg.setKnobColors(0xFF8F99A8, t.onAccent);
+            tg = new Widgets.Toggle(c, Theme.alpha(t.accent, 0x6B), t.toggleOff, t.accent, 0);
+            tg.setKnobColors(t.toggleKnobOff, t.accent);
+            tg.setEdgeColors(t.toggleOffEdge, t.accent);
+            tg.setKnobSizes(15f / 21f, 15f / 21f);
+            tg.setGlow(Theme.alpha(t.accent, 0x47));
         } else {
-            tg = new Widgets.Toggle(c, t.accent, 0xFFD0D7DE, 0xFFFFFFFF, 0);
+            tg = new Widgets.Toggle(c, t.accent, t.toggleOff, t.onAccent, 0);
+            tg.setKnobColors(t.toggleKnobOff, t.onAccent);
+            tg.setEdgeColors(t.toggleOffEdge, Theme.alpha(t.accent, 0));
+            tg.setEdgeWidth(t.isDark ? Math.max(1, dp(1)) : dp(1.5f));
+            tg.setKnobSizes(0.5f, 0.74f);
         }
         tg.setChecked(on, false);
         tg.setOnChange(l);
@@ -371,7 +621,12 @@ public final class Ui {
         e.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14.5f);
         e.setInputType(inputType);
         e.setPadding(dp(12), dp(10), dp(12), dp(10));
-        e.setBackground(rounded(t.input, t.hud ? t.edge : t.edge, 8));
+        // The edge lights up in the accent while the field has focus.
+        StateListDrawable bg = new StateListDrawable();
+        bg.addState(new int[]{android.R.attr.state_focused}, rounded(t.input, t.hud ? t.edgeStrong
+                : t.id == Theme.DARK ? t.data : t.accent, 8));
+        bg.addState(new int[0], rounded(t.input, t.edge, 8));
+        e.setBackground(bg);
         return e;
     }
 
@@ -382,8 +637,69 @@ public final class Ui {
         return e;
     }
 
+    /**
+     * The "live feed" tag for cards whose numbers update on their own: a
+     * breathing dot and a mono age readout ("Live · 2s"). Call
+     * {@link LiveTag#update} whenever a sample arrives (and on a slow tick).
+     */
+    public LiveTag liveTag() {
+        return new LiveTag(this);
+    }
+
+    /** See {@link #liveTag()}. */
+    public static final class LiveTag extends LinearLayout {
+        private final Ui ui;
+        private final Widgets.StatusDot dot;
+        private final TextView text;
+
+        LiveTag(Ui ui) {
+            super(ui.c);
+            this.ui = ui;
+            setOrientation(HORIZONTAL);
+            setGravity(Gravity.CENTER_VERTICAL);
+            dot = new Widgets.StatusDot(ui.c);
+            dot.setFade(true);
+            dot.setCoreFraction(1f);
+            dot.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
+            LayoutParams dl = new LayoutParams(ui.dp(6), ui.dp(6));
+            dl.rightMargin = ui.dp(6);
+            addView(dot, dl);
+            text = ui.readout("", 10.5f, ui.t.dim);
+            addView(text, wrap());
+            update(false, -1);
+        }
+
+        /**
+         * {@code live}: samples are arriving (green, breathing dot); otherwise
+         * the feed is paused or stale (static dot). {@code ageMs} &lt; 0 hides the age.
+         */
+        public void update(boolean live, long ageMs) {
+            Theme t = ui.t;
+            dot.setColor(live ? t.ok : ageMs >= 0 ? t.warn : t.faint);
+            dot.setPulsing(live && !ui.reduceMotion);
+            String word = live ? "Live" : ageMs >= 0 ? "Paused" : "Offline";
+            String s = ageMs < 0 ? word : word + " · " + age(ageMs);
+            text.setText(t.hud ? t.labelUnits(s) : s);
+            text.setTextColor(live ? t.dim : t.faint);
+            setContentDescription(s);
+        }
+
+        /** "now", "8s", "3m", "2h". */
+        public static String age(long ms) {
+            long s = Math.max(0, ms) / 1000;
+            if (s < 1) return "now";
+            if (s < 60) return s + "s";
+            if (s < 3600) return (s / 60) + "m";
+            return (s / 3600) + "h";
+        }
+
+        public boolean isPulsing() {
+            return dot.isPulsing();
+        }
+    }
+
     // ------------------------------------------------------------------
-    // Dialogs
+    // Dialogs (all built on Sheet)
     // ------------------------------------------------------------------
 
     /** A row in a pick dialog. */
@@ -393,6 +709,10 @@ public final class Ui {
         public final boolean highlight;
         public final Runnable onClick;
         public final Runnable onLongClick;
+        /** Optional leading icon (IconDrawable kind, 0 = none). */
+        public int icon;
+        /** A destructive action: shown in the danger ink. */
+        public boolean danger;
 
         public Row(CharSequence title, String detail, boolean highlight, Runnable onClick, Runnable onLongClick) {
             this.title = title;
@@ -401,44 +721,95 @@ public final class Ui {
             this.onClick = onClick;
             this.onLongClick = onLongClick;
         }
+
+        public Row icon(int kind) {
+            icon = kind;
+            return this;
+        }
+
+        public Row danger() {
+            danger = true;
+            return this;
+        }
     }
 
     public interface TextResult {
         void onText(String text);
     }
 
-    public AlertDialog pick(String title, List<Row> rows, String neutral, final Runnable onNeutral) {
-        ScrollView sv = new ScrollView(c);
-        LinearLayout box = vbox();
-        box.setPadding(0, dp(6), 0, dp(6));
-        sv.addView(box);
-        AlertDialog.Builder b = new AlertDialog.Builder(c).setTitle(title).setView(sv).setNegativeButton("Close", null);
-        if (neutral != null) {
-            b.setNeutralButton(neutral, new DialogInterface.OnClickListener() {
-                @Override
-                public void onClick(DialogInterface d, int w) {
-                    if (onNeutral != null) onNeutral.run();
-                }
-            });
+    /**
+     * A themed dialog: {@code eyebrow} is the micro-caps kicker, {@code title}
+     * the headline (pass {@link #mono} spans for identifiers). Add content to
+     * {@link Sheet#body}, actions with positive/negative/neutral, then show().
+     */
+    public Sheet sheet(String eyebrow, CharSequence title) {
+        return new Sheet(this, eyebrow, title);
+    }
+
+    /** False when the dialog's activity is finishing or gone (async callbacks after a recreate). */
+    public boolean canShowDialogs() {
+        Context x = c;
+        for (int i = 0; x != null && i < 8 && !(x instanceof Activity); i++) {
+            if (!(x instanceof ContextWrapper)) break;
+            x = ((ContextWrapper) x).getBaseContext();
         }
-        final AlertDialog dlg = b.create();
-        TypedValue tv = new TypedValue();
-        c.getTheme().resolveAttribute(android.R.attr.selectableItemBackground, tv, true);
-        for (final Row r : rows) {
+        if (x instanceof Activity) {
+            Activity a = (Activity) x;
+            return !a.isFinishing() && !a.isDestroyed();
+        }
+        return true;
+    }
+
+    /** A list of choices; tapping one closes the sheet and runs it. {@code neutral} adds a secondary action. */
+    public AlertDialog pick(String title, List<Row> rows, String neutral, final Runnable onNeutral) {
+        return pick("Select", title, rows, neutral, onNeutral);
+    }
+
+    /** {@link #pick(String, List, String, Runnable)} with its own eyebrow ("Message", "PC link"…). */
+    public AlertDialog pick(String eyebrow, CharSequence title, List<Row> rows, String neutral,
+                            final Runnable onNeutral) {
+        final Sheet s = sheet(eyebrow, title);
+        s.body.setPadding(0, dp(6), 0, dp(6));
+        int hl = t.id == Theme.DARK ? t.data : t.accent;
+        for (int i = 0; i < rows.size(); i++) {
+            final Row r = rows.get(i);
+            if (i > 0) {
+                View hair = new View(c);
+                hair.setBackgroundColor(t.hairSoft);
+                LinearLayout.LayoutParams hp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                        Math.max(1, dp(0.7f)));
+                hp.leftMargin = dp(18);
+                hp.rightMargin = dp(18);
+                s.body.addView(hair, hp);
+            }
+            // The title stays a direct child of the tappable row (TalkBack reads them together).
             LinearLayout row = vbox();
-            row.setPadding(dp(22), dp(11), dp(22), dp(11));
-            if (tv.resourceId != 0) row.setBackground(c.getDrawable(tv.resourceId));
-            TextView tt = text(r.title, 15, r.highlight ? t.accent : t.ink, t.bodyMedium);
-            row.addView(tt);
+            row.setPadding(dp(18), dp(12), dp(18), dp(12));
+            row.setMinimumHeight(dp(48));
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setBackground(pressableRow(r.highlight ? t.accentSoft : 0));
+            int ink = r.danger ? t.danger : r.highlight ? hl : t.ink;
+            TextView tt = text(r.title, 15, ink, r.highlight ? t.bodySemi : t.bodyMedium);
+            if (r.icon != 0 || r.highlight) {
+                IconDrawable lead = r.icon != 0 ? new IconDrawable(r.icon, r.danger ? t.danger : t.dim,
+                        r.danger ? t.danger : t.dim, dp(18)) : null;
+                IconDrawable check = r.highlight ? new IconDrawable(IconDrawable.CHECK, hl, hl, dp(18)) : null;
+                if (lead != null) lead.setBounds(0, 0, dp(18), dp(18));
+                if (check != null) check.setBounds(0, 0, dp(18), dp(18));
+                tt.setCompoundDrawables(lead, null, check, null);
+                tt.setCompoundDrawablePadding(dp(12));
+            }
+            row.addView(tt, fillW());
             if (r.detail != null && r.detail.length() > 0) {
-                TextView d = dim(r.detail, 12);
-                d.setPadding(0, dp(3), 0, 0);
-                row.addView(d);
+                TextView d = dim(r.detail, 12.5f);
+                d.setPadding(r.icon != 0 ? dp(30) : 0, dp(3), 0, 0);
+                row.addView(d, fillW());
             }
             row.setOnClickListener(new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
-                    dlg.dismiss();
+                    tick(v);
+                    s.dismiss();
                     if (r.onClick != null) r.onClick.run();
                 }
             });
@@ -446,46 +817,84 @@ public final class Ui {
                 row.setOnLongClickListener(new View.OnLongClickListener() {
                     @Override
                     public boolean onLongClick(View v) {
-                        dlg.dismiss();
+                        s.dismiss();
                         r.onLongClick.run();
                         return true;
                     }
                 });
             }
-            box.addView(row);
+            s.body.addView(row, fillW());
         }
         if (rows.isEmpty()) {
             TextView e = dim("Nothing here yet.", 14);
-            e.setPadding(dp(22), dp(12), dp(22), dp(12));
-            box.addView(e);
+            e.setPadding(dp(18), dp(12), dp(18), dp(12));
+            s.body.addView(e);
         }
-        dlg.show();
-        return dlg;
+        if (neutral != null) {
+            s.neutral(neutral, new Runnable() {
+                @Override
+                public void run() {
+                    if (onNeutral != null) onNeutral.run();
+                }
+            });
+        }
+        s.negative("Close", null);
+        s.footerRule(true);
+        return s.show().dialog;
     }
 
+    /** Confirmation; destructive verbs (Delete, Remove, Forget, Clear…) get the danger button. */
     public AlertDialog confirm(String title, String message, String yes, final Runnable onYes) {
-        return new AlertDialog.Builder(c).setTitle(title).setMessage(message)
-                .setPositiveButton(yes, new DialogInterface.OnClickListener() {
-                    @Override
-                    public void onClick(DialogInterface d, int w) {
-                        if (onYes != null) onYes.run();
-                    }
-                }).setNegativeButton("Cancel", null).show();
+        return confirm(title, message, yes, isDestructive(yes), onYes);
     }
 
+    public AlertDialog confirm(String title, String message, String yes, boolean danger, final Runnable onYes) {
+        Sheet s = sheet("Confirm", title);
+        if (danger) s.eyebrowColor(t.danger);
+        if (message != null && message.length() > 0) s.message(message);
+        s.negative("Cancel", null);
+        s.positive(yes, danger ? DANGER : PRIMARY, onYes);
+        return s.show().dialog;
+    }
+
+    static boolean isDestructive(String verb) {
+        String v = verb == null ? "" : verb.trim().toLowerCase(Locale.US);
+        return v.startsWith("delete") || v.startsWith("remove") || v.startsWith("forget") || v.startsWith("clear")
+                || v.startsWith("erase") || v.startsWith("wipe") || v.startsWith("unpair") || v.startsWith("discard");
+    }
+
+    /** One-line (or multi-line, by input type) text entry; OK hands the text to {@code r}. */
     public AlertDialog prompt(String title, String hint, String value, int inputType, final TextResult r) {
+        final Sheet s = sheet("Input", title);
         final EditText et = field(value, hint, inputType);
         et.setSelection(et.getText().length());
-        FrameLayout wrap = new FrameLayout(c);
-        wrap.setPadding(dp(20), dp(8), dp(20), 0);
-        wrap.addView(et);
-        return new AlertDialog.Builder(c).setTitle(title).setView(wrap)
-                .setPositiveButton("OK", new DialogInterface.OnClickListener() {
-                    @Override
-                    public void onClick(DialogInterface d, int w) {
-                        r.onText(et.getText().toString());
-                    }
-                }).setNegativeButton("Cancel", null).show();
+        boolean multi = (inputType & InputType.TYPE_TEXT_FLAG_MULTI_LINE) != 0;
+        if (!multi) {
+            et.setSingleLine(true);
+            et.setImeOptions(EditorInfo.IME_ACTION_DONE);
+        } else {
+            et.setMaxLines(6);
+        }
+        s.body.addView(et, fillW());
+        s.negative("Cancel", null);
+        final Button ok = s.positive("OK", PRIMARY, new Runnable() {
+            @Override
+            public void run() {
+                r.onText(et.getText().toString());
+            }
+        });
+        et.setOnEditorActionListener(new TextView.OnEditorActionListener() {
+            @Override
+            public boolean onEditorAction(TextView v, int actionId, KeyEvent ev) {
+                if (actionId == EditorInfo.IME_ACTION_DONE) {
+                    ok.performClick();
+                    return true;
+                }
+                return false;
+            }
+        });
+        s.showKeyboard(et);
+        return s.show().dialog;
     }
 
     public void toast(String s) {

@@ -1,12 +1,17 @@
 package com.omnideck.mobile.ui;
 
 import android.content.Context;
+import android.content.ContextWrapper;
 import android.content.res.Configuration;
 import android.graphics.Typeface;
 import android.os.Build;
 
 import com.omnideck.mobile.R;
 import com.omnideck.mobile.Settings;
+
+import java.util.Locale;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Design tokens for OMNI-DECK's three looks, taken from the updated
@@ -56,8 +61,14 @@ public final class Theme {
     public int panelHi;
     /** The chat composer card. */
     public int composerFill, composerEdge;
-    /** "Engaged" (switched on) state color — the web app's amber. */
+    /** "Engaged" (switched on) state color — the web app's amber. For fills and edges. */
     public int engaged;
+    /** Text and icons in the engaged state (Light's amber is too pale to read as ink). */
+    public int engagedInk;
+    /** The arc-reactor logo's core (never red: red means danger). */
+    public int logoCore;
+    /** Switch in the off state: track, outline, knob (the on state uses the accent). */
+    public int toggleOff, toggleOffEdge, toggleKnobOff;
     // Shape (dp)
     public float radius, radiusSm, radiusBubble;
     // Type
@@ -103,6 +114,11 @@ public final class Theme {
             warn = 0xFFFFB700;         // --neon-amber
             danger = 0xFFFF3B5C;       // --hud-danger
             engaged = 0xFFFFB700;
+            engagedInk = 0xFFFFB700;
+            logoCore = 0xFFF4F9FF;     // ink-strong core, like the launcher icon
+            toggleOff = 0x4D6E6E92;    // .hub-switch off: rgba(110,110,146,.3), hairline, steel knob
+            toggleOffEdge = 0x2E7896B2;
+            toggleKnobOff = 0xFF6C8CA6;
             userFill = 0xFF2C465E;     // chat: user bubble #2C465E, ink #EAF2F8
             userStroke = 0;
             userText = 0xFFEAF2F8;
@@ -170,7 +186,7 @@ public final class Theme {
             ink = 0xFF171717;          // --text-main
             inkStrong = 0xFF0A0A0A;
             dim = 0xFF666666;          // --text-dim
-            faint = 0xFF8C959F;
+            faint = 0xFF6A737D;        // 4.8:1 on cards: small data text stays readable
             label = 0xFF57606A;        // widget title / --ws-ink
             accent = 0xFF4A6D8C;       // --modern-accent
             accentHover = 0xFF3D5B76;  // --modern-accent-hover
@@ -181,6 +197,11 @@ public final class Theme {
             warn = 0xFF8A5E0B;         // --warn-ink
             danger = 0xFFB8362E;       // --danger-ink
             engaged = 0xFFC08A2E;
+            engagedInk = 0xFF8A5E0B;   // --warn-ink, 5.7:1 on white
+            logoCore = 0xFF4A6D8C;     // monochrome slate, like the boot emblem
+            toggleOff = 0xFFF6F8FA;    // outlined off state: 3:1 outline, slate knob
+            toggleOffEdge = 0xFF8C959F;
+            toggleKnobOff = 0xFF6A737D;
             userFill = 0xFF4A6D8C;     // user bubble = accent, white ink
             userStroke = 0;
             userText = 0xFFFFFFFF;
@@ -248,7 +269,7 @@ public final class Theme {
             ink = 0xFFE6EAF0;          // --text-main
             inkStrong = 0xFFFFFFFF;
             dim = 0xFF8F99A8;          // --text-dim
-            faint = 0xFF6B7584;
+            faint = 0xFF848E9D;        // 4.9:1 on cards, 4.6:1 on caps
             label = 0xFFB7C0CC;        // widget title
             accent = 0xFFE6EAF0;       // monochrome accent (--modern-accent)
             accentHover = 0xFFFFFFFF;
@@ -259,6 +280,11 @@ public final class Theme {
             warn = 0xFFE3B253;         // --warn-ink
             danger = 0xFFFF8A80;       // --danger-ink
             engaged = 0xFFD9A441;
+            engagedInk = 0xFFD9A441;
+            logoCore = 0xFF7EA6CC;     // --neon-cyan
+            toggleOff = 0xFF313944;    // monochrome: slate track, steel knob, light track when on
+            toggleOffEdge = 0xFF4A5462;
+            toggleKnobOff = 0xFF8F99A8;
             userFill = 0xFF2B323D;     // user bubble #2B323D, ink #E6EAF0
             userStroke = 0;
             userText = 0xFFE6EAF0;
@@ -335,7 +361,55 @@ public final class Theme {
         return (color & 0x00FFFFFF) | (Math.max(0, Math.min(255, a)) << 24);
     }
 
+    /** A translucent color blended over {@code base}: the solid color it shows as (system bars, dialogs). */
+    public static int flatten(int color, int base) {
+        int a = (color >>> 24) & 0xFF;
+        if (a == 0xFF) return color;
+        int r = (((color >> 16) & 0xFF) * a + ((base >> 16) & 0xFF) * (255 - a)) / 255;
+        int g = (((color >> 8) & 0xFF) * a + ((base >> 8) & 0xFF) * (255 - a)) / 255;
+        int b = ((color & 0xFF) * a + (base & 0xFF) * (255 - a)) / 255;
+        return 0xFF000000 | (r << 16) | (g << 8) | b;
+    }
+
     public String label(String s) {
         return labelsUpper ? s.toUpperCase(java.util.Locale.US) : s;
+    }
+
+    /** A number with a unit symbol: "2.7s", "44 ms", "40.0 tok/s", "10 tok". */
+    private static final Pattern UNIT = Pattern.compile(
+            "\\d+(?:[.,]\\d+)?\\s?(?:tok/s|t/s|tok|ms|min|s|m|h)\\b", Pattern.CASE_INSENSITIVE);
+
+    /**
+     * Like {@link #label} for readouts that mix words and measurements: the
+     * words go upper-case in Cyber, unit symbols stay lower-case ("FIRST TOKEN
+     * 0.4s", "ONLINE · 44 ms"), since "MS" or "S" would be the wrong symbol.
+     */
+    public String labelUnits(String s) {
+        if (!labelsUpper || s == null) return s;
+        StringBuilder out = new StringBuilder(s.length());
+        Matcher m = UNIT.matcher(s);
+        int at = 0;
+        while (m.find()) {
+            out.append(s.substring(at, m.start()).toUpperCase(Locale.US));
+            out.append(m.group().toLowerCase(Locale.US));
+            at = m.end();
+        }
+        out.append(s.substring(at).toUpperCase(Locale.US));
+        return out.toString();
+    }
+
+    /** Something that knows the active theme (the activity); lets drawn widgets pick fonts and inks. */
+    public interface Host {
+        Theme theme();
+    }
+
+    /** The active theme of the activity behind {@code c}, or null (unwraps dialog/theme wrappers). */
+    public static Theme from(Context c) {
+        for (int i = 0; c != null && i < 8; i++) {
+            if (c instanceof Host) return ((Host) c).theme();
+            if (!(c instanceof ContextWrapper)) break;
+            c = ((ContextWrapper) c).getBaseContext();
+        }
+        return null;
     }
 }
