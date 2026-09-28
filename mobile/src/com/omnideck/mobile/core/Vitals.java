@@ -36,7 +36,8 @@ public final class Vitals {
     private static final Pattern NUM = Pattern.compile("(-?\\d+(?:[.,]\\d+)?)");
     private static final Pattern PCT = Pattern.compile("(\\d+(?:\\.\\d+)?)\\s*%");
     private static final Pattern PAIR = Pattern.compile(
-            "(\\d+(?:\\.\\d+)?)\\s*(TB|GB|GiB|MB|MiB)?\\s*(?:/|of|out of)\\s*(\\d+(?:\\.\\d+)?)\\s*(TB|GB|GiB|MB|MiB)",
+            "(\\d+(?:\\.\\d+)?)\\s*(TB|GB|GiB|MB|MiB)?\\s*(?:free|used|available|avail)?\\s*(?:/|of|out of)\\s*"
+                    + "(\\d+(?:\\.\\d+)?)\\s*(TB|GB|GiB|MB|MiB)",
             Pattern.CASE_INSENSITIVE);
     private static final Pattern SIZE = Pattern.compile("(\\d+(?:\\.\\d+)?)\\s*(TB|GB|GiB|MB|MiB)", Pattern.CASE_INSENSITIVE);
 
