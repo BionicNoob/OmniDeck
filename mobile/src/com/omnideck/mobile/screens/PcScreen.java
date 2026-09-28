@@ -133,6 +133,8 @@ public final class PcScreen extends Screen {
     private LinearLayout powerKeys;
     private TextView wolStatus;
     private TextView powerNote;
+    /** The MAC the strip shows (the Engine learns it from system info): re-render when it changes. */
+    private String wolShown = "";
     // Guidance / pairing
     private LinearLayout noHostCard;
     private LinearLayout skeletonBox;
@@ -1821,28 +1823,44 @@ public final class PcScreen extends Screen {
     // Power
     // ------------------------------------------------------------------
 
-    /** What the power strip offers right now: Wake while the PC is away, the PC's own power tools once paired. */
+    /** One control on the power strip. */
+    private static final class PowerKey {
+        final String label;
+        final int icon;
+        final String description;
+        final View.OnClickListener onClick;
+
+        PowerKey(String label, int icon, String description, View.OnClickListener onClick) {
+            this.label = label;
+            this.icon = icon;
+            this.description = description;
+            this.onClick = onClick;
+        }
+    }
+
+    /**
+     * What the power strip offers right now: Wake while the PC is away, the
+     * PC's own power tools once paired. One or two controls are wide
+     * icon-and-label buttons; three or four share the row as console keys.
+     */
     private void renderPower() {
         powerKeys.removeAllViews();
         String mac = WakeOnLan.normalize(e.settings.pcMac());
         boolean away = state == DOWN || (state == NO_HOST && mac != null);
-        int keys = 0;
+        List<PowerKey> keys = new ArrayList<PowerKey>();
         if (away) {
-            LinearLayout w = kit.action("Wake PC", IconDrawable.POWER, new View.OnClickListener() {
+            keys.add(new PowerKey("Wake PC", IconDrawable.POWER, "Wake PC", new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
                     wake();
                 }
-            });
-            powerKeys.addView(w, Ui.weight(1));
-            keys = 1;
+            }));
         } else if (state == PAIRED && tools != null) {
-            final BridgeTool lock = BridgeTool.lockTool(tools);
             final BridgeTool sleep = PcTools.sleepTool(tools);
             final BridgeTool restart = PcTools.restartTool(tools);
             final BridgeTool shutdown = PcTools.shutdownTool(tools);
-            if (lock != null) {
-                keys = addKey(keys, kit.key("Lock", IconDrawable.LOCK, "Lock PC", new View.OnClickListener() {
+            if (BridgeTool.lockTool(tools) != null) {
+                keys.add(new PowerKey("Lock", IconDrawable.LOCK, "Lock PC", new View.OnClickListener() {
                     @Override
                     public void onClick(View v) {
                         lock();
@@ -1850,7 +1868,7 @@ public final class PcScreen extends Screen {
                 }));
             }
             if (sleep != null) {
-                keys = addKey(keys, kit.key("Sleep", IconDrawable.SLEEP, "Sleep PC", new View.OnClickListener() {
+                keys.add(new PowerKey("Sleep", IconDrawable.SLEEP, "Sleep PC", new View.OnClickListener() {
                     @Override
                     public void onClick(View v) {
                         powerTool(sleep, "Sleep");
@@ -1858,35 +1876,36 @@ public final class PcScreen extends Screen {
                 }));
             }
             if (restart != null) {
-                keys = addKey(keys, kit.key("Restart", IconDrawable.RESTART, "Restart PC",
-                        new View.OnClickListener() {
-                            @Override
-                            public void onClick(View v) {
-                                powerTool(restart, "Restart");
-                            }
-                        }));
+                keys.add(new PowerKey("Restart", IconDrawable.RESTART, "Restart PC", new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        powerTool(restart, "Restart");
+                    }
+                }));
             }
             if (shutdown != null) {
-                keys = addKey(keys, kit.key("Shut down", IconDrawable.POWER, "Shut down PC",
-                        new View.OnClickListener() {
-                            @Override
-                            public void onClick(View v) {
-                                powerTool(shutdown, "Shut down");
-                            }
-                        }));
+                keys.add(new PowerKey("Shut down", IconDrawable.POWER, "Shut down PC", new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        powerTool(shutdown, "Shut down");
+                    }
+                }));
             }
         }
+        boolean wide = keys.size() <= 2;
+        for (int i = 0; i < keys.size(); i++) {
+            PowerKey k = keys.get(i);
+            View v = wide ? kit.action(k.label, k.icon, k.onClick) : kit.key(k.label, k.icon, k.description, k.onClick);
+            v.setContentDescription(k.description);
+            if (i > 0) powerKeys.addView(ui.space(8, 1));
+            powerKeys.addView(v, Ui.weight(1));
+        }
+        wolShown = e.settings.pcMac();
         String wol = mac != null ? "WoL · " + mac : "Set up Wake-on-LAN";
         wolStatus.setText(wol);
         wolStatus.setTextColor(mac != null ? t.dim : t.hud ? t.accent : t.link);
         wolStatus.setContentDescription(mac != null ? "Wake-on-LAN: " + mac : "Set up Wake-on-LAN");
-        powerBox.setVisibility(keys > 0 ? View.VISIBLE : View.GONE);
-    }
-
-    private int addKey(int count, View key) {
-        if (count > 0) powerKeys.addView(ui.space(8, 1));
-        powerKeys.addView(key, Ui.weight(1));
-        return count + 1;
+        powerBox.setVisibility(keys.isEmpty() ? View.GONE : View.VISIBLE);
     }
 
     private void powerNote(String s, int color) {
@@ -2020,6 +2039,7 @@ public final class PcScreen extends Screen {
                 pcVitals = v;
                 clearVitalsError();
                 renderVitals(v);
+                if (!wolShown.equals(e.settings.pcMac())) renderPower(); // Wake-on-LAN learned the MAC
                 updateHeader();
                 updateAges();
                 syncMotion();

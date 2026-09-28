@@ -310,8 +310,13 @@ public final class PcKit {
         b.setPadding(ui.dp(3), ui.dp(10), ui.dp(3), ui.dp(9));
         b.setBackground(pressable(8));
         b.addView(icon(icon, t.hud ? t.accent : t.ink, 20), new LinearLayout.LayoutParams(ui.dp(20), ui.dp(20)));
-        TextView tv = ui.text(t.hud ? label.toUpperCase(Locale.US) : label, t.hud ? 8.5f : 12f, t.ink,
-                t.hud ? t.labelFace : t.bodySemi);
+        FitLabel tv = new FitLabel(ui.c);
+        tv.setText(t.hud ? label.toUpperCase(Locale.US) : label);
+        tv.setTextColor(t.ink);
+        tv.setTypeface(t.hud ? t.labelFace : t.bodySemi);
+        tv.setIncludeFontPadding(false);
+        tv.setBaseSize(TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, t.hud ? 8.5f : 12f,
+                ui.c.getResources().getDisplayMetrics()));
         if (t.hud) tv.setLetterSpacing(0.06f);
         tv.setSingleLine(true);
         tv.setEllipsize(TextUtils.TruncateAt.END);
@@ -328,6 +333,38 @@ public final class PcKit {
             }
         });
         return b;
+    }
+
+    /**
+     * A one-line label that shrinks (to 75% at most) instead of cutting off
+     * when its box is narrow: key labels on a 360dp phone or with a large
+     * system font size.
+     */
+    static final class FitLabel extends TextView {
+        private final android.text.TextPaint probe = new android.text.TextPaint();
+        private float base;
+
+        FitLabel(android.content.Context c) {
+            super(c);
+        }
+
+        void setBaseSize(float px) {
+            base = px;
+            setTextSize(TypedValue.COMPLEX_UNIT_PX, px);
+        }
+
+        @Override
+        protected void onMeasure(int widthSpec, int heightSpec) {
+            if (base > 0 && MeasureSpec.getMode(widthSpec) != MeasureSpec.UNSPECIFIED) {
+                float avail = MeasureSpec.getSize(widthSpec) - getCompoundPaddingLeft() - getCompoundPaddingRight();
+                probe.set(getPaint());
+                probe.setTextSize(base);
+                float need = probe.measureText(getText().toString());
+                float size = need > avail && avail > 0 ? Math.max(base * 0.75f, base * avail / need * 0.98f) : base;
+                if (Math.abs(size - getTextSize()) > 0.5f) setTextSize(TypedValue.COMPLEX_UNIT_PX, size);
+            }
+            super.onMeasure(widthSpec, heightSpec);
+        }
     }
 
     /** Recolors a chip made by {@link Ui#chip} (status chips that change with the link state). */
