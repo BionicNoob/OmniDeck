@@ -38,6 +38,26 @@ public final class PcTools {
         this.kit = kit;
     }
 
+    /** Words that are acronyms in a humanized id ("Restart pc" → "Restart PC", "Open url" → "Open URL"). */
+    private static final String[] ACRONYMS = {"pc", "url", "uri", "cpu", "gpu", "ram", "os", "id", "ip", "mac",
+            "usb", "dns", "api", "ui", "vpn", "ssh", "pdf", "json", "html", "hdmi", "led", "rgb", "tts", "ocr"};
+
+    /** A humanized tool or argument name with its acronyms in capitals. */
+    public static String words(String label) {
+        if (label == null || label.length() == 0) return label == null ? "" : label;
+        String[] parts = label.split(" ", -1);
+        StringBuilder sb = new StringBuilder(label.length());
+        for (int i = 0; i < parts.length; i++) {
+            if (i > 0) sb.append(' ');
+            String p = parts[i];
+            String low = p.toLowerCase(Locale.US);
+            boolean acro = false;
+            for (String a : ACRONYMS) acro |= a.equals(low);
+            sb.append(acro ? p.toUpperCase(Locale.US) : p);
+        }
+        return sb.toString();
+    }
+
     public static String groupTitle(String category) {
         if (BridgeTool.POWER.equals(category)) return "Power";
         if (BridgeTool.MEDIA.equals(category)) return "Media & sound";
@@ -139,7 +159,7 @@ public final class PcTools {
         row.setMinimumHeight(ui.dp(52));
         row.setBackground(ui.pressableRow(0));
         LinearLayout texts = ui.vbox();
-        TextView title = ui.text(tool.label(), 14.5f, t.ink, t.bodyMedium);
+        TextView title = ui.text(words(tool.label()), 14.5f, t.ink, t.bodyMedium);
         title.setSingleLine(true);
         title.setEllipsize(TextUtils.TruncateAt.END);
         texts.addView(title, Ui.fillW());

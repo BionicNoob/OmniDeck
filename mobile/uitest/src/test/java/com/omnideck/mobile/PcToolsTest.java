@@ -3,6 +3,7 @@ package com.omnideck.mobile;
 import android.app.AlertDialog;
 import android.widget.EditText;
 
+import com.omnideck.mobile.ui.PcTools;
 import com.omnideck.mobile.ui.Widgets;
 
 import org.json.JSONObject;
@@ -135,7 +136,7 @@ public class PcToolsTest extends PcBaseTest {
         // A "{url}" hint in the description becomes a required text field.
         click("Run open_url");
         AlertDialog u = latestAlert();
-        dialogField(u, "Url").setText("https://ollama.com");
+        dialogField(u, "URL").setText("https://ollama.com");
         positive(u);
         negative(waitSheet("url result", u));
         assertEquals("https://ollama.com", lastArgs("open_url").getString("url"));
@@ -154,6 +155,11 @@ public class PcToolsTest extends PcBaseTest {
         String shown = json.getText().toString();
         assertTrue(shown, shown.contains("\"level\": 40"));
         assertTrue(shown, shown.contains("\"smooth\": true"));
+        // A number that doesn't pass yet stays a number in the JSON view.
+        dialogClick(f, "Back to form");
+        dialogField(f, "Level").setText("150");
+        dialogClick(f, "Edit as JSON");
+        assertTrue(json.getText().toString(), json.getText().toString().contains("\"level\": 150"));
         json.setText("{\"level\": 55, \"smooth\": false, \"curve\": \"ease\"}");
         dialogClick(f, "Back to form");
         assertEquals("55", dialogField(f, "Level").getText().toString());
@@ -168,12 +174,23 @@ public class PcToolsTest extends PcBaseTest {
     }
 
     @Test
+    public void namesKeepTheirAcronyms() {
+        assertEquals("Restart PC", PcTools.words("Restart pc"));
+        assertEquals("Open URL", PcTools.words("Open url"));
+        assertEquals("Get CPU temp", PcTools.words("Get cpu temp"));
+        assertEquals("Send a media key", PcTools.words("Send a media key"));
+        assertEquals("Pcs", PcTools.words("Pcs"));
+    }
+
+    @Test
     public void destructiveToolsWarnAndUseTheDangerButton() throws Exception {
         richBridge(true);
         bridge.power = true;
         openRunner("cyber");
+        assertTrue(shows("Shutdown PC"));
         click("Run shutdown_pc");
         AlertDialog f = latestAlert();
+        assertTrue(dialogShows(f, "Shutdown PC"));
         assertTrue(dialogShows(f, "unsaved work"));
         assertTrue(dialogShows(f, "Run · confirm"));
         assertEquals(act.theme().danger, f.getButton(AlertDialog.BUTTON_POSITIVE).getCurrentTextColor());

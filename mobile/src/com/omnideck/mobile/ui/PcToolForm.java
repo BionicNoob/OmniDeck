@@ -80,7 +80,7 @@ public final class PcToolForm {
         this.tool = tool;
         this.onRun = onRun;
         boolean danger = tool.destructive();
-        sheet = ui.sheet(danger ? "Run · confirm" : "Run tool", tool.label());
+        sheet = ui.sheet(danger ? "Run · confirm" : "Run tool", PcTools.words(tool.label()));
         if (danger) sheet.eyebrowColor(t.danger);
         LinearLayout body = sheet.body;
 
@@ -351,16 +351,19 @@ public final class PcToolForm {
     /** One argument: a caps label (with "optional" or its range), what it's for, the control, an error line. */
     private abstract class Field {
         final BridgeTool.Param p;
+        /** The argument's name in words ("Level", "URL"). */
+        final String name;
         final LinearLayout block;
         final TextView error;
 
         Field(BridgeTool.Param p, boolean inlineControl) {
             this.p = p;
+            this.name = PcTools.words(p.label());
             block = ui.vbox();
             error = errorLine();
             if (inlineControl) return; // a switch row builds its own head
             LinearLayout head = ui.hbox();
-            TextView l = ui.label(p.label() + (p.required ? "" : " · optional"));
+            TextView l = ui.label(name + (p.required ? "" : " · optional"));
             head.addView(l, Ui.weight(1));
             String r = range(p);
             if (r.length() > 0) head.addView(ui.readout(r, 11, t.dim), Ui.wrap());
@@ -397,7 +400,7 @@ public final class PcToolForm {
         }
 
         String required() {
-            return p.label() + " is required.";
+            return name + " is required.";
         }
     }
 
@@ -420,7 +423,7 @@ public final class PcToolForm {
             } else {
                 et.setSingleLine(true);
             }
-            et.setContentDescription(p.label());
+            et.setContentDescription(name);
             addControl(et);
         }
 
@@ -454,7 +457,7 @@ public final class PcToolForm {
             et = ui.field("", r.length() > 0 ? r : integer ? "Whole number" : "Number", type);
             et.setSingleLine(true);
             et.setTypeface(t.mono);
-            et.setContentDescription(p.label());
+            et.setContentDescription(name);
             addControl(et);
         }
 
@@ -494,7 +497,16 @@ public final class PcToolForm {
         @Override
         Object raw() {
             String s = et.getText().toString().trim();
-            return s.length() == 0 ? null : s;
+            if (s.length() == 0) return null;
+            try {
+                double d = Double.parseDouble(s);
+                if (!Double.isNaN(d) && !Double.isInfinite(d)) {
+                    return d == Math.rint(d) && Math.abs(d) < 1e15 ? (Object) Long.valueOf((long) d) : Double.valueOf(d);
+                }
+            } catch (NumberFormatException ignored) {
+                // not a number: kept as typed
+            }
+            return s;
         }
     }
 
@@ -510,10 +522,10 @@ public final class PcToolForm {
                     touched = true;
                 }
             });
-            toggle.setContentDescription(p.label());
+            toggle.setContentDescription(name);
             String sub = p.description;
             if (!p.required) sub = sub.length() > 0 ? sub : "Optional";
-            LinearLayout row = ui.settingRow(p.label(), sub, toggle);
+            LinearLayout row = ui.settingRow(name, sub, toggle);
             row.setPadding(0, ui.dp(2), 0, ui.dp(2));
             block.addView(row, Ui.fillW());
             block.addView(error, ui.margins(Ui.fillW(), 0, 4, 0, 0));
@@ -547,7 +559,7 @@ public final class PcToolForm {
                 chip.setGravity(Gravity.CENTER);
                 chip.setPadding(ui.dp(11), ui.dp(7), ui.dp(11), ui.dp(7));
                 chip.setMinHeight(ui.dp(34));
-                chip.setContentDescription(p.label() + ": " + c);
+                chip.setContentDescription(name + ": " + c);
                 chip.setOnClickListener(new View.OnClickListener() {
                     @Override
                     public void onClick(View v) {
@@ -604,7 +616,7 @@ public final class PcToolForm {
             et.setTypeface(t.mono);
             et.setMinLines(2);
             et.setGravity(Gravity.TOP | Gravity.START);
-            et.setContentDescription(p.label());
+            et.setContentDescription(name);
             et.addTextChangedListener(new TextWatcher() {
                 @Override
                 public void beforeTextChanged(CharSequence s, int st, int c, int a) {
