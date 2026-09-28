@@ -185,15 +185,23 @@ public final class ToolKit {
         BridgeTool probe = t != null ? t : new BridgeTool(n, "", null);
         if (probe.destructive()) return DESTRUCTIVE;
         if (OPEN_APP.equals(n)) return CHANGE;
-        if (n.startsWith("screenshot") || n.startsWith("capture_screen")) {
+        if (n.contains("screenshot") || n.startsWith("capture_screen")) {
             return args != null && args.optBoolean("save", false) ? CHANGE : READ;
         }
-        if (n.startsWith("get_") || n.startsWith("list_") || n.startsWith("read") || n.startsWith("query_")
-                || n.startsWith("search_") || n.endsWith("_info") || n.endsWith("_status") || n.equals("info")) {
-            return READ;
+        for (String p : READ_PREFIXES) {
+            if (n.startsWith(p)) return READ;
         }
+        for (String x : READ_NAMES) {
+            if (n.equals(x)) return READ;
+        }
+        if (n.endsWith("_info") || n.endsWith("_status")) return READ;
         return CHANGE;
     }
+
+    /** Tools that only look ("show_…" isn't one: it can put something on the PC's screen). */
+    private static final String[] READ_PREFIXES = {"get_", "list_", "read", "query_", "search_", "find_", "check_"};
+    private static final String[] READ_NAMES = {"info", "status", "health", "version", "uptime", "ping", "whoami",
+            "hostname", "time", "date"};
 
     // ------------------------------------------------------------------
     // Labels
@@ -450,6 +458,10 @@ public final class ToolKit {
             sb.append(s.confirm ? "Read-only tools run right away; anything that changes the PC asks you first. "
                     : "Tools run right away (Ask before PC actions is off). ");
             sb.append("Shutting down, restarting or deleting always asks.");
+            if (s.catalogError != null && s.catalogError.length() > 0) {
+                sb.append("\n\nThe PC bridge didn't answer just now (").append(s.catalogError)
+                        .append("): OMNI's actions will fail until it's back.");
+            }
         } else {
             sb.append("**AI tools · off** — OMNI can't act on the PC right now:");
             if (!s.enabled) sb.append("\n• Tool calling is turned off. `/tools on` turns it on.");

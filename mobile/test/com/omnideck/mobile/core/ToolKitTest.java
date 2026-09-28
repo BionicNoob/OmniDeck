@@ -210,6 +210,10 @@ public class ToolKitTest {
         assertEquals(ToolKit.READ, ToolKit.risk(null, "read_file", none));
         assertEquals(ToolKit.READ, ToolKit.risk(null, "battery_status", none));
         assertEquals(ToolKit.READ, ToolKit.risk(null, "screenshot", obj("{\"save\":false}")));
+        assertEquals(ToolKit.READ, ToolKit.risk(null, "take_screenshot", none));
+        assertEquals(ToolKit.READ, ToolKit.risk(null, "find_files", none));
+        assertEquals(ToolKit.READ, ToolKit.risk(null, "uptime", none));
+        assertEquals("showing something is a change", ToolKit.CHANGE, ToolKit.risk(null, "show_notification", none));
         assertEquals("saving writes a file", ToolKit.CHANGE, ToolKit.risk(null, "screenshot",
                 obj("{\"save\":true}")));
         assertEquals(ToolKit.CHANGE, ToolKit.risk(null, "set_volume", none));
@@ -298,6 +302,11 @@ public class ToolKitTest {
         assertTrue(r.contains("• `shutdown_pc` — Shut the PC down · always asks"));
         assertTrue(r.contains("• `open_app` — Open an app on the PC by name · asks first"));
         assertTrue(r.contains("`/tools off`"));
+        assertFalse(r.contains("didn't answer"));
+        s.catalogError = "Can't reach the PC bridge";
+        assertTrue("a cached list, but the bridge is away just now",
+                ToolKit.report(s).contains("didn't answer just now (Can't reach the PC bridge)"));
+        s.catalogError = "";
         s.confirm = false;
         assertTrue(ToolKit.report(s).contains("• `set_volume` — Set master volume · runs right away"));
     }

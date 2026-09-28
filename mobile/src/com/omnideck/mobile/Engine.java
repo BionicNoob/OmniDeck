@@ -3524,6 +3524,14 @@ public final class Engine {
         return job == null ? null : job.approval;
     }
 
+    /**
+     * What the reply's PC tools are doing: {@link ToolCall#ASKING} (waiting for
+     * the user's OK), {@link ToolCall#RUNNING}, or null — for status displays.
+     */
+    public String toolActivity() {
+        return job == null ? null : job.target.activeToolState();
+    }
+
     /** The PC's name for "OMNI wants to … on {pc}": its hostname when known, else the bridge address. */
     public String pcName() {
         if (lastVitals != null && lastVitals.host.length() > 0) return lastVitals.host;
