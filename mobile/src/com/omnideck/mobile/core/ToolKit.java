@@ -196,9 +196,31 @@ public final class ToolKit {
     // Labels
     // ------------------------------------------------------------------
 
+    private static final String[] ACRONYMS = {"pc", "cpu", "gpu", "ram", "url", "id", "os", "usb", "ip", "dns", "vpn",
+            "ui", "hdmi", "tv"};
+
+    /** A tool's name in words, with acronyms in capitals: "Shutdown PC", "Get CPU load". */
+    static String words(BridgeTool t, String name) {
+        String s = t != null ? t.label() : BridgeTool.humanize(name == null ? "" : name);
+        String[] w = s.split(" ");
+        StringBuilder sb = new StringBuilder(s.length());
+        for (int i = 0; i < w.length; i++) {
+            if (i > 0) sb.append(' ');
+            String x = w[i];
+            for (String a : ACRONYMS) {
+                if (x.equalsIgnoreCase(a)) {
+                    x = a.toUpperCase(Locale.US);
+                    break;
+                }
+            }
+            sb.append(x);
+        }
+        return sb.toString();
+    }
+
     /** The action log's line: "Set volume → 40%", "Get system info", "Set clipboard → “ssh omni@…”". */
     public static String label(BridgeTool t, String name, JSONObject args) {
-        String base = t != null ? t.label() : BridgeTool.humanize(name == null ? "" : name);
+        String base = words(t, name);
         if (OPEN_APP.equalsIgnoreCase(name)) {
             String q = OllamaClient.str(args, "query").trim();
             if (q.length() == 0) q = OllamaClient.str(args, "app_id").trim();
@@ -215,7 +237,7 @@ public final class ToolKit {
      */
     public static String phrase(BridgeTool t, String name, JSONObject args, String label) {
         if (OPEN_APP.equalsIgnoreCase(name)) return lowerFirst(label != null && label.length() > 0 ? label : "open an app");
-        String base = lowerFirst(t != null ? t.label() : BridgeTool.humanize(name == null ? "" : name));
+        String base = lowerFirst(words(t, name));
         String a = argsSummary(t, name, args);
         if (a.length() == 0) return base;
         String n = name == null ? "" : name.toLowerCase(Locale.US);

@@ -189,6 +189,9 @@ public class ToolKitTest {
         assertEquals("open Spotify", ToolKit.phrase(null, "open_app", obj("{\"query\":\"spotify\"}"),
                 "Open Spotify"));
         assertEquals("PC names keep their capitals", "PC restart", ToolKit.lowerFirst("PC restart"));
+        assertEquals("shutdown PC", ToolKit.phrase(null, "shutdown_pc", new JSONObject(), ""));
+        assertEquals("Get CPU load", ToolKit.label(null, "get_cpu_load", new JSONObject()));
+        assertEquals("OS info", ToolKit.phrase(null, "os_info", new JSONObject(), ""));
         ToolApproval a = new ToolApproval("set_volume", "Set volume → 40%", "set volume to 40%", "ATLAS-PC",
                 "10.0.0.2:8765", "{}", false);
         assertEquals("OMNI wants to set volume to 40% on ATLAS-PC", a.sentence());

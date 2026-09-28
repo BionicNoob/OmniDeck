@@ -1558,10 +1558,9 @@ public final class Engine {
         }
     }
 
-    /** Settles what the whole reply sends — images or not, thinking, the PC's tools — then asks. */
+    /** Settles what every round of the reply sends — thinking, the PC's tools — then asks. */
     private void begin(Job j, List<BridgeTool> catalog) {
         String model = j.model;
-        j.withImages = j.conv.hasImages() && !Boolean.FALSE.equals(supportsVision(model));
         j.think = thinkFor(model, j.deep);
         if (catalog != null && toolsWanted() && Boolean.TRUE.equals(supportsTools(model))) {
             j.catalog = catalog;
@@ -1578,6 +1577,8 @@ public final class Engine {
      */
     private void streamRound(final Job j) {
         boolean offer = j.toolsJson != null && j.round < ToolKit.MAX_ROUNDS;
+        // A screenshot a tool just took may be the chat's first image.
+        j.withImages = j.conv.hasImages() && !Boolean.FALSE.equals(supportsVision(j.model));
         String sys = systemPrompt();
         if (j.toolsJson != null) {
             String add = ToolKit.systemPrompt(j.pc) + (offer ? "" : "\n\n" + ToolKit.LIMIT_PROMPT);
@@ -1770,8 +1771,9 @@ public final class Engine {
         tc.state = ToolCall.ASKING;
         changed(j);
         BridgeClient b = bridge();
-        final ToolApproval a = new ToolApproval(tc.name, tc.label, phrase, j.pc, b == null ? "" : b.where(), detail,
-                destructive);
+        // The PC's name as known now (a system-info call earlier in this reply may have told it).
+        final ToolApproval a = new ToolApproval(tc.name, tc.label, phrase, pcName(), b == null ? "" : b.where(),
+                detail, destructive);
         j.approval = a;
         a.setDecision(new ToolApproval.Decision() {
             @Override
@@ -1826,7 +1828,10 @@ public final class Engine {
                     tc.state = ToolCall.DONE;
                     tc.result = ToolKit.resultText(v[0]);
                     if (v[1] != null) tc.image = (String) v[1];
-                    if ("get_system_info".equals(bt.name)) learnMac(v[0]);
+                    if ("get_system_info".equals(bt.name)) {
+                        learnMac(v[0]);
+                        noteVitals(v[0]);
+                    }
                     log("ok", "PC · " + tc.label);
                 }
                 afterCall(j);
@@ -2772,6 +2777,16 @@ public final class Engine {
                 cb.done(v, error);
             }
         });
+    }
+
+    /** The AI read the PC's system info: the command center's vitals (and the PC's name) are fresh too. */
+    private void noteVitals(Object raw) {
+        Vitals v = Vitals.parse(raw);
+        if (!v.hasAny()) return;
+        lastVitals = v;
+        lastVitalsAt = System.currentTimeMillis();
+        bridgeOnline = Boolean.TRUE;
+        notifyTelemetry();
     }
 
     /**

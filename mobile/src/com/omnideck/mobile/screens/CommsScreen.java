@@ -213,7 +213,9 @@ public final class CommsScreen extends Screen {
             if (m.isAssistant()) {
                 toolLog = new ToolLog(a, ui, t, e.settings.reduceMotion());
                 toolLog.setVisibility(View.GONE);
-                LinearLayout.LayoutParams glp = Ui.fillW();
+                // WRAP_CONTENT: a MATCH_PARENT child doesn't widen the wrap-content bubble; the log
+                // measures itself to the full width it's offered.
+                LinearLayout.LayoutParams glp = Ui.wrap();
                 glp.topMargin = ui.dp(8);
                 glp.bottomMargin = ui.dp(2);
                 bubble.addView(toolLog, glp);
@@ -1998,7 +2000,7 @@ public final class CommsScreen extends Screen {
         r.setPadding(0, ui.dp(5), 0, 0);
         TextView k = ui.label(key);
         k.setPadding(0, ui.dp(2), ui.dp(8), 0);
-        r.addView(k, new LinearLayout.LayoutParams(ui.dp(82), ViewGroup.LayoutParams.WRAP_CONTENT));
+        r.addView(k, new LinearLayout.LayoutParams(ui.dp(104), ViewGroup.LayoutParams.WRAP_CONTENT));
         TextView v = ui.text(value, 13, t.ink, t.mono);
         v.setLineSpacing(0, 1.15f);
         v.setMaxLines(8);

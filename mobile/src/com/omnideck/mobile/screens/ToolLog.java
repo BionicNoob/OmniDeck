@@ -178,7 +178,7 @@ final class ToolLog extends LinearLayout {
         r.addView(state, Ui.wrap());
 
         if (c.isFinal() && c.ms > 0) {
-            TextView ms = ui.readout(Fmt.seconds(c.ms), 10.5f, t.dim);
+            TextView ms = ui.readout(duration(c.ms), 10.5f, t.dim);
             ms.setPadding(ui.dp(8), 0, 0, 0);
             r.addView(ms, Ui.wrap());
         }
@@ -222,6 +222,11 @@ final class ToolLog extends LinearLayout {
         v.setTextIsSelectable(false);
         b.addView(v, Ui.fillW());
         return b;
+    }
+
+    /** "85 ms" under a second, else "1.4s" / "1m 5s". */
+    static String duration(long ms) {
+        return ms < 1000 ? ms + " ms" : Fmt.seconds(ms);
     }
 
     /** A JSON result indented for reading; anything else as it is. */
