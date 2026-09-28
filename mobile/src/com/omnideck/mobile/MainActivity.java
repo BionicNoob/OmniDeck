@@ -190,11 +190,6 @@ public final class MainActivity extends Activity implements Engine.Listener, The
         return speaking;
     }
 
-    /** False after onStop, until onStart (the app is in the background). */
-    public boolean isStartedVisible() {
-        return started;
-    }
-
     private Screen tabScreen(int i) {
         if (tabs[i] == null) {
             switch (i) {

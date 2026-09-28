@@ -1051,14 +1051,16 @@ public final class CommsScreen extends Screen {
             speakerBtn.setImageDrawable(new IconDrawable(IconDrawable.STOP_CIRCLE, t.accent, t.accent, ui.dp(20)));
             speakerBtn.setContentDescription("Stop speaking");
         } else {
+            // Switched-on modes use the "engaged" ink, like the Command tab's engaged tiles.
             boolean on = e.settings.readAloud();
             speakerBtn.setImageDrawable(new IconDrawable(on ? IconDrawable.SPEAKER : IconDrawable.SPEAKER_OFF,
-                    on ? t.accent : t.dim, 0, ui.dp(20)));
+                    on ? t.engagedInk : t.dim, 0, ui.dp(20)));
             speakerBtn.setContentDescription("Read replies aloud");
+            speakerBtn.setSelected(on);
         }
         boolean hf = e.settings.handsFree();
-        handsFreeBtn.setImageDrawable(new IconDrawable(IconDrawable.HEADSET, hf ? t.accent : t.dim,
-                hf ? t.accent : t.dim, ui.dp(20)));
+        handsFreeBtn.setImageDrawable(new IconDrawable(IconDrawable.HEADSET, hf ? t.engagedInk : t.dim,
+                hf ? t.engagedInk : t.dim, ui.dp(20)));
         handsFreeBtn.setSelected(hf);
         Boolean vision = e.supportsVision(model);
         attachBtn.setImageDrawable(new IconDrawable(IconDrawable.IMAGE,

@@ -53,7 +53,7 @@ public final class Widgets {
             text.setColor(t.faint);
             text.setLetterSpacing(t.hud ? 0.16f : 0.06f);
             text.setTextSize((t.hud ? 8 : 9) * d);
-            dash.setColor(t.hud ? t.edge : t.isDark ? t.hair : t.edge);
+            dash.setColor(t.id == Theme.DARK ? t.hair : t.edge);
         }
 
         String shown() {

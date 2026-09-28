@@ -36,6 +36,54 @@ public class ShellShotsTest extends Harness {
         shoot("shell-" + theme + "-settings");
     }
 
+    /**
+     * The chat's live states at once → build/screens/comms-{theme}-states.png:
+     * a failed reply with Retry, the context warning, an attachment waiting,
+     * hands-free on and the phone speaking (header Stop control).
+     */
+    private void commsStates(String theme) throws Exception {
+        prefs().edit().putInt("num_ctx", 40).putBoolean("hands_free", true).commit();
+        launch(theme, MainActivity.TAB_COMMS);
+        waitOnline();
+        ollama.midStreamError = "connection reset by peer";
+        submit("Run a diagnostic on the render node.");
+        waitFor("failed", () -> !engine().isBusy() && engine().conversation().lastOfRole(
+                com.omnideck.mobile.core.ChatMessage.ASSISTANT) != null);
+        ollama.midStreamError = null;
+        submit("/regen");
+        waitFor("reply", () -> !engine().isBusy() && !engine().conversation().lastOfRole(
+                com.omnideck.mobile.core.ChatMessage.ASSISTANT).error);
+        assertTrue(act.comms().contextWarningShown());
+        // A failure after it, so its Retry is on screen too.
+        ollama.midStreamError = "llama runner process has terminated: out of memory";
+        submit("And the backup node?");
+        waitFor("failed again", () -> !engine().isBusy() && engine().conversation().lastOfRole(
+                com.omnideck.mobile.core.ChatMessage.ASSISTANT).error);
+        ollama.midStreamError = null;
+        act.comms().addAttachment(com.omnideck.mobile.mock.MockBridge.PNG_1PX, null);
+        act.speakingOverride = true;
+        advance(900);
+        assertNotNull(button("Stop speaking"));
+        assertNotNull(button("Retry this reply"));
+        shoot("comms-" + theme + "-states");
+        act.speakingOverride = false;
+    }
+
+    @Test
+    public void cyberCommsStates() throws Exception {
+        commsStates("cyber");
+    }
+
+    @Test
+    public void lightCommsStates() throws Exception {
+        commsStates("light");
+    }
+
+    @Test
+    public void darkCommsStates() throws Exception {
+        commsStates("dark");
+    }
+
     @Test
     public void cyber() throws Exception {
         all("cyber");
