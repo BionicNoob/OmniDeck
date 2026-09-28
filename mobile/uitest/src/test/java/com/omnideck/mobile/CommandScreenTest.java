@@ -152,7 +152,7 @@ public class CommandScreenTest extends Harness {
     public void telemetryFillsAfterAChat() throws Exception {
         online("cyber");
         assertEquals(0, engine().telemetry.replies);
-        assertTrue("placeholder before the first reply", shows("Send a message to measure"));
+        assertTrue("placeholder before the first reply", shows("Measured on each reply"));
         tab(MainActivity.TAB_COMMS);
         submit("Status report, please.");
         waitFor("reply", () -> !engine().isBusy() && engine().telemetry.replies == 1);
@@ -162,7 +162,7 @@ public class CommandScreenTest extends Harness {
         assertFalse(Double.isNaN(tps));
         // Throughput tile shows the measured tok/s, first-token and context tiles have numbers.
         assertTrue(shows(Fmt.oneDecimal(tps)));
-        assertFalse(shows("Send a message to measure"));
+        assertFalse(shows("Measured on each reply"));
         assertFalse(shows("Time until the reply starts"));
         assertTrue(shows("%"));
         assertTrue(shows("best " + Fmt.oneDecimal(engine().telemetry.tokensPerSec.max())));

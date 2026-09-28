@@ -261,9 +261,11 @@ public final class CommandScreen extends Screen {
             LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(ui.dp(26), ui.dp(2));
             blp.bottomMargin = ui.dp(4);
             if (wide) {
-                // A control-strip tile: icon beside the label, both centred.
-                root.setGravity(Gravity.CENTER_HORIZONTAL);
-                root.setPadding(ui.dp(10), ui.dp(10), ui.dp(10), 0);
+                // A control-strip tile: icon beside the label, centred; a spacer the size of
+                // the busy bar above them keeps the pair on the tile's true centre line.
+                root.setGravity(Gravity.CENTER);
+                root.setPadding(ui.dp(10), 0, ui.dp(10), 0);
+                root.addView(new View(a), new LinearLayout.LayoutParams(1, ui.dp(8)));
                 LinearLayout line = ui.hbox();
                 line.setGravity(Gravity.CENTER);
                 line.addView(icon, new LinearLayout.LayoutParams(ui.dp(22), ui.dp(22)));
@@ -272,6 +274,7 @@ public final class CommandScreen extends Screen {
                 line.addView(label, llp);
                 root.addView(line, Ui.wrap());
                 blp.topMargin = ui.dp(6);
+                blp.bottomMargin = 0;
             } else {
                 root.setGravity(Gravity.CENTER_HORIZONTAL);
                 root.setPadding(ui.dp(TILE_PAD_DP), ui.dp(11), ui.dp(TILE_PAD_DP), 0);
@@ -526,7 +529,7 @@ public final class CommandScreen extends Screen {
         liveLine.setSingleLine(true);
         liveLine.setEllipsize(TextUtils.TruncateAt.END);
         liveRow.addView(liveLine, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        stopSpeakingChip = ui.actionChip(t.hud ? "STOP" : "Stop", false, new View.OnClickListener() {
+        stopSpeakingChip = ui.actionChip(caps("Stop speaking"), false, new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 a.stopSpeaking();
@@ -1554,7 +1557,7 @@ public final class CommandScreen extends Screen {
             case CoreView.STREAMING:
                 return deep ? "Replying · deep model" : "Replying";
             case CoreView.SPEAKING:
-                return "Speaking";
+                return "Speaking the reply aloud";
             default:
                 return loaded ? "Standing by · model warm" : "Standing by";
         }
@@ -1584,7 +1587,7 @@ public final class CommandScreen extends Screen {
                 line = caps(rate + Math.round(tok) + " tok");
             }
         } else if (talking) {
-            line = caps("Speaking the reply aloud");
+            line = ""; // the headline says it; this row holds the Stop control
         } else if (e.pulling() && e.pullState() != null) {
             Engine.PullState p = e.pullState();
             SpannableStringBuilder sb = new SpannableStringBuilder(caps("Downloading "));
@@ -1599,8 +1602,8 @@ public final class CommandScreen extends Screen {
             line = caps("Tap the core to chat, hold it to talk");
         }
         liveLine.setText(line);
+        liveLine.setVisibility(talking ? View.GONE : View.VISIBLE);
         stopSpeakingChip.setVisibility(talking ? View.VISIBLE : View.GONE);
-        liveLine.setGravity(talking ? Gravity.END | Gravity.CENTER_VERTICAL : Gravity.CENTER);
     }
 
     /** The subnets being swept, e.g. "192.168.1.0/24". */
@@ -1721,12 +1724,12 @@ public final class CommandScreen extends Screen {
         // Latency
         double lat = tm.latencyMs.last();
         setMetric(latency, Double.isNaN(lat) ? null : String.valueOf(Math.round(lat)), tm.latencyMs.toArray());
-        latency.caption.setText(Double.isNaN(lat) ? "Waiting for the first ping"
+        latency.caption.setText(Double.isNaN(lat) ? "Waiting for a ping"
                 : "avg " + Math.round(tm.latencyMs.average()) + " · peak " + Math.round(tm.latencyMs.max()) + " ms");
         // Throughput
         double tps = tm.tokensPerSec.last();
         setMetric(throughput, Double.isNaN(tps) ? null : Fmt.oneDecimal(tps), tm.tokensPerSec.toArray());
-        throughput.caption.setText(Double.isNaN(tps) ? "Send a message to measure"
+        throughput.caption.setText(Double.isNaN(tps) ? "Measured on each reply"
                 : "avg " + Fmt.oneDecimal(tm.tokensPerSec.average()) + " · best "
                 + Fmt.oneDecimal(tm.tokensPerSec.max()) + " tok/s");
         // First token
