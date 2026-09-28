@@ -670,6 +670,8 @@ public final class Engine {
         final Cancellable c = scanCancel = new Cancellable();
         final String lastHost = settings.lastHost();
         final int lastPort = settings.lastPort();
+        final boolean lastHttps = settings.lastHttps();
+        final String key = settings.apiKey();
         final List<LanScanner.Subnet> nets = testSubnets != null ? testSubnets : Net.refresh(app);
         subnets = nets;
         final int scanPort = this.scanPort = sweepPort(manual);
@@ -678,10 +680,13 @@ public final class Engine {
             public void run() {
                 ServerInfo found = null;
                 final List<ServerInfo> all = new ArrayList<ServerInfo>();
-                if (manual != null) found = OllamaClient.probe(manual.host, manual.port, 3000);
+                // Only the address the user typed gets the API key; hosts found otherwise never do.
+                final OllamaClient.Probe typed = manual == null ? null
+                        : OllamaClient.probeDetailed(manual.host, manual.port, manual.https, key, 3000);
+                if (typed != null) found = typed.server;
                 if (found == null && lastHost.length() > 0 && !c.isCancelled()
                         && (manual == null || !manual.host.equals(lastHost))) {
-                    found = OllamaClient.probe(lastHost, lastPort, 1500);
+                    found = OllamaClient.probeDetailed(lastHost, lastPort, lastHttps, null, 1500).server;
                 }
                 if (found == null && !c.isCancelled()) {
                     // Ollama running on the phone itself (e.g. in Termux).
@@ -717,6 +722,17 @@ public final class Engine {
                         if (result != null) {
                             connect(result);
                             if (full) announceScan(all);
+                        } else if (typed != null && typed.refused()) {
+                            // Something answers at the typed address but wants (another) API key.
+                            String who = manual.label(OllamaClient.DEFAULT_PORT);
+                            setState(State.OFFLINE, "The AI at " + who + " refused the connection (HTTP " + typed.code
+                                    + "). " + (key.length() > 0 ? "Check the API key" : "It needs an API key")
+                                    + " in Settings › Connection.");
+                            if (!loggedOffline) {
+                                loggedOffline = true;
+                                log("warn", "Refused by " + who + " · API key " + (key.length() > 0 ? "rejected" : "missing"));
+                            }
+                            scheduleOfflineRetry();
                         } else {
                             String where = Net.describe(nets);
                             setState(State.OFFLINE, nets.isEmpty()
@@ -737,11 +753,32 @@ public final class Engine {
         });
     }
 
-    /** Port the LAN sweep uses: the manual address's, else the last server's, else Ollama's default. */
+    /**
+     * Port the LAN sweep uses: the manual address's, else the last server's,
+     * else Ollama's default. An https (remote, proxied) address says nothing
+     * about the LAN, so the sweep then uses Ollama's default port.
+     */
     private int sweepPort(HostPort manual) {
-        if (manual != null) return manual.port;
+        if (manual != null) return manual.https ? OllamaClient.DEFAULT_PORT : manual.port;
         int last = settings.lastPort();
-        return last > 0 ? last : OllamaClient.DEFAULT_PORT;
+        return last > 0 && !settings.lastHttps() ? last : OllamaClient.DEFAULT_PORT;
+    }
+
+    /**
+     * The API key for a server: only the one the user typed in (same scheme,
+     * host and port) ever gets it — a scan may find anyone's Ollama.
+     */
+    private String apiKeyFor(ServerInfo s) {
+        String key = settings.apiKey();
+        if (key.length() == 0) return "";
+        HostPort manual = HostPort.parse(settings.server(), OllamaClient.DEFAULT_PORT);
+        return manual != null && manual.matches(s.host, s.port, s.https) ? key : "";
+    }
+
+    /** Saves the API key (sent as "Authorization: Bearer …" to the typed-in server) and reconnects. */
+    public void setApiKey(String key) {
+        settings.setApiKey(key == null ? "" : key);
+        setServer(settings.server());
     }
 
     private void announceScan(List<ServerInfo> all) {
@@ -766,10 +803,11 @@ public final class Engine {
     }
 
     private void connect(ServerInfo s) {
-        boolean changed = server == null || !server.host.equals(s.host) || server.port != s.port;
+        boolean changed = server == null || !server.host.equals(s.host) || server.port != s.port
+                || server.https != s.https;
         server = s;
-        client = new OllamaClient(s.host, s.port);
-        settings.setLast(s.host, s.port);
+        client = new OllamaClient(s.host, s.port, s.https, apiKeyFor(s));
+        settings.setLast(s.host, s.port, s.https);
         healthFailures = 0;
         offlineRetryMs = 10000;
         if (changed) {
@@ -2769,7 +2807,8 @@ public final class Engine {
                     } catch (IOException e) {
                         v = "unreachable (" + e.getMessage() + ")";
                     }
-                    sb.append("AI: `").append(s.label()).append("` — ").append(v).append('\n');
+                    sb.append("AI: `").append(s.label()).append("` — ").append(v)
+                            .append(c.hasApiKey() ? " · API key sent" : "").append('\n');
                     sb.append("Model: ").append(model.length() > 0 ? model : "none").append(" · mode ").append(mode);
                     sb.append(" · thinking ").append(think == null ? "unknown" : think ? "supported" : "not supported")
                             .append('\n');

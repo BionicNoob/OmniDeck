@@ -14,7 +14,9 @@ import java.net.SocketTimeoutException;
 import java.net.UnknownHostException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Talks to an Ollama server over its HTTP API (the same endpoints the
@@ -33,12 +35,26 @@ public final class OllamaClient {
 
     private final String host;
     private final int port;
+    private final boolean https;
     private final String base;
+    /** Sent with every request: the API key, when there is one; else null. */
+    private final Map<String, String> headers;
 
     public OllamaClient(String host, int port) {
+        this(host, port, false, null);
+    }
+
+    /**
+     * {@code https} for a server behind TLS; {@code apiKey} (may be null or
+     * "") is sent as "Authorization: Bearer …" — only give it for the server
+     * the user configured, never for hosts found by scanning.
+     */
+    public OllamaClient(String host, int port, boolean https, String apiKey) {
         this.host = host;
         this.port = port;
-        this.base = Http.baseUrl(host, port);
+        this.https = https;
+        this.base = Http.baseUrl(https, host, port);
+        this.headers = authHeaders(apiKey);
     }
 
     public String host() {
@@ -49,8 +65,24 @@ public final class OllamaClient {
         return port;
     }
 
+    public boolean https() {
+        return https;
+    }
+
     public String baseUrl() {
         return base;
+    }
+
+    /** True when requests carry an API key. */
+    public boolean hasApiKey() {
+        return headers != null;
+    }
+
+    static Map<String, String> authHeaders(String apiKey) {
+        if (apiKey == null || apiKey.trim().length() == 0) return null;
+        Map<String, String> h = new HashMap<String, String>();
+        h.put("Authorization", "Bearer " + apiKey.trim());
+        return h;
     }
 
     // ------------------------------------------------------------------
@@ -58,24 +90,50 @@ public final class OllamaClient {
     // ------------------------------------------------------------------
 
     /**
-     * Returns server info when an Ollama server answers at host:port, or null
-     * when nothing (or something that isn't Ollama) is there.
+     * Returns server info when an Ollama server answers at host:port (plain
+     * HTTP, no API key — what a network scan uses), or null when nothing (or
+     * something that isn't Ollama) is there.
      */
     public static ServerInfo probe(String host, int port, int timeoutMs) {
-        String base = Http.baseUrl(host, port);
+        return probeDetailed(host, port, false, null, timeoutMs).server;
+    }
+
+    /** What a probe found: the server (null if none) and the HTTP status of its first request. */
+    public static final class Probe {
+        public final ServerInfo server;
+        /** HTTP status of GET / (-1 when nothing answered). 401/403: the server wants an API key. */
+        public final int code;
+
+        Probe(ServerInfo server, int code) {
+            this.server = server;
+            this.code = code;
+        }
+
+        /** True when a server answered but refused the request (missing or wrong API key). */
+        public boolean refused() {
+            return server == null && (code == 401 || code == 403);
+        }
+    }
+
+    /** Probes a server the user configured: over https when asked, with the API key when given. */
+    public static Probe probeDetailed(String host, int port, boolean https, String apiKey, int timeoutMs) {
+        String base = Http.baseUrl(https, host, port);
+        Map<String, String> auth = authHeaders(apiKey);
         long t0 = System.nanoTime();
         boolean isOllama = false;
         long latency = -1;
+        int code;
         try {
-            Http.Response r = Http.get(base + "/", timeoutMs, timeoutMs, null);
+            Http.Response r = Http.get(base + "/", timeoutMs, timeoutMs, auth);
             latency = (System.nanoTime() - t0) / 1000000L;
+            code = r.code;
             isOllama = r.ok() && r.body.contains(BANNER);
         } catch (IOException e) {
-            return null;
+            return new Probe(null, -1);
         }
         String version = "";
         try {
-            Http.Response v = Http.get(base + "/api/version", timeoutMs, timeoutMs, null);
+            Http.Response v = Http.get(base + "/api/version", timeoutMs, timeoutMs, auth);
             if (v.ok()) {
                 JSONObject o = new JSONObject(v.body);
                 version = str(o, "version");
@@ -86,11 +144,11 @@ public final class OllamaClient {
         } catch (IOException ignored) {
         } catch (JSONException ignored) {
         }
-        return isOllama ? new ServerInfo(host, port, version, latency) : null;
+        return new Probe(isOllama ? new ServerInfo(host, port, https, version, latency) : null, code);
     }
 
     public String version(int timeoutMs) throws IOException {
-        Http.Response r = Http.get(base + "/api/version", timeoutMs, timeoutMs, null);
+        Http.Response r = Http.get(base + "/api/version", timeoutMs, timeoutMs, headers);
         if (!r.ok()) throw new IOException(errorMessage(r.body, r.code));
         try {
             return str(new JSONObject(r.body), "version");
@@ -105,7 +163,7 @@ public final class OllamaClient {
 
     /** Installed models (GET /api/tags). */
     public List<ModelInfo> listModels() throws IOException {
-        Http.Response r = Http.get(base + "/api/tags", CONNECT_TIMEOUT_MS, QUICK_READ_TIMEOUT_MS, null);
+        Http.Response r = Http.get(base + "/api/tags", CONNECT_TIMEOUT_MS, QUICK_READ_TIMEOUT_MS, headers);
         if (!r.ok()) throw new IOException(errorMessage(r.body, r.code));
         List<ModelInfo> out = new ArrayList<ModelInfo>();
         try {
@@ -126,7 +184,7 @@ public final class OllamaClient {
 
     /** Models currently loaded in memory (GET /api/ps). */
     public List<ModelInfo> listRunning() throws IOException {
-        Http.Response r = Http.get(base + "/api/ps", CONNECT_TIMEOUT_MS, QUICK_READ_TIMEOUT_MS, null);
+        Http.Response r = Http.get(base + "/api/ps", CONNECT_TIMEOUT_MS, QUICK_READ_TIMEOUT_MS, headers);
         if (!r.ok()) throw new IOException(errorMessage(r.body, r.code));
         List<ModelInfo> out = new ArrayList<ModelInfo>();
         try {
@@ -187,7 +245,7 @@ public final class OllamaClient {
             throw new IOException(e.getMessage());
         }
         Http.Response r = Http.postJson(base + "/api/show", body.toString(), CONNECT_TIMEOUT_MS,
-                QUICK_READ_TIMEOUT_MS, null);
+                QUICK_READ_TIMEOUT_MS, headers);
         if (!r.ok()) throw new IOException(errorMessage(r.body, r.code));
         try {
             return parseShow(new JSONObject(r.body));
@@ -238,7 +296,7 @@ public final class OllamaClient {
             throw new IOException(e.getMessage());
         }
         Http.Response r = Http.sendJson("DELETE", base + "/api/delete", body.toString(), CONNECT_TIMEOUT_MS,
-                QUICK_READ_TIMEOUT_MS, null);
+                QUICK_READ_TIMEOUT_MS, headers);
         if (!r.ok()) throw new IOException(errorMessage(r.body, r.code));
     }
 
@@ -298,7 +356,7 @@ public final class OllamaClient {
         };
         try {
             body.put("stream", true);
-            conn = Http.open(base + "/api/chat", "POST", CONNECT_TIMEOUT_MS, STREAM_READ_TIMEOUT_MS, null);
+            conn = Http.open(base + "/api/chat", "POST", CONNECT_TIMEOUT_MS, STREAM_READ_TIMEOUT_MS, headers);
             cancel.attach(conn);
             if (cancel.isCancelled()) {
                 l.onError("Stopped.", true);
@@ -378,7 +436,7 @@ public final class OllamaClient {
         }
         long t0 = System.nanoTime();
         Http.Response r = Http.postJson(base + "/api/chat", b.toString(), CONNECT_TIMEOUT_MS, LOAD_READ_TIMEOUT_MS,
-                null);
+                headers);
         if (!r.ok()) throw new IOException(errorMessage(r.body, r.code));
         return (System.nanoTime() - t0) / 1000000L;
     }
@@ -398,7 +456,7 @@ public final class OllamaClient {
         }
         long t0 = System.nanoTime();
         Http.Response r = Http.postJson(base + "/api/embed", b.toString(), CONNECT_TIMEOUT_MS, LOAD_READ_TIMEOUT_MS,
-                null);
+                headers);
         if (!r.ok()) throw new IOException(errorMessage(r.body, r.code));
         return (System.nanoTime() - t0) / 1000000L;
     }
@@ -422,7 +480,7 @@ public final class OllamaClient {
             JSONObject b = new JSONObject();
             b.put("model", model);
             b.put("stream", true);
-            conn = Http.open(base + "/api/pull", "POST", CONNECT_TIMEOUT_MS, STREAM_READ_TIMEOUT_MS, null);
+            conn = Http.open(base + "/api/pull", "POST", CONNECT_TIMEOUT_MS, STREAM_READ_TIMEOUT_MS, headers);
             cancel.attach(conn);
             Http.writeJson(conn, b.toString());
             int code = conn.getResponseCode();

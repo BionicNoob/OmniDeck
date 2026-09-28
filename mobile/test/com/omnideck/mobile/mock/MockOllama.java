@@ -104,6 +104,13 @@ public final class MockOllama {
     public volatile long pullTotal = 1000000;
     /** Delay before answering /api/tags (to observe loading states). */
     public volatile long tagsDelayMs = 0;
+    /**
+     * When set, every request must carry "Authorization: Bearer &lt;key&gt;" (like
+     * Ollama behind an authenticating reverse proxy); others get HTTP 401.
+     */
+    public volatile String requiredKey = null;
+    /** "METHOD /path Authorization-header" of every request, in order ("" when none was sent). */
+    public final List<String> authSeen = Collections.synchronizedList(new ArrayList<String>());
 
     public MockOllama(InetAddress bind, int port) throws IOException {
         server = HttpServer.create(new InetSocketAddress(bind, port), 64);
@@ -165,6 +172,13 @@ public final class MockOllama {
     private void route(HttpExchange ex) throws IOException, JSONException {
         String path = ex.getRequestURI().getPath();
         String method = ex.getRequestMethod();
+        String auth = ex.getRequestHeaders().getFirst("Authorization");
+        authSeen.add(method + " " + path + " " + (auth == null ? "" : auth));
+        String key = requiredKey;
+        if (key != null && !("Bearer " + key).equals(auth)) {
+            sendJson(ex, 401, "{\"error\":\"unauthorized\"}");
+            return;
+        }
         if ("GET".equals(method) && "/".equals(path)) {
             send(ex, 200, "text/plain; charset=utf-8", "Ollama is running");
         } else if ("GET".equals(method) && "/api/version".equals(path)) {

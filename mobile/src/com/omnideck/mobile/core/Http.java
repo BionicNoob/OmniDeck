@@ -152,6 +152,11 @@ public final class Http {
     }
 
     public static String baseUrl(String host, int port) {
-        return "http://" + hostPort(host, port);
+        return baseUrl(false, host, port);
+    }
+
+    /** "https://host:port" (TLS, e.g. Ollama behind a reverse proxy) or "http://host:port". */
+    public static String baseUrl(boolean https, String host, int port) {
+        return (https ? "https://" : "http://") + hostPort(host, port);
     }
 }

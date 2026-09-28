@@ -47,8 +47,11 @@ public final class Settings {
 
     public String lastHost() { return s("last_host", ""); }
     public int lastPort() { return sp.getInt("last_port", OllamaClient.DEFAULT_PORT); }
-    public void setLast(String host, int port) {
-        sp.edit().putString("last_host", host).putInt("last_port", port).apply();
+    /** Whether the last server that worked was reached over https. */
+    public boolean lastHttps() { return sp.getBoolean("last_https", false); }
+    public void setLast(String host, int port) { setLast(host, port, false); }
+    public void setLast(String host, int port, boolean https) {
+        sp.edit().putString("last_host", host).putInt("last_port", port).putBoolean("last_https", https).apply();
     }
 
     public String model() { return s("model", ""); }
