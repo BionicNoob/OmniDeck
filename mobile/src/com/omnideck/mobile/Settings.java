@@ -1,0 +1,110 @@
+package com.omnideck.mobile;
+
+import android.content.Context;
+import android.content.SharedPreferences;
+
+import com.omnideck.mobile.core.BridgeClient;
+import com.omnideck.mobile.core.OllamaClient;
+
+import org.json.JSONArray;
+import org.json.JSONException;
+
+import java.util.ArrayList;
+import java.util.List;
+
+/** Typed access to the app's SharedPreferences. */
+public final class Settings {
+    public static final String MODE_AUTO = "auto";
+    public static final String MODE_FAST = "fast";
+    public static final String MODE_DEEP = "deep";
+
+    private final SharedPreferences sp;
+
+    public Settings(Context c) {
+        sp = c.getSharedPreferences("omnideck", Context.MODE_PRIVATE);
+    }
+
+    private String s(String k, String d) {
+        String v = sp.getString(k, d);
+        return v == null ? d : v;
+    }
+
+    private void put(String k, String v) {
+        sp.edit().putString(k, v == null ? "" : v).apply();
+    }
+
+    private void put(String k, int v) {
+        sp.edit().putInt(k, v).apply();
+    }
+
+    private void put(String k, boolean v) {
+        sp.edit().putBoolean(k, v).apply();
+    }
+
+    /** Manually set AI address ("" = auto-detect). */
+    public String server() { return s("server", ""); }
+    public void setServer(String v) { put("server", v.trim()); }
+
+    public String lastHost() { return s("last_host", ""); }
+    public int lastPort() { return sp.getInt("last_port", OllamaClient.DEFAULT_PORT); }
+    public void setLast(String host, int port) {
+        sp.edit().putString("last_host", host).putInt("last_port", port).apply();
+    }
+
+    public String model() { return s("model", ""); }
+    public void setModel(String v) { put("model", v); }
+
+    public String deepModel() { return s("deep_model", ""); }
+    public void setDeepModel(String v) { put("deep_model", v.trim()); }
+
+    public String mode() { return s("mode", MODE_AUTO); }
+    public void setMode(String v) { put("mode", v); }
+
+    /** num_ctx to send; 0 = match the loaded model (else 8192, OMNI-DECK's default). */
+    public int numCtx() { return sp.getInt("num_ctx", 0); }
+    public void setNumCtx(int v) { put("num_ctx", Math.max(0, v)); }
+
+    /** num_thread to send; 0 = don't send. */
+    public int numThread() { return sp.getInt("num_thread", 0); }
+    public void setNumThread(int v) { put("num_thread", Math.max(0, v)); }
+
+    public boolean keepLoaded() { return sp.getBoolean("keep_loaded", true); }
+    public void setKeepLoaded(boolean v) { put("keep_loaded", v); }
+
+    public String systemPrompt() { return s("system_prompt", ""); }
+    public void setSystemPrompt(String v) { put("system_prompt", v); }
+
+    public String theme() { return s("theme", "auto"); }
+    public void setTheme(String v) { put("theme", v); }
+
+    public int bridgePort() { return sp.getInt("bridge_port", BridgeClient.DEFAULT_PORT); }
+    public void setBridgePort(int v) { put("bridge_port", v > 0 && v < 65536 ? v : BridgeClient.DEFAULT_PORT); }
+
+    public String bridgeToken() { return s("bridge_token", ""); }
+    public void setBridgeToken(String v) { put("bridge_token", v.trim()); }
+
+    public boolean incognito() { return sp.getBoolean("incognito", false); }
+    public void setIncognito(boolean v) { put("incognito", v); }
+
+    public String currentChat() { return s("current_chat", ""); }
+    public void setCurrentChat(String v) { put("current_chat", v); }
+
+    public List<String> facts() {
+        List<String> out = new ArrayList<String>();
+        try {
+            JSONArray a = new JSONArray(s("facts", "[]"));
+            for (int i = 0; i < a.length(); i++) {
+                String f = a.optString(i, "").trim();
+                if (f.length() > 0) out.add(f);
+            }
+        } catch (JSONException ignored) {
+        }
+        return out;
+    }
+
+    public void setFacts(List<String> facts) {
+        JSONArray a = new JSONArray();
+        for (String f : facts) a.put(f);
+        put("facts", a.toString());
+    }
+}

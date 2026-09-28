@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- OMNI-DECK "cyber" palette (OllamaChat.html :root) -->
+    <color name="cyber_bg">#FF010103</color>
+    <color name="cyber_panel">#FF0B0B12</color>
+    <color name="cyber_surface">#FF05090F</color>
+    <color name="cyber_red">#FFFF003C</color>
+    <color name="cyber_text">#FFECECFE</color>
+    <color name="cyber_dim">#FF6C8CA6</color>
+    <!-- OMNI-DECK "modern" light palette (body.theme-modern) -->
+    <color name="light_bg">#FFFFFFFF</color>
+    <color name="light_surface">#FFEDEFF2</color>
+    <color name="light_accent">#FF4A6D8C</color>
+    <color name="light_text">#FF171717</color>
+    <color name="light_dim">#FF666666</color>
+    <color name="ic_launcher_bg">#FF010103</color>
+</resources>

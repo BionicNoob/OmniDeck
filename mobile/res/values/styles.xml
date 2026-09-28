@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Omni.Cyber" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/cyber_bg</item>
+        <item name="android:colorBackground">@color/cyber_bg</item>
+        <item name="android:colorPrimary">@color/cyber_surface</item>
+        <item name="android:colorPrimaryDark">@color/cyber_surface</item>
+        <item name="android:colorAccent">@color/cyber_red</item>
+        <item name="android:statusBarColor">@color/cyber_surface</item>
+        <item name="android:navigationBarColor">@color/cyber_bg</item>
+        <item name="android:textColorPrimary">@color/cyber_text</item>
+        <item name="android:textColorSecondary">@color/cyber_dim</item>
+        <item name="android:alertDialogTheme">@style/Theme.Omni.Cyber.Dialog</item>
+        <item name="android:popupMenuStyle">@style/Omni.Cyber.PopupMenu</item>
+    </style>
+
+    <style name="Theme.Omni.Cyber.Dialog" parent="@android:style/Theme.Material.Dialog.Alert">
+        <item name="android:colorAccent">@color/cyber_red</item>
+        <item name="android:colorBackground">@color/cyber_panel</item>
+        <item name="android:textColorPrimary">@color/cyber_text</item>
+        <item name="android:textColorSecondary">@color/cyber_dim</item>
+    </style>
+
+    <style name="Omni.Cyber.PopupMenu" parent="@android:style/Widget.Material.PopupMenu">
+        <item name="android:popupBackground">@drawable/cyber_popup</item>
+    </style>
+
+    <style name="Theme.Omni.Light" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/light_bg</item>
+        <item name="android:colorBackground">@color/light_bg</item>
+        <item name="android:colorPrimary">@color/light_surface</item>
+        <item name="android:colorPrimaryDark">@color/light_surface</item>
+        <item name="android:colorAccent">@color/light_accent</item>
+        <item name="android:statusBarColor">@color/light_surface</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:textColorPrimary">@color/light_text</item>
+        <item name="android:textColorSecondary">@color/light_dim</item>
+        <item name="android:alertDialogTheme">@style/Theme.Omni.Light.Dialog</item>
+    </style>
+
+    <style name="Theme.Omni.Light.Dialog" parent="@android:style/Theme.Material.Light.Dialog.Alert">
+        <item name="android:colorAccent">@color/light_accent</item>
+        <item name="android:textColorPrimary">@color/light_text</item>
+        <item name="android:textColorSecondary">@color/light_dim</item>
+    </style>
+
+    <!-- Starting window: cyber unless the phone is in light mode (API 29+). -->
+    <style name="Theme.Omni.Launch" parent="@style/Theme.Omni.Cyber" />
+</resources>

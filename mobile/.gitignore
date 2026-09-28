@@ -1,0 +1,10 @@
+# Build outputs (dist/OmniDeck-Mobile.apk is committed on purpose)
+build/
+.cache/
+uitest/build/
+uitest/.gradle/
+# Signing key: keep it private (needed to publish updates that install over the old app)
+.keystore/
+*.p12
+*.jks
+*.idsig

@@ -1,0 +1,93 @@
+// Runs the real app (MainActivity + Engine) inside Robolectric — an Android
+// framework on the JVM — against mock Ollama / LaunchBridge servers.
+// Needs ../build.sh to have run first (it generates R.java and the resource APK).
+plugins { id 'java' }
+
+repositories { mavenCentral() }
+
+def androidJar = System.getenv('ANDROID_JAR') ?: '/usr/lib/android-sdk/platforms/android-23/android.jar'
+def appDir = file('..').canonicalPath
+def robolectricVersion = '4.16.1'
+// Android framework builds Robolectric runs the tests on (SDK 34 and the app's minSdk 23).
+def androidAll = [
+    'org.robolectric:android-all-instrumented:14-robolectric-10818077-i7',
+    'org.robolectric:android-all-instrumented:6.0.1_r3-robolectric-r1-i7',
+]
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+sourceSets {
+    main { java { srcDirs = ["$appDir/src", "$appDir/build/gen"] } }
+    test {
+        java {
+            // src/stubs: minimal androidx.test classes Robolectric calls; the real
+            // library is only published on Google's Maven, which isn't reachable here.
+            srcDirs = ['src/test/java', 'src/stubs/java', "$appDir/test"]
+            exclude 'com/omnideck/mobile/core/**'   // plain-JVM tests; run by ../test.sh
+        }
+        resources { srcDirs = ["$buildDir/robolectric-config"] }
+    }
+}
+
+// One configuration per framework jar: they're versions of the same module,
+// and a shared configuration would keep only the newest.
+androidAll.eachWithIndex { coord, i -> configurations.create("androidAll$i") { transitive = false } }
+
+dependencies {
+    compileOnly files(androidJar)
+    // Tests compile against the full SDK 34 framework (Robolectric's shadowOf()
+    // overloads mention newer classes); the app itself stays pinned to API 23.
+    testCompileOnly 'org.robolectric:android-all-instrumented:14-robolectric-10818077-i7'
+    // JUnit reads @Config (which names android classes) before Robolectric's
+    // sandbox exists; AGP projects get android.jar here for the same reason.
+    testRuntimeOnly 'org.robolectric:android-all-instrumented:14-robolectric-10818077-i7'
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation("org.robolectric:robolectric:$robolectricVersion") {
+        exclude group: 'androidx.test'
+        exclude group: 'androidx.test.espresso'
+        exclude group: 'androidx.annotation'
+        exclude group: 'androidx.core'
+        exclude group: 'androidx.lifecycle'
+        exclude group: 'androidx.concurrent'
+    }
+    androidAll.eachWithIndex { coord, i -> add("androidAll$i", coord) }
+}
+
+tasks.withType(JavaCompile).configureEach { options.encoding = 'UTF-8' }
+
+// Tells Robolectric where the app's manifest, compiled resources and assets are.
+def writeConfig = tasks.register('robolectricConfig') {
+    def out = file("$buildDir/robolectric-config/com/android/tools/test_config.properties")
+    outputs.file(out)
+    doLast {
+        out.parentFile.mkdirs()
+        out.text = """android_merged_manifest=$appDir/AndroidManifest.xml
+android_merged_assets=$appDir/assets
+android_resource_apk=$appDir/build/apk/app.unaligned.apk
+android_custom_package=com.omnideck.mobile
+"""
+    }
+}
+processTestResources.dependsOn writeConfig
+
+// Robolectric looks up framework jars by file name in offline mode.
+def depsDir = file("$buildDir/robolectric-deps")
+def copyAndroidAll = tasks.register('copyAndroidAll', Copy) {
+    androidAll.eachWithIndex { coord, i -> from configurations.getByName("androidAll$i") }
+    into depsDir
+}
+
+test {
+    dependsOn copyAndroidAll
+    maxHeapSize = '3g'
+    systemProperty 'robolectric.offline', 'true'
+    systemProperty 'robolectric.dependency.dir', depsDir.absolutePath
+    testLogging {
+        events 'passed', 'failed', 'skipped'
+        exceptionFormat 'full'
+        showStandardStreams = true
+    }
+}
