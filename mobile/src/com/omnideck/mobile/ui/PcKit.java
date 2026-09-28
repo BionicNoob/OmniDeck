@@ -218,6 +218,38 @@ public final class PcKit {
         return row;
     }
 
+    /**
+     * The {@link #segmented} frame with icon cells (media transport): each
+     * cell is described for TalkBack and reports its index.
+     */
+    public LinearLayout iconSegments(int[] icons, String[] descriptions, final OnSegment l) {
+        LinearLayout row = ui.hbox();
+        row.setBackground(ui.rounded(t.hud ? Theme.alpha(t.surface2, 0x99) : t.chip, t.hud ? t.hair : t.edge, 8));
+        for (int i = 0; i < icons.length; i++) {
+            final int idx = i;
+            if (i > 0) {
+                View sep = new View(ui.c);
+                sep.setBackgroundColor(t.hud ? t.hair : t.edge);
+                row.addView(sep, new LinearLayout.LayoutParams(Math.max(1, ui.dp(1)), ui.dp(18)));
+            }
+            ImageView b = new ImageView(ui.c);
+            b.setImageDrawable(new IconDrawable(icons[i], t.hud ? t.accent : t.ink, t.hud ? t.accent : t.ink,
+                    ui.dp(18)));
+            b.setScaleType(ImageView.ScaleType.CENTER);
+            b.setContentDescription(descriptions[i]);
+            b.setBackground(ripple());
+            b.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    ui.tick(v);
+                    l.onSegment(idx);
+                }
+            });
+            row.addView(b, new LinearLayout.LayoutParams(0, ui.dp(40), 1));
+        }
+        return row;
+    }
+
     /** Dims a {@link #segmented} row and marks its segments disabled (callers also ignore taps). */
     public static void setSegmentsEnabled(LinearLayout row, boolean on) {
         for (int i = 0; i < row.getChildCount(); i++) {

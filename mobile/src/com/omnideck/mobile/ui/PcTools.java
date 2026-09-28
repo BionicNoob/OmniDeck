@@ -132,6 +132,74 @@ public final class PcTools {
     }
 
     // ------------------------------------------------------------------
+    // Media transport
+    // ------------------------------------------------------------------
+
+    public static final int PREVIOUS = 0;
+    public static final int PLAY_PAUSE = 1;
+    public static final int NEXT = 2;
+
+    /** Tool names that are one media key each. */
+    private static final String[][] MEDIA_TOOLS = {
+            {"previous_track", "prev_track", "media_previous", "media_prev", "media_previous_track", "previous"},
+            {"play_pause", "media_play_pause", "playpause", "toggle_play", "toggle_playback", "media_toggle"},
+            {"next_track", "media_next", "media_next_track", "next"}};
+    /** Choices of a media tool's argument that mean each key (media_key {key: "next"}). */
+    private static final String[][] MEDIA_CHOICES = {
+            {"previous", "prev", "previous_track", "prev_track", "media_previous", "media_prev"},
+            {"play_pause", "playpause", "play/pause", "toggle", "play_or_pause", "media_play_pause"},
+            {"next", "next_track", "media_next", "skip"}};
+
+    /** A media key the bridge can press: the tool and the arguments that make it that key. */
+    public static final class MediaKey {
+        public final BridgeTool tool;
+        public final org.json.JSONObject args;
+
+        MediaKey(BridgeTool tool, org.json.JSONObject args) {
+            this.tool = tool;
+            this.args = args;
+        }
+    }
+
+    /**
+     * How to press {@code which} ({@link #PREVIOUS}, {@link #PLAY_PAUSE},
+     * {@link #NEXT}) on the PC: a tool with that exact job (and nothing it
+     * still needs), else a media tool whose argument offers that key. Null
+     * when the bridge has neither.
+     */
+    public static MediaKey mediaKey(List<BridgeTool> tools, int which) {
+        if (tools == null) return null;
+        BridgeTool direct = BridgeTool.find(tools, MEDIA_TOOLS[which]);
+        if (direct != null && !needsInput(direct)) return new MediaKey(direct, direct.template());
+        for (BridgeTool b : tools) {
+            if (!BridgeTool.MEDIA.equals(b.category())) continue;
+            for (BridgeTool.Param p : b.params) {
+                for (String c : p.choices) {
+                    for (String want : MEDIA_CHOICES[which]) {
+                        if (!c.equalsIgnoreCase(want)) continue;
+                        org.json.JSONObject args = b.template();
+                        try {
+                            args.put(p.name, c);
+                        } catch (org.json.JSONException ignored) {
+                            // a plain name; can't fail
+                        }
+                        return new MediaKey(b, args);
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    /** A required argument without a default: the tool can't run from a single tap. */
+    static boolean needsInput(BridgeTool b) {
+        for (BridgeTool.Param p : b.params) {
+            if (p.required && p.defaultValue.length() == 0) return true;
+        }
+        return false;
+    }
+
+    // ------------------------------------------------------------------
     // Runner rows
     // ------------------------------------------------------------------
 

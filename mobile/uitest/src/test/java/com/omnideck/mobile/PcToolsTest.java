@@ -174,6 +174,38 @@ public class PcToolsTest extends PcBaseTest {
     }
 
     @Test
+    public void mediaKeysComeFromTheBridgesMediaTools() throws Exception {
+        richBridge(true);
+        addSchemaTools(bridge); // media_key {key: play_pause | next | previous}
+        bridge.extraTools.add(new JSONObject("{\"name\":\"play_pause\",\"description\":\"Toggle playback\"}"));
+        openPc("dark");
+        waitPaired();
+        waitFor("media keys", () -> button("Previous track") != null && button("Play or pause") != null
+                && button("Next track") != null);
+        click("Next track");
+        waitFor("next pressed", () -> bridge.ranTools.contains("media_key"));
+        assertEquals("next", lastArgs("media_key").getString("key"));
+        // A tool named for the key wins over the generic one.
+        click("Play or pause");
+        waitFor("toggled", () -> bridge.ranTools.contains("play_pause"));
+    }
+
+    @Test
+    public void mediaKeysAreOnlyToolsThatRunFromATap() throws Exception {
+        java.util.List<com.omnideck.mobile.core.BridgeTool> tools = com.omnideck.mobile.core.BridgeTool.parseAll(
+                new JSONObject("{\"tools\":[{\"name\":\"next\"},"
+                        + "{\"name\":\"previous_track\",\"parameters\":{\"type\":\"object\",\"properties\":"
+                        + "{\"player\":{\"type\":\"string\"}},\"required\":[\"player\"]}},"
+                        + "{\"name\":\"media_control\",\"parameters\":{\"type\":\"object\",\"properties\":"
+                        + "{\"action\":{\"type\":\"string\",\"enum\":[\"prev\",\"toggle\"]}}}}]}"));
+        assertEquals("next", PcTools.mediaKey(tools, PcTools.NEXT).tool.name);
+        PcTools.MediaKey prev = PcTools.mediaKey(tools, PcTools.PREVIOUS);
+        assertEquals("a tool that still needs input is skipped", "media_control", prev.tool.name);
+        assertEquals("prev", prev.args.getString("action"));
+        assertEquals("toggle", PcTools.mediaKey(tools, PcTools.PLAY_PAUSE).args.getString("action"));
+    }
+
+    @Test
     public void namesKeepTheirAcronyms() {
         assertEquals("Restart PC", PcTools.words("Restart pc"));
         assertEquals("Open URL", PcTools.words("Open url"));

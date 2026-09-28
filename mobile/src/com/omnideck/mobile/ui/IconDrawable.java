@@ -45,6 +45,10 @@ public final class IconDrawable extends Drawable {
     public static final int RESTART = 72;
     /** Arrow up out of a tray: send something to the PC. */
     public static final int UPLOAD = 73;
+    /** Media transport: previous track (bar + triangle), play / pause, next track. */
+    public static final int MEDIA_PREV = 74;
+    public static final int PLAY_PAUSE = 75;
+    public static final int MEDIA_NEXT = 76;
     public static final int DOWNLOAD = 25;
     public static final int TRASH = 26;
     public static final int CAMERA = 27;
@@ -316,6 +320,19 @@ public final class IconDrawable extends Drawable {
                 poly(false, 3, 15, 3, 20, 21, 20, 21, 15);
                 poly(false, 7, 8, 12, 3, 17, 8);
                 line(12, 3, 12, 15);
+                break;
+            case MEDIA_PREV:
+                line(6, 5.5f, 6, 18.5f);
+                poly(true, 18.5f, 5.5f, 9.5f, 12, 18.5f, 18.5f);
+                break;
+            case MEDIA_NEXT:
+                line(18, 5.5f, 18, 18.5f);
+                poly(true, 5.5f, 5.5f, 14.5f, 12, 5.5f, 18.5f);
+                break;
+            case PLAY_PAUSE:
+                poly(true, 3.5f, 5.5f, 12, 12, 3.5f, 18.5f);
+                line(15.5f, 6, 15.5f, 18);
+                line(20, 6, 20, 18);
                 break;
             case DOWNLOAD:
                 poly(false, 3, 15, 3, 20, 21, 20, 21, 15);

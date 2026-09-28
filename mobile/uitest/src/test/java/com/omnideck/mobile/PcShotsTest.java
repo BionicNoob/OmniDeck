@@ -159,6 +159,7 @@ public class PcShotsTest extends PcBaseTest {
     @Test
     public void controlsAndLauncher() throws Exception {
         richBridge(true);
+        PcToolsTest.addSchemaTools(bridge); // media keys
         openPc(theme);
         waitPaired();
         click("Capture screen");

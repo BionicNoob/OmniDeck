@@ -142,6 +142,7 @@ public class PcPowerTest extends PcBaseTest {
         advance(500);
         assertNull(button("Lock PC"));
         assertFalse(shows("Set up Wake-on-LAN"));
+        assertNull("no media keys without media tools", button("Next track"));
     }
 
     @Test

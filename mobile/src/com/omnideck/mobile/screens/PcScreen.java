@@ -181,6 +181,8 @@ public final class PcScreen extends Screen {
     // Controls
     private LinearLayout controlsCard;
     private LinearLayout volumeSection;
+    private LinearLayout mediaSection;
+    private LinearLayout mediaKeys;
     private View screenRule;
     private LinearLayout screenSection;
     private View clipRule;
@@ -715,6 +717,14 @@ public final class PcScreen extends Screen {
         volumeSection.addView(volNote, ui.margins(Ui.fillW(), 0, 8, 0, 0));
         body.addView(volumeSection, Ui.fillW());
         syncVolumeControls();
+
+        // Media transport, when the bridge has media keys.
+        mediaSection = ui.vbox();
+        mediaSection.addView(kit.section(IconDrawable.PLAY_PAUSE, "Media", null), Ui.fillW());
+        mediaKeys = ui.vbox();
+        mediaSection.addView(mediaKeys, ui.margins(Ui.fillW(), 0, 4, 0, 0));
+        mediaSection.setVisibility(View.GONE);
+        body.addView(mediaSection, ui.margins(Ui.fillW(), 0, 14, 0, 0));
 
         screenRule = rule();
         body.addView(screenRule, ruleParams(16, 16));
@@ -2207,18 +2217,72 @@ public final class PcScreen extends Screen {
     private void updateControlsForTools() {
         boolean known = tools != null;
         boolean vol = !known || PcTools.has(tools, "get_volume") || PcTools.has(tools, "set_volume");
+        boolean media = renderMedia();
         boolean shot = !known || PcTools.has(tools, "screenshot");
         boolean read = !known || PcTools.has(tools, "get_clipboard");
         boolean push = known && PcTools.has(tools, "set_clipboard");
         volumeSection.setVisibility(vol ? View.VISIBLE : View.GONE);
         screenSection.setVisibility(shot ? View.VISIBLE : View.GONE);
-        screenRule.setVisibility(vol && shot ? View.VISIBLE : View.GONE);
+        screenRule.setVisibility((vol || media) && shot ? View.VISIBLE : View.GONE);
         fetchBtn.setVisibility(read ? View.VISIBLE : View.GONE);
         clipRead.setVisibility(read ? View.VISIBLE : View.GONE);
         pushBtn.setVisibility(push ? View.VISIBLE : View.GONE);
         clipSection.setVisibility(read || push ? View.VISIBLE : View.GONE);
-        clipRule.setVisibility((read || push) && (vol || shot) ? View.VISIBLE : View.GONE);
-        controlsCard.setVisibility(vol || shot || read || push ? View.VISIBLE : View.GONE);
+        clipRule.setVisibility((read || push) && (vol || media || shot) ? View.VISIBLE : View.GONE);
+        controlsCard.setVisibility(vol || media || shot || read || push ? View.VISIBLE : View.GONE);
+    }
+
+    /**
+     * Previous / play-pause / next for the media tools the bridge offers
+     * (tools named for the key, or a media tool with that choice). Returns
+     * whether there is at least one.
+     */
+    private boolean renderMedia() {
+        mediaKeys.removeAllViews();
+        final List<PcTools.MediaKey> keys = new ArrayList<PcTools.MediaKey>();
+        final List<String> names = new ArrayList<String>();
+        List<Integer> icons = new ArrayList<Integer>();
+        int[] which = {PcTools.PREVIOUS, PcTools.PLAY_PAUSE, PcTools.NEXT};
+        int[] glyph = {IconDrawable.MEDIA_PREV, IconDrawable.PLAY_PAUSE, IconDrawable.MEDIA_NEXT};
+        String[] label = {"Previous track", "Play or pause", "Next track"};
+        for (int i = 0; i < which.length && tools != null; i++) {
+            PcTools.MediaKey k = PcTools.mediaKey(tools, which[i]);
+            if (k == null) continue;
+            keys.add(k);
+            names.add(label[i]);
+            icons.add(glyph[i]);
+        }
+        if (keys.isEmpty()) {
+            mediaSection.setVisibility(View.GONE);
+            return false;
+        }
+        int[] ic = new int[icons.size()];
+        for (int i = 0; i < ic.length; i++) ic[i] = icons.get(i);
+        mediaKeys.addView(kit.iconSegments(ic, names.toArray(new String[0]), new PcKit.OnSegment() {
+            @Override
+            public void onSegment(int index) {
+                pressMedia(keys.get(index), names.get(index));
+            }
+        }), Ui.fillW());
+        mediaSection.setVisibility(View.VISIBLE);
+        return true;
+    }
+
+    private void pressMedia(PcTools.MediaKey key, final String what) {
+        final String tok = e.settings.bridgeToken();
+        final int g = gen;
+        e.bridgeRun(key.tool.name, key.args, new Engine.Callback<Object>() {
+            @Override
+            public void done(Object r, String error) {
+                if (destroyed || g != gen) return;
+                if (error != null) {
+                    if (!linkFailure(error, tok)) ui.toast("Couldn't send " + what.toLowerCase(Locale.US) + " — " + error);
+                    return;
+                }
+                accepted(tok);
+                ui.toast(what + " · sent to the PC");
+            }
+        });
     }
 
     // ------------------------------------------------------------------
