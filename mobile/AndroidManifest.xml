@@ -8,6 +8,10 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Android 13+: tell the user when a reply, download or timer finishes in the background. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Timers ring on time (Android 12+ lets the user allow exact alarms; without it they run a little late). -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
 
     <!-- Android 11+ package visibility: the phone's text-to-speech engine (read
          aloud) and speech recognizer (voice input) must be declared to be found. -->
@@ -44,5 +48,10 @@
                 <data android:mimeType="text/plain" />
             </intent-filter>
         </activity>
+
+        <!-- Rings /timer timers from their alarms, also when the app is closed. -->
+        <receiver
+            android:name=".TimerReceiver"
+            android:exported="false" />
     </application>
 </manifest>

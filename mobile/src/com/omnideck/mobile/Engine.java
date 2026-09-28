@@ -1,6 +1,9 @@
 package com.omnideck.mobile;
 
+import android.app.AlarmManager;
+import android.app.PendingIntent;
 import android.content.Context;
+import android.content.Intent;
 import android.media.Ringtone;
 import android.media.RingtoneManager;
 import android.net.ConnectivityManager;
@@ -25,7 +28,9 @@ import com.omnideck.mobile.core.ModelInfo;
 import com.omnideck.mobile.core.OllamaClient;
 import com.omnideck.mobile.core.ReplyError;
 import com.omnideck.mobile.core.ServerInfo;
+import com.omnideck.mobile.core.SpeechText;
 import com.omnideck.mobile.core.Telemetry;
+import com.omnideck.mobile.core.Timers;
 import com.omnideck.mobile.core.Vitals;
 import com.omnideck.mobile.core.WakeOnLan;
 
@@ -209,8 +214,9 @@ public final class Engine {
     private boolean auxCompacts;
     private Cancellable pullCancel;
     public String draft = "";
-    private final List<long[]> timerEnds = new ArrayList<long[]>();
-    private final List<String> timerMessages = new ArrayList<String>();
+    /** Running /timer timers, persisted so they ring even after the app was closed. */
+    private final Timers timers;
+    private Notifier notifier;
 
     private Engine(Context app) {
         this.app = app;
@@ -221,6 +227,8 @@ public final class Engine {
         Conversation c = id.length() > 0 ? store.load(id) : null;
         conv = c != null ? c : new Conversation();
         settings.setCurrentChat(conv.id);
+        timers = Timers.parse(settings.timers());
+        restoreTimers();
     }
 
     private static ThreadFactory daemon(final String name) {
@@ -559,11 +567,16 @@ public final class Engine {
             else discover(false);
             main.removeCallbacks(healthTick);
             main.postDelayed(healthTick, HEALTH_MS);
+            // Back on screen: finished-work notifications are stale, timers tick in the app again.
+            if (notifier != null) notifier.clearFinished();
             checkTimers();
+            main.removeCallbacks(timerTick);
+            if (!timers.isEmpty()) main.postDelayed(timerTick, 1000);
         } else {
             unregisterNetworkCallback();
             main.removeCallbacks(healthTick);
             main.removeCallbacks(offlineRetry);
+            main.removeCallbacks(timerTick);
         }
     }
 
@@ -1463,6 +1476,7 @@ public final class Engine {
         main.removeCallbacks(j);
         j.copy();
         ChatMessage t = j.target;
+        String failure = null;
         t.thinking = t.thinking.trim();
         t.streaming = false;
         t.ttftMs = j.ttft.get();
@@ -1486,6 +1500,7 @@ public final class Engine {
             t.error = true;
             t.errorKind = why.kind;
             t.stats = why.stats();
+            failure = ReplyError.plain(why.message);
             // Retrying (regenerate) then leaves the images out for this model.
             if (ReplyError.NO_VISION.equals(why.kind)) noVision.add(t.model);
             telemetry.errors++;
@@ -1496,6 +1511,11 @@ public final class Engine {
         if (listener != null && j.conv == conv) listener.onMessageChanged(t);
         notifyBusy();
         save(j.conv);
+        if (!visible && (stats != null || failure != null)) {
+            // The user switched away while waiting: tell them it's done.
+            notifier().reply(t.model, Fmt.ellipsize(SpeechText.speakable(t.content), 600), failure,
+                    settings.incognito());
+        }
         if (stats != null && wasLoaded && stats.reloaded() && !reloadHintShown) {
             reloadHintShown = true;
             notice("The PC had to reload **" + t.model + "** (" + Fmt.seconds(stats.loadMs) + "). That happens when "
@@ -2021,6 +2041,7 @@ public final class Engine {
                                 if (listener != null) listener.onPull();
                                 updateNotice(owner, n, "**" + n0 + "** is downloaded. Use it with `/model " + n0 + "`.", "ok");
                                 log("ok", "Download complete · " + n0);
+                                if (!visible) notifier().download(n0, true, null);
                                 refreshModels(null);
                             }
                         });
@@ -2042,6 +2063,7 @@ public final class Engine {
                                         + (why.kind.equals(ReplyError.OTHER) ? "" : "\n`" + message + "`"),
                                         cancelled ? "warn" : "error");
                                 log(cancelled ? "warn" : "error", (cancelled ? "Download stopped · " : "Download failed · ") + n0);
+                                if (!visible && why != null) notifier().download(n0, false, ps.reason);
                             }
                         });
                     }
@@ -2824,29 +2846,29 @@ public final class Engine {
     }
 
     // ------------------------------------------------------------------
-    // Timers (in-app)
+    // Timers
     // ------------------------------------------------------------------
 
     public void timer(String arg) {
         String a = arg.trim();
         if (a.length() == 0) {
-            if (timerEnds.isEmpty()) {
+            if (timers.isEmpty()) {
                 notice("No timers running. Start one with `/timer 5m tea`.", "info");
                 return;
             }
             StringBuilder sb = new StringBuilder("**Timers**\n");
             long now = System.currentTimeMillis();
-            for (int i = 0; i < timerEnds.size(); i++) {
-                sb.append("• ").append(Fmt.duration(Math.max(0, (timerEnds.get(i)[0] - now) / 1000)))
-                        .append(" left — ").append(timerMessages.get(i)).append('\n');
+            for (Timers.Timer t : timers.all()) {
+                sb.append("• ").append(Fmt.duration(t.secondsLeft(now))).append(" left — ").append(t.message)
+                        .append('\n');
             }
             notice(sb.toString().trim(), "info");
             return;
         }
         if (a.matches("(?i)(cancel|stop|clear)( all)?")) {
-            int n = timerEnds.size();
-            timerEnds.clear();
-            timerMessages.clear();
+            for (Timers.Timer t : timers.all()) cancelAlarm(t);
+            int n = timers.clear();
+            saveTimers();
             main.removeCallbacks(timerTick);
             notice(n == 0 ? "No timers to cancel." : "Cancelled " + n + (n == 1 ? " timer." : " timers."), "info");
             return;
@@ -2864,40 +2886,155 @@ public final class Engine {
             notice("Usage: `/timer 5m <message>` (also `90s`, `1h30m`). `/timer` lists, `/timer cancel` stops.", "warn");
             return;
         }
-        if (msg.length() == 0) msg = "Timer";
-        timerEnds.add(new long[]{System.currentTimeMillis() + secs * 1000});
-        timerMessages.add(msg);
-        notice("Timer set for " + Fmt.duration(secs) + " — *" + msg + "*. It rings in the app, so keep OmniDeck open.",
-                "ok");
-        main.removeCallbacks(timerTick);
-        main.postDelayed(timerTick, 1000);
+        Timers.Timer t = timers.add(System.currentTimeMillis(), secs, msg);
+        saveTimers();
+        scheduleAlarm(t);
+        String blocked = notifier().blockedReason();
+        notice("Timer set for " + Fmt.duration(secs) + " — *" + t.message + "*. " + (blocked.length() == 0
+                ? "It rings here, or as a notification while OmniDeck is in the background."
+                : "It rings while OmniDeck is open. " + blocked + " Then it also rings in the background."), "ok");
+        log("info", "Timer set · " + Fmt.duration(secs) + " · " + t.message);
+        if (visible) {
+            main.removeCallbacks(timerTick);
+            main.postDelayed(timerTick, 1000);
+        }
     }
 
+    /** Checks the timers every second while the app is on screen; alarms cover the background. */
     private final Runnable timerTick = new Runnable() {
         @Override
         public void run() {
             checkTimers();
-            if (!timerEnds.isEmpty()) main.postDelayed(this, 1000);
+            if (visible && !timers.isEmpty()) main.postDelayed(this, 1000);
         }
     };
 
     private void checkTimers() {
-        long now = System.currentTimeMillis();
-        for (int i = timerEnds.size() - 1; i >= 0; i--) {
-            if (timerEnds.get(i)[0] <= now) {
-                String msg = timerMessages.get(i);
-                timerEnds.remove(i);
-                timerMessages.remove(i);
-                notice("⏰ Time's up — **" + msg + "**", "warn");
-                toast("⏰ " + msg);
-                try {
-                    Ringtone r = RingtoneManager.getRingtone(app,
-                            RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION));
-                    if (r != null) r.play();
-                } catch (RuntimeException ignored) {
-                }
+        for (Timers.Timer t : timers.due(System.currentTimeMillis())) fireTimer(t);
+    }
+
+    /** A timer's alarm went off (TimerReceiver); rings it unless the app already did. */
+    void timerAlarm(long id) {
+        Timers.Timer t = timers.find(id);
+        if (t != null) fireTimer(t);
+    }
+
+    /**
+     * Rings a timer once: a notice in the chat, then a toast and sound while
+     * the app is on screen, or a system notification while it isn't.
+     */
+    private void fireTimer(Timers.Timer t) {
+        if (timers.remove(t.id) == null) return;
+        saveTimers();
+        cancelAlarm(t);
+        long late = System.currentTimeMillis() - t.endsAt;
+        notice(late > 60000
+                ? "Timer **" + t.message + "** went off at " + clock(t.endsAt) + " while OmniDeck was closed."
+                : "Time's up — **" + t.message + "**", "warn");
+        log("warn", "Timer · " + t.message);
+        boolean notified = false;
+        if (visible) {
+            toast("Time's up — " + t.message);
+        } else if (notifier().canPost()) {
+            notifier().timer(t.id, t.message);
+            notified = true;
+        }
+        if (!notified) {
+            try {
+                Ringtone r = RingtoneManager.getRingtone(app,
+                        RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION));
+                if (r != null) r.play();
+            } catch (RuntimeException ignored) {
             }
         }
+    }
+
+    private static String clock(long ms) {
+        java.util.Calendar c = java.util.Calendar.getInstance();
+        c.setTimeInMillis(ms);
+        return String.format(Locale.US, "%02d:%02d", c.get(java.util.Calendar.HOUR_OF_DAY),
+                c.get(java.util.Calendar.MINUTE));
+    }
+
+    private void saveTimers() {
+        settings.setTimers(timers.toJson());
+    }
+
+    /** Timers still running at start-up (the app was closed): make sure each still has its alarm. */
+    private void restoreTimers() {
+        long now = System.currentTimeMillis();
+        for (Timers.Timer t : timers.all()) {
+            if (t.endsAt > now) scheduleAlarm(t);
+        }
+    }
+
+    /** The alarm that wakes the app when {@code t} ends; its data Uri makes it unique per timer. */
+    private PendingIntent timerIntent(Timers.Timer t, boolean create) {
+        Intent i = new Intent(app, TimerReceiver.class)
+                .setAction(TimerReceiver.ACTION)
+                .setData(android.net.Uri.parse("omnideck://timer/" + t.id))
+                .putExtra(TimerReceiver.EXTRA_ID, t.id);
+        int flags = PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE;
+        if (!create) flags |= PendingIntent.FLAG_NO_CREATE;
+        return PendingIntent.getBroadcast(app, 0, i, flags);
+    }
+
+    /**
+     * Exact and allowed in Doze when the phone lets the app (Android 12+ asks
+     * the user for exact alarms); otherwise as close as Android allows.
+     */
+    private void scheduleAlarm(Timers.Timer t) {
+        AlarmManager am = (AlarmManager) app.getSystemService(Context.ALARM_SERVICE);
+        if (am == null) return;
+        PendingIntent pi = timerIntent(t, true);
+        try {
+            if (canScheduleExact(am)) am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, t.endsAt, pi);
+            else am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, t.endsAt, pi);
+        } catch (SecurityException e) {
+            try {
+                am.set(AlarmManager.RTC_WAKEUP, t.endsAt, pi);
+            } catch (RuntimeException ignored) {
+            }
+        } catch (RuntimeException ignored) {
+            // No alarm: the timer still rings when the app is next open.
+        }
+    }
+
+    private static boolean canScheduleExact(AlarmManager am) {
+        if (Build.VERSION.SDK_INT < 31) return true;
+        try {
+            return Boolean.TRUE.equals(AlarmManager.class.getMethod("canScheduleExactAlarms").invoke(am));
+        } catch (ReflectiveOperationException e) {
+            return false;
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    private void cancelAlarm(Timers.Timer t) {
+        try {
+            PendingIntent pi = timerIntent(t, false);
+            if (pi == null) return;
+            AlarmManager am = (AlarmManager) app.getSystemService(Context.ALARM_SERVICE);
+            if (am != null) am.cancel(pi);
+            pi.cancel();
+        } catch (RuntimeException ignored) {
+        }
+    }
+
+    /** Pending timers, soonest first. */
+    public List<Timers.Timer> timers() {
+        return timers.all();
+    }
+
+    Notifier notifier() {
+        if (notifier == null) notifier = new Notifier(app, settings);
+        return notifier;
+    }
+
+    /** Why background notifications (replies, downloads, timers) can't show; "" when they can. */
+    public String notificationsBlocked() {
+        return notifier().blockedReason();
     }
 
     // ------------------------------------------------------------------

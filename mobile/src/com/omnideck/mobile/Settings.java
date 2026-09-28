@@ -168,6 +168,10 @@ public final class Settings {
     public boolean notifications() { return sp.getBoolean("notifications", true); }
     public void setNotifications(boolean v) { put("notifications", v); }
 
+    /** Running /timer timers as JSON (core/Timers), so they outlive the app process. */
+    public String timers() { return s("timers", "[]"); }
+    public void setTimers(String json) { put("timers", json); }
+
     public boolean incognito() { return sp.getBoolean("incognito", false); }
     public void setIncognito(boolean v) { put("incognito", v); }
 
