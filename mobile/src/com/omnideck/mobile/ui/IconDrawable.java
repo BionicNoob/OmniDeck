@@ -36,6 +36,15 @@ public final class IconDrawable extends Drawable {
     public static final int SCAN = 22;
     public static final int BOLT = 23;
     public static final int POWER = 24;
+    // PC power strip and clipboard push (numbered apart so other additions don't collide).
+    /** Padlock: lock the PC. */
+    public static final int LOCK = 70;
+    /** Crescent moon: put the PC to sleep. */
+    public static final int SLEEP = 71;
+    /** Counter-clockwise arrow round a power stem: restart the PC. */
+    public static final int RESTART = 72;
+    /** Arrow up out of a tray: send something to the PC. */
+    public static final int UPLOAD = 73;
     public static final int DOWNLOAD = 25;
     public static final int TRASH = 26;
     public static final int CAMERA = 27;
@@ -73,6 +82,8 @@ public final class IconDrawable extends Drawable {
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint paint2 = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Path path = new Path();
+    /** Second path for icons cut from two shapes (SLEEP). */
+    private final Path cut = new Path();
     private final RectF rf = new RectF();
     private final int intrinsic;
     private float stroke = 1.8f;
@@ -271,6 +282,40 @@ public final class IconDrawable extends Drawable {
             case POWER:
                 arc(12, 13, 8, -60, 300);
                 line(12, 2.5f, 12, 12);
+                break;
+            case LOCK:
+                rrect(4.5f, 10.5f, 19.5f, 21, 2.2f);
+                path.reset();
+                path.moveTo(8, 10.5f);
+                path.lineTo(8, 7);
+                rf.set(8, 3, 16, 11);
+                path.arcTo(rf, 180, 180, false);
+                path.lineTo(16, 10.5f);
+                c.drawPath(path, paint);
+                line(12, 14.6f, 12, 16.9f);
+                break;
+            case SLEEP: // crescent: a disc with an offset disc cut away
+                path.reset();
+                path.addCircle(11.2f, 12.8f, 8.6f, Path.Direction.CW);
+                cut.reset();
+                cut.addCircle(16.6f, 7.6f, 7f, Path.Direction.CW);
+                path.op(cut, Path.Op.DIFFERENCE);
+                c.drawPath(path, paint);
+                break;
+            case RESTART: // rotate-ccw (REFRESH mirrored) with a power stem inside
+                path.reset();
+                rf.set(3, 3, 21, 21);
+                path.arcTo(rf, 180, -270, true);
+                path.cubicTo(9.48f, 3, 7.07f, 4, 5.26f, 5.74f);
+                path.lineTo(3, 8);
+                c.drawPath(path, paint);
+                poly(false, 3, 3, 3, 8, 8, 8);
+                line(12, 8.2f, 12, 12.6f);
+                break;
+            case UPLOAD:
+                poly(false, 3, 15, 3, 20, 21, 20, 21, 15);
+                poly(false, 7, 8, 12, 3, 17, 8);
+                line(12, 3, 12, 15);
                 break;
             case DOWNLOAD:
                 poly(false, 3, 15, 3, 20, 21, 20, 21, 15);

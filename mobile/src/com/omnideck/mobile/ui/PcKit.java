@@ -1,11 +1,14 @@
 package com.omnideck.mobile.ui;
 
+import android.content.res.ColorStateList;
 import android.graphics.drawable.Drawable;
+import android.graphics.drawable.RippleDrawable;
 import android.text.SpannableString;
 import android.text.Spanned;
 import android.text.TextUtils;
 import android.text.style.ForegroundColorSpan;
 import android.text.style.RelativeSizeSpan;
+import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -25,8 +28,8 @@ import java.util.regex.Pattern;
 /**
  * Building blocks and formatting for the PC tab: recessed instrument tiles,
  * readouts with small units, stat columns, app monograms, a segmented control,
- * plus parsers for LaunchBridge results (volume level, clipboard text,
- * screenshot images, pretty-printed tool output).
+ * quiet heading buttons and power keys, plus parsers for LaunchBridge results
+ * (volume level, clipboard text, screenshot images, pretty-printed tool output).
  */
 public final class PcKit {
     private final Ui ui;
@@ -48,6 +51,12 @@ public final class PcKit {
                     .radius(ui.dp(8)).build();
         }
         return ui.rounded(t.surface2, t.isDark ? t.hair : t.edge, 8);
+    }
+
+    /** The quiet control surface (flat tint, hairline edge) with a press ripple. */
+    public Drawable pressable(float radiusDp) {
+        return new RippleDrawable(ColorStateList.valueOf(Theme.alpha(t.accent, 0x33)),
+                ui.rounded(t.chip, t.hud ? t.hair : t.edge, radiusDp), null);
     }
 
     /** An instrument tile: micro-caps label, a big readout, an optional meter and a detail line. */
@@ -105,11 +114,10 @@ public final class PcKit {
         return s;
     }
 
-    /** A label-over-value stat column (header card: BRIDGE / VERSION / APPS). */
+    /** A label-over-value stat column (header card: BRIDGE / VERSION / APPS), captions in the micro-caps ink. */
     public LinearLayout stat(String label, TextView value) {
         LinearLayout col = ui.vbox();
         TextView l = ui.label(label);
-        l.setTextColor(t.faint);
         col.addView(l, Ui.fillW());
         value.setPadding(0, ui.dp(5), 0, 0);
         value.setSingleLine(true);
@@ -121,7 +129,7 @@ public final class PcKit {
     /** A small section heading inside a card: icon + micro-caps + optional right view. */
     public LinearLayout section(int icon, String title, View right) {
         LinearLayout row = ui.hbox();
-        row.setMinimumHeight(ui.dp(30));
+        row.setMinimumHeight(ui.dp(32));
         ImageView iv = icon(icon, t.hud ? t.accent : t.label, 16);
         row.addView(iv, new LinearLayout.LayoutParams(ui.dp(16), ui.dp(16)));
         TextView l = ui.label(title);
@@ -139,20 +147,31 @@ public final class PcKit {
         return iv;
     }
 
-    /** A rounded square with an app's initials (launcher rows). */
+    /** A rounded square with an app's initials (launcher rows): mono in Cyber, Inter elsewhere. */
     public TextView monogram(String name) {
-        TextView m = ui.text(initials(name), t.hud ? 12 : 13, t.hud ? t.accent : t.label, t.hud ? t.labelFace
-                : t.bodySemi);
+        String in = initials(name);
+        TextView m = ui.text(in, t.hud ? 14 : 13, t.hud ? t.accent : t.label, t.hud ? t.mono : t.bodySemi);
         m.setGravity(Gravity.CENTER);
         m.setBackground(ui.rounded(Theme.alpha(t.data, t.isDark ? 0x1A : 0x14), Theme.alpha(t.data, 0x40),
                 t.hud ? 6 : 8));
         return m;
     }
 
+    /**
+     * Up to two initials: "VS" for Visual Studio Code, "D" for Discord. A
+     * leading acronym keeps its own letters ("OB" for OBS Studio, "VL" for VLC
+     * media player) rather than mixing in the next word ("OS" reads as
+     * "operating system").
+     */
     static String initials(String name) {
         String n = name == null ? "" : name.trim();
         if (n.length() == 0) return "?";
         String[] w = n.split("[\\s_\\-.]+");
+        String first = w.length > 0 ? w[0] : "";
+        if (first.length() >= 2 && Character.isUpperCase(first.charAt(0)) && Character.isUpperCase(first.charAt(1))
+                && Character.isLetter(first.charAt(1))) {
+            return first.substring(0, 2);
+        }
         StringBuilder sb = new StringBuilder();
         for (String s : w) {
             if (s.length() > 0 && Character.isLetterOrDigit(s.charAt(0))) sb.append(s.charAt(0));
@@ -199,10 +218,27 @@ public final class PcKit {
         return row;
     }
 
+    /** Dims a {@link #segmented} row and marks its segments disabled (callers also ignore taps). */
+    public static void setSegmentsEnabled(LinearLayout row, boolean on) {
+        for (int i = 0; i < row.getChildCount(); i++) {
+            View v = row.getChildAt(i);
+            if (v instanceof TextView) v.setEnabled(on);
+        }
+        row.setAlpha(on ? 1f : 0.45f);
+    }
+
     private Drawable ripple() {
-        android.util.TypedValue tv = new android.util.TypedValue();
+        TypedValue tv = new TypedValue();
         ui.c.getTheme().resolveAttribute(android.R.attr.selectableItemBackground, tv, true);
         return tv.resourceId != 0 ? ui.c.getDrawable(tv.resourceId) : null;
+    }
+
+    /** Line icons next to other line icons: Light and Dark use the stroked send / play glyphs. */
+    int buttonIcon(int kind) {
+        if (t.hud) return kind;
+        if (kind == IconDrawable.SEND) return IconDrawable.SEND_LINE;
+        if (kind == IconDrawable.PLAY) return IconDrawable.PLAY_LINE;
+        return kind;
     }
 
     /**
@@ -214,11 +250,8 @@ public final class PcKit {
         b.setGravity(Gravity.CENTER);
         b.setMinimumHeight(ui.dp(40));
         b.setPadding(ui.dp(8), ui.dp(8), ui.dp(8), ui.dp(8));
-        android.graphics.drawable.RippleDrawable bg = new android.graphics.drawable.RippleDrawable(
-                android.content.res.ColorStateList.valueOf(Theme.alpha(t.accent, 0x33)),
-                ui.rounded(t.chip, t.hud ? t.hair : t.edge, 8), null);
-        b.setBackground(bg);
-        b.addView(icon(icon, t.ink, 16), new LinearLayout.LayoutParams(ui.dp(16), ui.dp(16)));
+        b.setBackground(pressable(8));
+        b.addView(icon(buttonIcon(icon), t.ink, 16), new LinearLayout.LayoutParams(ui.dp(16), ui.dp(16)));
         TextView tv = ui.text(t.hud ? label.toUpperCase(Locale.US) : label, t.hud ? 10 : 13.5f, t.ink,
                 t.hud ? t.labelFace : t.bodySemi);
         if (t.hud) tv.setLetterSpacing(0.08f);
@@ -227,6 +260,65 @@ public final class PcKit {
         tv.setPadding(ui.dp(7), 0, 0, 0);
         b.addView(tv, Ui.wrap());
         b.setContentDescription(label);
+        b.setClickable(true);
+        b.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                ui.tick(v);
+                l.onClick(v);
+            }
+        });
+        return b;
+    }
+
+    /**
+     * A compact control for the right end of a section heading ("Capture",
+     * "Fetch"): the quiet control strip look (flat tint, hairline, 8dp
+     * radius, 32dp tall) with a leading icon, so it reads as a button and
+     * never as another heading.
+     */
+    public TextView quiet(String label, int icon, View.OnClickListener l) {
+        TextView b = ui.button(label, buttonIcon(icon), Ui.SECONDARY, l);
+        b.setTextSize(TypedValue.COMPLEX_UNIT_SP, t.hud ? 10 : 12.5f);
+        b.setPadding(ui.dp(10), ui.dp(6), ui.dp(12), ui.dp(6));
+        b.setMinHeight(ui.dp(32));
+        b.setMinimumHeight(ui.dp(32));
+        b.setMinWidth(0);
+        b.setMinimumWidth(0);
+        b.setCompoundDrawablePadding(ui.dp(6));
+        b.setContentDescription(label);
+        return b;
+    }
+
+    /** A square icon button on the quiet control surface (sits in a row of 40dp buttons). */
+    public ImageView iconKey(int kind, String description, View.OnClickListener l) {
+        ImageView v = ui.iconButton(kind, description, t.ink, l);
+        v.setImageDrawable(new IconDrawable(kind, t.ink, t.ink, ui.dp(18)));
+        v.setBackground(pressable(8));
+        v.setLayoutParams(new LinearLayout.LayoutParams(ui.dp(40), ui.dp(40)));
+        return v;
+    }
+
+    /**
+     * A console key: an icon over a short label on the quiet control
+     * surface (the PC's power strip). Equal-width keys share a row.
+     */
+    public LinearLayout key(String label, int icon, String description, final View.OnClickListener l) {
+        LinearLayout b = ui.vbox();
+        b.setGravity(Gravity.CENTER);
+        b.setMinimumHeight(ui.dp(60));
+        b.setPadding(ui.dp(3), ui.dp(10), ui.dp(3), ui.dp(9));
+        b.setBackground(pressable(8));
+        b.addView(icon(icon, t.hud ? t.accent : t.ink, 20), new LinearLayout.LayoutParams(ui.dp(20), ui.dp(20)));
+        TextView tv = ui.text(t.hud ? label.toUpperCase(Locale.US) : label, t.hud ? 8.5f : 12f, t.ink,
+                t.hud ? t.labelFace : t.bodySemi);
+        if (t.hud) tv.setLetterSpacing(0.06f);
+        tv.setSingleLine(true);
+        tv.setEllipsize(TextUtils.TruncateAt.END);
+        tv.setGravity(Gravity.CENTER);
+        tv.setPadding(0, ui.dp(7), 0, 0);
+        b.addView(tv, Ui.fillW());
+        b.setContentDescription(description);
         b.setClickable(true);
         b.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -282,6 +374,11 @@ public final class PcKit {
         if (s < 60) return s + "s ago";
         if (s < 3600) return (s / 60) + "m ago";
         return (s / 3600) + "h ago";
+    }
+
+    /** A time span for a chart axis: "10 s", "45 s", "2 min". */
+    public static String span(long seconds) {
+        return seconds < 60 ? seconds + " s" : (seconds / 60) + " min";
     }
 
     /** Digits at full size, letters (units) small and dim: "3d 4h" reads as an instrument value. */
@@ -473,14 +570,5 @@ public final class PcKit {
             sb.append(k.replace('_', ' ')).append(": ").append(v);
         }
         return sb.toString();
-    }
-
-    /** Default JSON arguments offered when running a tool by hand. */
-    public static String argsTemplate(String tool) {
-        if ("set_volume".equals(tool)) return "{\"level\": 50}";
-        if ("screenshot".equals(tool)) return "{\"save\": false}";
-        if ("set_clipboard".equals(tool)) return "{\"text\": \"\"}";
-        if ("open_url".equals(tool)) return "{\"url\": \"https://\"}";
-        return "{}";
     }
 }

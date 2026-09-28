@@ -206,11 +206,12 @@ public class PcScreenTest extends Harness {
     public void noAiLinkExplainsWhatToDoFirst() throws Exception {
         prefs().edit().putString("server", "").putString("last_host", "").commit();
         launch("cyber", MainActivity.TAB_PC);
-        waitFor("no-link card", () -> shows("No AI link") && shows("same PC as your AI"));
+        // No AI link and no bridge address: the card offers both ways forward.
+        waitFor("no-address card", () -> shows("No PC address") && shows("same PC as your AI"));
+        assertNotNull(button("Enter PC address"));
         advance(3200);
         shoot("pc-cyber-nolink");
-        textView("Connection").performClick();
-        idle();
+        click("Find AI");
         assertNotNull(latestAlert());
         assertTrue(latestAlert().isShowing());
     }
@@ -236,7 +237,11 @@ public class PcScreenTest extends Harness {
         bridge.failing.add("get_system_info");
         openPc("dark");
         waitFor("vitals error", () -> shows("Couldn't read vitals") && shows("access denied by the PC"));
-        assertTrue(shows("No data"));
+        // No vitals yet: the cap says Error, a remedy and Retry replace the empty instrument grid.
+        assertTrue(shows("Error"));
+        assertTrue(shows("Allow system info in LaunchBridge"));
+        assertNotNull(button("Retry vitals"));
+        assertFalse(shows("Processor load"));
         waitFor("launcher still works", () -> button("Open Spotify") != null);
         advance(3200);
         shoot("pc-dark-vitals-error");
@@ -450,10 +455,15 @@ public class PcScreenTest extends Harness {
         richBridge(true);
         openPc("cyber");
         waitPaired();
-        waitFor("push offered", () -> textView("Send phone clipboard to PC") != null);
+        waitFor("push offered", () -> pushButton() != null);
         act.copy("test", "from the phone");
-        textView("Send phone clipboard to PC").performClick();
+        pushButton().performClick();
         waitFor("pushed", () -> "from the phone".equals(bridge.clipboard));
+    }
+
+    /** The "Send phone clipboard" button (its description names where it goes). */
+    private TextView pushButton() {
+        return (TextView) button("Send phone clipboard to PC");
     }
 
     // ------------------------------------------------------------------
@@ -466,7 +476,8 @@ public class PcScreenTest extends Harness {
         openPc("light");
         waitPaired();
         waitFor("first apps", () -> button("Open Spotify") != null);
-        assertTrue(shows("Show all 9"));
+        // 9 listed, 6 shown: the footer offers the other 3 (never "Show all" under "42 indexed").
+        assertTrue(shows("Show 3 more"));
         EditText field = (EditText) button("Search apps");
         assertNotNull(field);
         field.setText("code");
@@ -520,16 +531,41 @@ public class PcScreenTest extends Harness {
         latestAlert().getButton(AlertDialog.BUTTON_NEGATIVE).performClick();
         idle();
 
+        // The runner builds a form; raw JSON is one tap away ("Edit as JSON") and still validated.
         click("Run set_volume");
         AlertDialog vol = latestAlert();
-        dialogField(vol).setText("{level: ");
+        dialogClick(vol, "Edit as JSON");
+        EditText json = dialogFieldDescribed(vol, "Tool arguments");
+        json.setText("{level: ");
         vol.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
         idle();
         assertTrue("invalid JSON keeps the dialog open", vol.isShowing());
         assertTrue(dialogShows(vol, "isn't a JSON object"));
-        dialogField(vol).setText("{\"level\": 20}");
+        json.setText("{\"level\": 20}");
         vol.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
         waitFor("volume 20", () -> bridge.volume == 20);
+    }
+
+    private static EditText dialogFieldDescribed(Dialog d, String description) {
+        for (View v : dialogViews(d)) {
+            if (v instanceof EditText && description.contentEquals(v.getContentDescription() == null ? ""
+                    : v.getContentDescription())) {
+                return (EditText) v;
+            }
+        }
+        throw new AssertionError("no field '" + description + "' in dialog");
+    }
+
+    private static void dialogClick(Dialog d, String description) {
+        for (View v : dialogViews(d)) {
+            if (v.isShown() && description.contentEquals(v.getContentDescription() == null ? ""
+                    : v.getContentDescription())) {
+                v.performClick();
+                idle();
+                return;
+            }
+        }
+        throw new AssertionError("nothing described as '" + description + "' in dialog");
     }
 
     // ------------------------------------------------------------------

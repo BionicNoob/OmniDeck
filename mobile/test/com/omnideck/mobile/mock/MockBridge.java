@@ -25,7 +25,9 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 
 import javax.imageio.ImageIO;
@@ -60,6 +62,22 @@ public final class MockBridge {
     public final Set<String> failing = Collections.synchronizedSet(new HashSet<String>());
     /** The PC clipboard in rich mode (set_clipboard writes it). */
     public volatile String clipboard = "ssh omni@atlas-pc -p 2222\ntail -f launchbridge.log";
+
+    // --- PC tab extras (all off by default) ----------------------------------
+    /** Rich mode also offers sleep_pc / restart_pc / shutdown_pc (the power strip). */
+    public volatile boolean power;
+    /** More tool descriptors ({name, description, parameters…}) listed after the rich catalog. */
+    public final List<JSONObject> extraTools = Collections.synchronizedList(new ArrayList<JSONObject>());
+    /** Arguments of every /desk/run in rich mode, as {"tool": name, "args": {...}}, in order. */
+    public final List<JSONObject> ranArgs = Collections.synchronizedList(new ArrayList<JSONObject>());
+    /** Extra delay before answering one desktop tool in rich mode, in ms (tool → delay). */
+    public final Map<String, Integer> toolDelayMs = new ConcurrentHashMap<String, Integer>();
+    /** A MAC address the rich get_system_info reports (Wake-on-LAN learning); null = none. */
+    public volatile String mac;
+    /** What /health reports as apps_indexed. */
+    public volatile int appsIndexed = 42;
+    /** Rich /apps finds nothing (an index that hasn't been built yet). */
+    public volatile boolean emptyIndex;
     private int cpuTick;
     private static final int[] CPU_SEQ = {23, 31, 27, 42, 38, 29, 35, 47, 33, 26, 22, 30};
     private static final String[][] CATALOG = {
@@ -116,7 +134,8 @@ public final class MockBridge {
             }
         }
         if ("GET".equals(method) && "/health".equals(path)) {
-            send(ex, 200, new JSONObject().put("ok", true).put("apps_indexed", 42).put("version", "2.1").toString());
+            send(ex, 200, new JSONObject().put("ok", true).put("apps_indexed", appsIndexed).put("version", "2.1")
+                    .toString());
             return;
         }
         if ("POST".equals(method) && "/pair".equals(path)) {
@@ -216,7 +235,7 @@ public final class MockBridge {
             }
             JSONArray m = new JSONArray();
             for (String[] app : CATALOG) {
-                if (m.length() >= limit) break;
+                if (emptyIndex || m.length() >= limit) break;
                 if (q.length() > 0 && !app[1].toLowerCase(Locale.US).contains(q)) continue;
                 m.put(new JSONObject().put("id", app[0]).put("name", app[1]).put("path", app[2]).put("source", app[3]));
             }
@@ -246,6 +265,14 @@ public final class MockBridge {
                     {"lock_screen", "Lock the workstation"}, {"list_processes", "Top processes by CPU"}};
             JSONArray a = new JSONArray();
             for (String[] t : tools) a.put(new JSONObject().put("name", t[0]).put("description", t[1]));
+            if (power) {
+                String[][] keys = {{"sleep_pc", "Put the PC to sleep"}, {"restart_pc", "Restart the PC"},
+                        {"shutdown_pc", "Shut the PC down"}};
+                for (String[] t : keys) a.put(new JSONObject().put("name", t[0]).put("description", t[1]));
+            }
+            synchronized (extraTools) {
+                for (JSONObject t : extraTools) a.put(t);
+            }
             send(ex, 200, new JSONObject().put("tools", a).toString());
             return true;
         }
@@ -254,6 +281,15 @@ public final class MockBridge {
         String tool = req.optString("tool");
         JSONObject args = req.optJSONObject("args");
         ranTools.add(tool);
+        ranArgs.add(new JSONObject().put("tool", tool).put("args", args == null ? new JSONObject() : args));
+        Integer wait = toolDelayMs.get(tool);
+        if (wait != null && wait > 0) {
+            try {
+                Thread.sleep(wait);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
         if (failing.contains(tool)) {
             send(ex, 200, new JSONObject().put("ok", false).put("error", tool + ": access denied by the PC")
                     .toString());
@@ -268,6 +304,7 @@ public final class MockBridge {
             result = new JSONObject().put("hostname", "ATLAS-PC").put("os", "Windows 11 Pro 23H2")
                     .put("cpu", cpu + "%").put("ram", "8.1 / 16 GB").put("disk", "210 GB free of 476 GB")
                     .put("battery", "78%").put("power", "Charging").put("uptime", "3 days, 4:12:05");
+            if (mac != null) ((JSONObject) result).put("mac_address", mac);
         } else if ("get_volume".equals(tool)) {
             result = new JSONObject().put("level", volume).put("muted", false);
         } else if ("set_volume".equals(tool)) {
@@ -283,6 +320,11 @@ public final class MockBridge {
             result = "Clipboard set (" + clipboard.length() + " chars)";
         } else if ("lock_screen".equals(tool)) {
             result = "Workstation locked";
+        } else if (power && ("sleep_pc".equals(tool) || "restart_pc".equals(tool) || "shutdown_pc".equals(tool))) {
+            result = "sleep_pc".equals(tool) ? "Going to sleep" : "restart_pc".equals(tool) ? "Restarting in 5 s"
+                    : "Shutting down in 5 s";
+        } else if (isExtra(tool)) {
+            result = new JSONObject().put("ran", tool).put("args", args == null ? new JSONObject() : args);
         } else if ("list_processes".equals(tool)) {
             result = new JSONArray()
                     .put(new JSONObject().put("name", "ollama.exe").put("cpu", 18.5).put("mem_mb", 5120))
@@ -294,6 +336,15 @@ public final class MockBridge {
         }
         send(ex, 200, new JSONObject().put("ok", true).put("result", result).toString());
         return true;
+    }
+
+    private boolean isExtra(String tool) {
+        synchronized (extraTools) {
+            for (JSONObject t : extraTools) {
+                if (tool.equals(t.optString("name"))) return true;
+            }
+        }
+        return false;
     }
 
     private static volatile String desktop;
