@@ -56,6 +56,11 @@ public abstract class Screen {
         return shown;
     }
 
+    /** The app is in the foreground (between the activity's onStart and onStop), whichever page shows. */
+    public final boolean isAppVisible() {
+        return started;
+    }
+
     /** Called by the shell from onStart: marks the app visible, then runs {@link #onActivityStart()}. */
     public final void dispatchActivityStart() {
         started = true;
@@ -109,6 +114,12 @@ public abstract class Screen {
     public void onMessageRemoved(ChatMessage m) {}
 
     public void onBusyChanged() {}
+
+    /**
+     * The phone started or stopped speaking (a reply read aloud, a voice-turn
+     * answer, "Read aloud"). Polled by the shell while the app is visible.
+     */
+    public void onSpeechChanged(boolean speaking) {}
 
     /** Text to put into this screen's composer (only the chat screen has one). */
     public void onInsertText(String text) {}

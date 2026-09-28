@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">OmniDeck</string>
+    <!-- The share-sheet entry: text and photos go to the chat composer. -->
+    <string name="share_label">Ask OMNI</string>
 </resources>

@@ -1,21 +1,25 @@
 package com.omnideck.mobile;
 
 import android.app.Activity;
-import android.app.AlertDialog;
 import android.content.ActivityNotFoundException;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
-import android.content.DialogInterface;
 import android.content.Intent;
+import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
+import android.graphics.drawable.Icon;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.Parcelable;
 import android.speech.RecognizerIntent;
 import android.text.InputType;
 import android.text.TextUtils;
+import android.util.Base64;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -41,10 +45,15 @@ import com.omnideck.mobile.ui.Backdrop;
 import com.omnideck.mobile.ui.BootOverlay;
 import com.omnideck.mobile.ui.IconDrawable;
 import com.omnideck.mobile.ui.Panel;
+import com.omnideck.mobile.ui.Sheet;
 import com.omnideck.mobile.ui.Theme;
 import com.omnideck.mobile.ui.Ui;
 import com.omnideck.mobile.ui.Widgets;
 
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.Reader;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -54,9 +63,10 @@ import java.util.Map;
 /**
  * The shell: HUD top bar (link status), the page area, and the command bar
  * (COMMAND · COMMS · MODELS · PC). Owns theming, navigation, activity
- * results (voice input, image picking) and forwards Engine events to pages.
+ * results (voice input, image picking), what other apps and launcher
+ * shortcuts hand in, and forwards Engine events to pages.
  */
-public final class MainActivity extends Activity implements Engine.Listener {
+public final class MainActivity extends Activity implements Engine.Listener, Theme.Host {
     public static final int TAB_COMMAND = 0;
     public static final int TAB_COMMS = 1;
     public static final int TAB_MODELS = 2;
@@ -64,10 +74,32 @@ public final class MainActivity extends Activity implements Engine.Listener {
     /** Tests turn the cold-start boot sequence off. */
     public static boolean skipBoot;
     private static boolean bootShown;
+    private static boolean shortcutsPublished;
 
     public static final String[] TAB_NAMES = {"Command", "Comms", "Models", "PC"};
     static final int[] TAB_ICONS = {IconDrawable.NAV_COMMAND, IconDrawable.NAV_COMMS, IconDrawable.NAV_MODELS,
             IconDrawable.NAV_PC};
+
+    /** Launcher shortcut (intent extra) → what to do on arrival. */
+    public static final String EXTRA_SHORTCUT = "com.omnideck.mobile.SHORTCUT";
+    public static final String SHORTCUT_TALK = "talk";
+    public static final String SHORTCUT_NEW_CHAT = "new_chat";
+    public static final String SHORTCUT_SCREENSHOT = "screenshot";
+    public static final String SHORTCUT_COMMAND = "command";
+
+    /**
+     * Fixed request codes: a voice or photo result that arrives after the
+     * activity was recreated (process death, a dark-mode switch) still finds
+     * its way to the chat, even though the in-memory callback is gone.
+     */
+    static final int REQ_VOICE = 7101;
+    static final int REQ_IMAGE = 7102;
+    static final int REQ_NOTIFY = 7103;
+    private static final String PERM_NOTIFY = "android.permission.POST_NOTIFICATIONS";
+    /** Shared files are read up to this many characters. */
+    static final int SHARED_TEXT_MAX = 32000;
+    /** Up to this many images per message (the composer's limit). */
+    static final int MAX_IMAGES = 4;
 
     private Engine engine;
     private Theme theme;
@@ -76,6 +108,7 @@ public final class MainActivity extends Activity implements Engine.Listener {
     private int themeId;
     private Commander commander;
     private final Handler handler = new Handler(Looper.getMainLooper());
+    private boolean started;
 
     private FrameLayout content;
     private final Screen[] tabs = new Screen[4];
@@ -85,10 +118,12 @@ public final class MainActivity extends Activity implements Engine.Listener {
 
     // Top bar
     private TextView subtitle;
+    private TextView subtitleAddr;
     private LinearLayout pill;
     private Widgets.StatusDot dot;
     private TextView pillText;
     private TextView latencyText;
+    private ImageView stopSpeech;
     // Command bar
     private final View[] navItems = new View[4];
     private final ImageView[] navIcons = new ImageView[4];
@@ -99,6 +134,7 @@ public final class MainActivity extends Activity implements Engine.Listener {
     private Widgets.ScanLine scanLine;
     private TextView banner;
     private Engine.State lastState;
+    private boolean speaking;
 
     // Activity results
     public interface ResultHandler {
@@ -110,11 +146,11 @@ public final class MainActivity extends Activity implements Engine.Listener {
     }
 
     public interface ImageResult {
-        void onImage(String base64, android.graphics.Bitmap preview);
+        void onImage(String base64, Bitmap preview);
     }
 
     private final Map<Integer, ResultHandler> results = new HashMap<Integer, ResultHandler>();
-    private int nextRequest = 7100;
+    private int nextRequest = 7200;
 
     // ------------------------------------------------------------------
     // Accessors for screens
@@ -128,6 +164,7 @@ public final class MainActivity extends Activity implements Engine.Listener {
         return ui;
     }
 
+    @Override
     public Theme theme() {
         return theme;
     }
@@ -146,6 +183,16 @@ public final class MainActivity extends Activity implements Engine.Listener {
 
     public CommsScreen comms() {
         return (CommsScreen) tabScreen(TAB_COMMS);
+    }
+
+    /** True while the phone reads something aloud (as last polled). */
+    public boolean isSpeaking() {
+        return speaking;
+    }
+
+    /** False after onStop, until onStart (the app is in the background). */
+    public boolean isStartedVisible() {
+        return started;
     }
 
     private Screen tabScreen(int i) {
@@ -191,6 +238,7 @@ public final class MainActivity extends Activity implements Engine.Listener {
         super.onCreate(savedInstanceState);
         ui = new Ui(this, theme);
         ui.haptics = engine.settings.haptics();
+        ui.reduceMotion = engine.settings.reduceMotion();
         commander = new Commander(this);
         styleSystemBars();
         setContentView(buildShell());
@@ -202,7 +250,12 @@ public final class MainActivity extends Activity implements Engine.Listener {
         if (savedInstanceState != null && savedInstanceState.getBoolean("settings", false)) openSettings();
         onStateChanged();
         onTelemetry();
-        handleShareIntent(getIntent());
+        // A restored activity (process death) or a relaunch from Recents gets the
+        // task's original intent again: a share or shortcut must not be replayed.
+        if (savedInstanceState == null && (getIntent().getFlags() & Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) == 0) {
+            handleIntent(getIntent());
+        }
+        publishShortcuts();
         if (!bootShown && savedInstanceState == null && !skipBoot && !engine.settings.reduceMotion()) {
             bootShown = true;
             new BootOverlay(this, theme).play((ViewGroup) findViewById(android.R.id.content));
@@ -220,17 +273,7 @@ public final class MainActivity extends Activity implements Engine.Listener {
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
-        handleShareIntent(intent);
-    }
-
-    private void handleShareIntent(Intent intent) {
-        if (intent == null || !Intent.ACTION_SEND.equals(intent.getAction())) return;
-        CharSequence shared = intent.getCharSequenceExtra(Intent.EXTRA_TEXT);
-        intent.setAction(Intent.ACTION_MAIN);
-        if (shared != null && shared.length() > 0) {
-            select(TAB_COMMS, false);
-            comms().onInsertText(shared.toString());
-        }
+        handleIntent(intent);
     }
 
     @Override
@@ -241,18 +284,27 @@ public final class MainActivity extends Activity implements Engine.Listener {
             recreate();
             return;
         }
+        started = true;
         ui.haptics = engine.settings.haptics();
+        ui.reduceMotion = engine.settings.reduceMotion();
         engine.setVisible(true);
         for (Screen s : built()) s.dispatchActivityStart();
         updateScanLine();
+        updateDot();
+        handler.removeCallbacks(speechPoll);
+        handler.post(speechPoll);
     }
 
     @Override
     protected void onStop() {
         super.onStop();
+        started = false;
         for (Screen s : built()) s.dispatchActivityStop();
         engine.setVisible(false);
         if (scanLine != null) scanLine.stop();
+        // No pulse (and no frames) while nothing is on screen; onStart brings it back.
+        dot.setPulsing(false);
+        handler.removeCallbacks(speechPoll);
     }
 
     @Override
@@ -284,27 +336,17 @@ public final class MainActivity extends Activity implements Engine.Listener {
 
     private void styleSystemBars() {
         Window w = getWindow();
-        w.setStatusBarColor(opaque(theme.topbar, theme.bg));
+        w.setStatusBarColor(Theme.flatten(theme.topbar, theme.bg));
         View decor = w.getDecorView();
         int flags = decor.getSystemUiVisibility();
         if (!theme.isDark) flags |= View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
         if (!theme.isDark && Build.VERSION.SDK_INT >= 27) {
             flags |= 0x10; // SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR (API 27)
-            w.setNavigationBarColor(opaque(theme.nav, theme.bg));
+            w.setNavigationBarColor(Theme.flatten(theme.nav, theme.bg));
         } else {
-            w.setNavigationBarColor(theme.isDark ? opaque(theme.nav, theme.bg) : 0xFF000000);
+            w.setNavigationBarColor(theme.isDark ? Theme.flatten(theme.nav, theme.bg) : 0xFF000000);
         }
         decor.setSystemUiVisibility(flags);
-    }
-
-    /** Blends a translucent color over a base so system bars get a solid color. */
-    static int opaque(int c, int base) {
-        int a = (c >>> 24) & 0xFF;
-        if (a == 0xFF) return c;
-        int r = (((c >> 16) & 0xFF) * a + ((base >> 16) & 0xFF) * (255 - a)) / 255;
-        int g = (((c >> 8) & 0xFF) * a + ((base >> 8) & 0xFF) * (255 - a)) / 255;
-        int b = ((c & 0xFF) * a + (base & 0xFF) * (255 - a)) / 255;
-        return 0xFF000000 | (r << 16) | (g << 8) | b;
     }
 
     /** "system" | "cyber" | "light" | "dark". Recreates the screen when the look changes. */
@@ -373,8 +415,8 @@ public final class MainActivity extends Activity implements Engine.Listener {
             bar.setBackgroundColor(theme.topbar);
         }
         ImageView logo = new ImageView(this);
-        logo.setImageDrawable(new IconDrawable(IconDrawable.LOGO, theme.hud ? theme.accent : theme.accent,
-                theme.hud ? theme.inkStrong : theme.accent2, ui.dp(28)));
+        logo.setImageDrawable(new IconDrawable(IconDrawable.LOGO, theme.accent, theme.logoCore, ui.dp(28)));
+        logo.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
         bar.addView(logo, new LinearLayout.LayoutParams(ui.dp(28), ui.dp(28)));
 
         LinearLayout titles = ui.vbox();
@@ -382,10 +424,29 @@ public final class MainActivity extends Activity implements Engine.Listener {
         TextView title = ui.text("OMNI-DECK", theme.hud ? 15 : 17, theme.inkStrong, theme.display);
         title.setLetterSpacing(theme.hud ? 0.14f : -0.01f);
         titles.addView(title);
+        // "LINK ·" in micro-caps, then the address in mono: digits stay legible
+        // and a long address loses its middle, never the port.
+        LinearLayout sub = ui.hbox();
+        sub.setPadding(0, ui.dp(4), 0, 0);
         subtitle = ui.label("");
-        subtitle.setPadding(0, ui.dp(4), 0, 0);
-        titles.addView(subtitle);
+        sub.addView(subtitle, Ui.wrap());
+        subtitleAddr = ui.readout("", 11, theme.dim);
+        subtitleAddr.setEllipsize(TextUtils.TruncateAt.MIDDLE);
+        subtitleAddr.setPadding(ui.dp(5), 0, 0, 0);
+        sub.addView(subtitleAddr, Ui.weight(1));
+        titles.addView(sub, Ui.fillW());
         bar.addView(titles, Ui.weight(1));
+
+        stopSpeech = ui.iconButton(IconDrawable.STOP_CIRCLE, "Stop speaking", theme.accent, new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                engine.speechStop();
+                setSpeaking(false);
+            }
+        });
+        stopSpeech.setLayoutParams(new LinearLayout.LayoutParams(ui.dp(40), ui.dp(40)));
+        stopSpeech.setVisibility(View.GONE);
+        bar.addView(stopSpeech);
 
         pill = ui.hbox();
         pill.setPadding(ui.dp(9), ui.dp(6), ui.dp(11), ui.dp(6));
@@ -397,6 +458,9 @@ public final class MainActivity extends Activity implements Engine.Listener {
         pill.addView(pillText);
         latencyText = ui.readout("", 11, theme.dim);
         latencyText.setPadding(ui.dp(7), 0, 0, 0);
+        // A fixed-width readout: the pill doesn't jitter as the number grows a digit.
+        latencyText.setMinWidth(ui.dp(7) + Math.round(latencyText.getPaint().measureText("999 ms")));
+        latencyText.setGravity(Gravity.END);
         pill.addView(latencyText);
         pill.setContentDescription("Connection status");
         pill.setOnClickListener(new View.OnClickListener() {
@@ -459,7 +523,8 @@ public final class MainActivity extends Activity implements Engine.Listener {
             navIcons[i] = icon;
             iconWrap.addView(icon, new FrameLayout.LayoutParams(ui.dp(58), ui.dp(30), Gravity.CENTER));
             View badge = new View(this);
-            badge.setBackground(ui.rounded(theme.hud ? theme.accent : theme.accent2, 0, 4));
+            badge.setBackground(ui.rounded(theme.hud ? theme.accent : theme.id == Theme.DARK ? theme.data
+                    : theme.accent, 0, 4));
             badge.setVisibility(View.GONE);
             FrameLayout.LayoutParams bl = new FrameLayout.LayoutParams(ui.dp(8), ui.dp(8), Gravity.TOP | Gravity.END);
             bl.setMargins(0, ui.dp(3), ui.dp(12), 0);
@@ -514,11 +579,21 @@ public final class MainActivity extends Activity implements Engine.Listener {
                 navIcons[i].setBackground(on ? ui.rounded(theme.accentSoft, 0, 15) : null);
             }
             navItems[i].setSelected(on);
+            boolean badged = navBadges[i].getVisibility() == View.VISIBLE;
+            navItems[i].setContentDescription(badged ? TAB_NAMES[i] + ", new reply" : TAB_NAMES[i]);
         }
+        updateSpeakingUi();
     }
 
     public void setBadge(int tabIndex, boolean on) {
-        if (navBadges[tabIndex] != null) navBadges[tabIndex].setVisibility(on ? View.VISIBLE : View.GONE);
+        if (navBadges[tabIndex] == null) return;
+        navBadges[tabIndex].setVisibility(on ? View.VISIBLE : View.GONE);
+        navItems[tabIndex].setContentDescription(on ? TAB_NAMES[tabIndex] + ", new reply" : TAB_NAMES[tabIndex]);
+    }
+
+    /** Whether a tab's "unread" dot is lit. */
+    public boolean hasBadge(int tabIndex) {
+        return navBadges[tabIndex] != null && navBadges[tabIndex].getVisibility() == View.VISIBLE;
     }
 
     // ------------------------------------------------------------------
@@ -580,6 +655,8 @@ public final class MainActivity extends Activity implements Engine.Listener {
             Screen s = tabScreen(tab);
             s.view().setVisibility(View.VISIBLE);
             s.show();
+            // Back on the chat: a reply that finished while Settings was open has now been seen.
+            if (tab == TAB_COMMS) setBadge(TAB_COMMS, false);
         }
         updateNav();
     }
@@ -588,30 +665,38 @@ public final class MainActivity extends Activity implements Engine.Listener {
     // Engine.Listener → pages
     // ------------------------------------------------------------------
 
+    private void updateDot() {
+        Engine.State s = engine.state();
+        dot.setPulsing(started && s != Engine.State.OFFLINE && !engine.settings.reduceMotion());
+    }
+
     @Override
     public void onStateChanged() {
         Engine.State s = engine.state();
         int c = s == Engine.State.ONLINE ? theme.ok : s == Engine.State.SEARCHING ? theme.warn : theme.danger;
         dot.setColor(c);
-        dot.setPulsing(s != Engine.State.OFFLINE && !engine.settings.reduceMotion());
+        updateDot();
         pillText.setText(s == Engine.State.ONLINE ? "ONLINE" : s == Engine.State.SEARCHING ? "SCANNING" : "OFFLINE");
         pillText.setTextColor(c);
         pill.setBackground(ui.rounded(Theme.alpha(c, theme.isDark ? 0x1A : 0x14), Theme.alpha(c, 0x66),
                 theme.hud ? 6 : 16));
         ServerInfo srv = engine.server();
         if (s == Engine.State.ONLINE && srv != null) {
-            subtitle.setText(theme.label("Link · " + srv.label()));
-        } else if (s == Engine.State.SEARCHING) {
-            subtitle.setText(theme.label("Scanning network…"));
+            subtitle.setText(theme.label("Link ·"));
+            subtitleAddr.setText(srv.label());
+            subtitleAddr.setVisibility(View.VISIBLE);
         } else {
-            subtitle.setText(theme.label("No link"));
+            subtitle.setText(theme.label(s == Engine.State.SEARCHING ? "Scanning network…" : "No link"));
+            subtitleAddr.setText("");
+            subtitleAddr.setVisibility(View.GONE);
         }
         if (s != Engine.State.ONLINE) latencyText.setText("");
         if (lastState != s) {
             if (s == Engine.State.ONLINE && srv != null) {
                 showBanner(IconDrawable.WIFI, theme.ok, "Link established · Ollama "
                         + (srv.version.length() > 0 ? srv.version + " " : "") + "@ " + srv.label());
-            } else if (s == Engine.State.OFFLINE && lastState == Engine.State.ONLINE) {
+            } else if (lastState == Engine.State.ONLINE) {
+                // The first step away from ONLINE (usually SEARCHING: "reconnecting…").
                 showBanner(IconDrawable.WIFI, theme.danger, "Link lost — searching for your AI");
             }
             lastState = s;
@@ -623,7 +708,7 @@ public final class MainActivity extends Activity implements Engine.Listener {
     public void onTelemetry() {
         double lat = engine.telemetry.latencyMs.last();
         if (engine.state() == Engine.State.ONLINE && !Double.isNaN(lat)) {
-            latencyText.setText(Math.round(lat) + "ms");
+            latencyText.setText(Math.round(lat) + " ms");
         }
         for (Screen sc : built()) sc.onTelemetry();
     }
@@ -678,6 +763,40 @@ public final class MainActivity extends Activity implements Engine.Listener {
     }
 
     // ------------------------------------------------------------------
+    // Speech: the "Stop speaking" control
+    // ------------------------------------------------------------------
+
+    /**
+     * Polls whether the phone is speaking (a reply read aloud, a voice-turn
+     * answer, "Read aloud" on a message): shows Stop speaking in the top bar
+     * and tells the pages. Runs only while the app is in the foreground.
+     */
+    private final Runnable speechPoll = new Runnable() {
+        @Override
+        public void run() {
+            if (!started) return;
+            setSpeaking(speakingOverride != null ? speakingOverride : engine.speaking());
+            handler.postDelayed(this, speaking ? 300 : 700);
+        }
+    };
+
+    /** Tests: stands in for the TTS engine, whose Robolectric shadow never reports speaking. */
+    Boolean speakingOverride;
+
+    private void setSpeaking(boolean s) {
+        if (s == speaking) return;
+        speaking = s;
+        updateSpeakingUi();
+        for (Screen sc : built()) sc.onSpeechChanged(s);
+    }
+
+    /** The chat header has its own Stop speaking control, so the top bar's shows on the other pages. */
+    private void updateSpeakingUi() {
+        if (stopSpeech == null) return;
+        stopSpeech.setVisibility(speaking && currentTab() != TAB_COMMS ? View.VISIBLE : View.GONE);
+    }
+
+    // ------------------------------------------------------------------
     // HUD banner
     // ------------------------------------------------------------------
 
@@ -723,8 +842,12 @@ public final class MainActivity extends Activity implements Engine.Listener {
     // Activity results: voice input, image picking
     // ------------------------------------------------------------------
 
+    /** Starts an activity for a result; {@code h} gets it (lost if the activity is recreated meanwhile). */
     public boolean startForResult(Intent intent, ResultHandler h) {
-        int code = nextRequest++;
+        return startForResult(intent, nextRequest++, h);
+    }
+
+    private boolean startForResult(Intent intent, int code, ResultHandler h) {
         results.put(code, h);
         try {
             startActivityForResult(intent, code);
@@ -742,7 +865,29 @@ public final class MainActivity extends Activity implements Engine.Listener {
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         ResultHandler h = results.remove(requestCode);
-        if (h != null) h.onResult(resultCode, data);
+        if (h != null) {
+            h.onResult(resultCode, data);
+            return;
+        }
+        // No callback: this is a new instance (recreated while the recognizer or
+        // picker was open). Voice and photos both belong to the chat.
+        if (requestCode == REQ_VOICE) {
+            voiceResult(resultCode, data, new TextResult() {
+                @Override
+                public void onText(String text) {
+                    select(TAB_COMMS, false);
+                    comms().submitVoice(text);
+                }
+            });
+        } else if (requestCode == REQ_IMAGE) {
+            imageResult(resultCode, data, new ImageResult() {
+                @Override
+                public void onImage(String base64, Bitmap preview) {
+                    select(TAB_COMMS, false);
+                    comms().addAttachment(base64, preview);
+                }
+            });
+        }
     }
 
     /** Opens the phone's speech recognizer; the recognized text goes to {@code r}. */
@@ -752,15 +897,19 @@ public final class MainActivity extends Activity implements Engine.Listener {
         i.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
         i.putExtra(RecognizerIntent.EXTRA_PROMPT, prompt == null ? "Speak to OMNI" : prompt);
         i.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1);
-        boolean ok = startForResult(i, new ResultHandler() {
+        boolean ok = startForResult(i, REQ_VOICE, new ResultHandler() {
             @Override
             public void onResult(int resultCode, Intent data) {
-                if (resultCode != RESULT_OK || data == null) return;
-                ArrayList<String> res = data.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS);
-                if (res != null && !res.isEmpty() && res.get(0).trim().length() > 0) r.onText(res.get(0).trim());
+                voiceResult(resultCode, data, r);
             }
         });
         if (!ok) ui.toast("This phone has no speech recognizer (install or enable Google voice typing).");
+    }
+
+    private static void voiceResult(int resultCode, Intent data, TextResult r) {
+        if (resultCode != RESULT_OK || data == null) return;
+        ArrayList<String> res = data.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS);
+        if (res != null && !res.isEmpty() && res.get(0).trim().length() > 0) r.onText(res.get(0).trim());
     }
 
     /** Opens the photo picker and returns a downscaled base64 JPEG. */
@@ -768,27 +917,263 @@ public final class MainActivity extends Activity implements Engine.Listener {
         Intent i = new Intent(Intent.ACTION_GET_CONTENT);
         i.setType("image/*");
         i.addCategory(Intent.CATEGORY_OPENABLE);
-        boolean ok = startForResult(Intent.createChooser(i, "Attach an image"), new ResultHandler() {
+        boolean ok = startForResult(Intent.createChooser(i, "Attach an image"), REQ_IMAGE, new ResultHandler() {
             @Override
             public void onResult(int resultCode, Intent data) {
-                if (resultCode != RESULT_OK || data == null || data.getData() == null) return;
-                final Uri uri = data.getData();
-                new Thread(new Runnable() {
-                    @Override
-                    public void run() {
-                        final ImageUtil.Encoded enc = ImageUtil.encode(getContentResolver(), uri);
-                        handler.post(new Runnable() {
-                            @Override
-                            public void run() {
-                                if (enc == null) ui.toast("Couldn't read that image.");
-                                else r.onImage(enc.base64, enc.preview);
-                            }
-                        });
-                    }
-                }, "omni-image").start();
+                imageResult(resultCode, data, r);
             }
         });
         if (!ok) ui.toast("No app to pick images with.");
+    }
+
+    private void imageResult(int resultCode, Intent data, ImageResult r) {
+        if (resultCode != RESULT_OK || data == null || data.getData() == null) return;
+        encodeImage(data.getData(), r);
+    }
+
+    /** Reads and downscales an image off the main thread (a picked photo, a share). */
+    void encodeImage(final Uri uri, final ImageResult r) {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final ImageUtil.Encoded enc = ImageUtil.encode(getContentResolver(), uri);
+                handler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (isDestroyed()) return;
+                        if (enc == null) ui.toast("Couldn't read that image.");
+                        else r.onImage(enc.base64, enc.preview);
+                    }
+                });
+            }
+        }, "omni-image").start();
+    }
+
+    /**
+     * Re-encodes a stored base64 image (a PC screenshot is a full-size PNG)
+     * as a JPEG of at most {@code maxSide} px, off the main thread.
+     */
+    public void downscaleImage(final String base64, final int maxSide, final ImageResult r) {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                String out = null;
+                Bitmap bmp = ImageUtil.decode(base64, maxSide);
+                if (bmp != null) {
+                    try {
+                        int w = bmp.getWidth(), h = bmp.getHeight();
+                        float scale = Math.min(1f, maxSide / (float) Math.max(w, h));
+                        if (scale < 1f) {
+                            Bitmap s = Bitmap.createScaledBitmap(bmp, Math.max(1, Math.round(w * scale)),
+                                    Math.max(1, Math.round(h * scale)), true);
+                            if (s != bmp) bmp.recycle();
+                            bmp = s;
+                        }
+                        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+                        bmp.compress(Bitmap.CompressFormat.JPEG, 85, bos);
+                        out = Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP);
+                    } catch (RuntimeException e) {
+                        out = null;
+                    } catch (OutOfMemoryError e) {
+                        out = null;
+                    }
+                }
+                final String jpeg = out;
+                final Bitmap preview = bmp;
+                handler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (isDestroyed()) return;
+                        if (jpeg == null) ui.toast("Couldn't read that image.");
+                        else r.onImage(jpeg, preview);
+                    }
+                });
+            }
+        }, "omni-image").start();
+    }
+
+    // ------------------------------------------------------------------
+    // What other apps and launcher shortcuts hand in
+    // ------------------------------------------------------------------
+
+    private void handleIntent(Intent intent) {
+        if (intent == null) return;
+        String sc = intent.getStringExtra(EXTRA_SHORTCUT);
+        if (sc != null) {
+            intent.removeExtra(EXTRA_SHORTCUT);
+            handleShortcut(sc);
+            return;
+        }
+        String action = intent.getAction();
+        if (Intent.ACTION_SEND.equals(action) || Intent.ACTION_SEND_MULTIPLE.equals(action)) handleShare(intent);
+    }
+
+    /** Text, text files and images shared from another app land in the chat composer. */
+    private void handleShare(Intent intent) {
+        CharSequence text = intent.getCharSequenceExtra(Intent.EXTRA_TEXT);
+        List<Uri> streams = new ArrayList<Uri>();
+        if (Intent.ACTION_SEND_MULTIPLE.equals(intent.getAction())) {
+            ArrayList<Parcelable> list = intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM);
+            if (list != null) {
+                for (Parcelable p : list) {
+                    if (p instanceof Uri) streams.add((Uri) p);
+                }
+            }
+        } else {
+            Parcelable p = intent.getParcelableExtra(Intent.EXTRA_STREAM);
+            if (p instanceof Uri) streams.add((Uri) p);
+        }
+        String type = intent.getType() == null ? "" : intent.getType().toLowerCase(Locale.US);
+        // Handled once: the intent object is kept and would otherwise fire again.
+        intent.setAction(Intent.ACTION_MAIN);
+        boolean any = text != null && text.length() > 0;
+        if (!any && streams.isEmpty()) return;
+        select(TAB_COMMS, false);
+        if (any) comms().onInsertText(text.toString());
+        int images = 0;
+        int skipped = 0;
+        for (Uri u : streams) {
+            String t = getContentResolver().getType(u);
+            t = t == null ? type : t.toLowerCase(Locale.US);
+            if (t.startsWith("image/")) {
+                if (images++ >= MAX_IMAGES) {
+                    skipped++;
+                    continue;
+                }
+                encodeImage(u, new ImageResult() {
+                    @Override
+                    public void onImage(String base64, Bitmap preview) {
+                        comms().addAttachment(base64, preview);
+                    }
+                });
+            } else if (t.startsWith("text/") && !any) {
+                readSharedText(u);
+            } else {
+                skipped++;
+            }
+        }
+        if (skipped > 0) {
+            ui.toast(images > MAX_IMAGES ? "Up to " + MAX_IMAGES + " images per message."
+                    : "Only text and images can be shared into OMNI-DECK.");
+        }
+    }
+
+    /** A shared text file: read (capped) off the main thread, then into the composer. */
+    private void readSharedText(final Uri uri) {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                String out = null;
+                try {
+                    InputStream in = getContentResolver().openInputStream(uri);
+                    if (in != null) {
+                        Reader rd = new InputStreamReader(in, "UTF-8");
+                        try {
+                            StringBuilder sb = new StringBuilder();
+                            char[] buf = new char[4096];
+                            int n;
+                            while (sb.length() < SHARED_TEXT_MAX && (n = rd.read(buf)) > 0) sb.append(buf, 0, n);
+                            if (sb.length() > SHARED_TEXT_MAX) sb.setLength(SHARED_TEXT_MAX);
+                            out = sb.toString();
+                        } finally {
+                            rd.close();
+                        }
+                    }
+                } catch (Exception e) {
+                    out = null;
+                }
+                final String text = out;
+                handler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (isDestroyed()) return;
+                        if (text == null || text.trim().length() == 0) ui.toast("Couldn't read that file.");
+                        else comms().onInsertText(text);
+                    }
+                });
+            }
+        }, "omni-share").start();
+    }
+
+    private void handleShortcut(String id) {
+        if (SHORTCUT_TALK.equals(id)) {
+            select(TAB_COMMS, false);
+            handler.post(new Runnable() {
+                @Override
+                public void run() {
+                    if (!isDestroyed()) comms().talk();
+                }
+            });
+        } else if (SHORTCUT_NEW_CHAT.equals(id)) {
+            engine.newChat();
+            select(TAB_COMMS, false);
+            comms().focusComposer();
+        } else if (SHORTCUT_SCREENSHOT.equals(id)) {
+            select(TAB_COMMS, false);
+            commander.run("/shot");
+        } else if (SHORTCUT_COMMAND.equals(id)) {
+            if (settingsOpen) closeSettings();
+            select(TAB_COMMAND, false);
+        }
+    }
+
+    /**
+     * Long-press launcher shortcuts: Talk to OMNI, New chat, PC screenshot,
+     * Command center. Published at runtime (API 25+) — the API-23 toolchain
+     * can't compile a static shortcuts.xml.
+     */
+    private void publishShortcuts() {
+        if (shortcutsPublished || Build.VERSION.SDK_INT < 25) return;
+        shortcutsPublished = true;
+        try {
+            Object sm = getSystemService("shortcut");
+            if (sm == null) return;
+            Class<?> b = Class.forName("android.content.pm.ShortcutInfo$Builder");
+            List<Object> list = new ArrayList<Object>();
+            list.add(shortcut(b, SHORTCUT_TALK, "Talk", "Talk to OMNI", R.drawable.sc_talk));
+            list.add(shortcut(b, SHORTCUT_NEW_CHAT, "New chat", "Start a new chat", R.drawable.sc_chat));
+            list.add(shortcut(b, SHORTCUT_SCREENSHOT, "PC screenshot", "Capture the PC screen", R.drawable.sc_shot));
+            list.add(shortcut(b, SHORTCUT_COMMAND, "Command", "Command center", R.drawable.sc_command));
+            sm.getClass().getMethod("setDynamicShortcuts", List.class).invoke(sm, list);
+        } catch (Exception e) {
+            // Optional: some launchers don't support shortcuts, or it was rate-limited.
+        } catch (LinkageError e) {
+            // Same.
+        }
+    }
+
+    private Object shortcut(Class<?> b, String id, String shortLabel, String longLabel, int icon) throws Exception {
+        Object builder = b.getConstructor(Context.class, String.class).newInstance(this, id);
+        b.getMethod("setShortLabel", CharSequence.class).invoke(builder, shortLabel);
+        b.getMethod("setLongLabel", CharSequence.class).invoke(builder, longLabel);
+        b.getMethod("setIcon", Icon.class).invoke(builder, Icon.createWithResource(this, icon));
+        Intent i = new Intent(Intent.ACTION_VIEW).setClassName(getPackageName(), MainActivity.class.getName())
+                .putExtra(EXTRA_SHORTCUT, id);
+        b.getMethod("setIntent", Intent.class).invoke(builder, i);
+        return b.getMethod("build").invoke(builder);
+    }
+
+    // ------------------------------------------------------------------
+    // Notifications permission (Android 13+)
+    // ------------------------------------------------------------------
+
+    /** Asks for permission to post notifications (API 33+; a no-op when granted or on older phones). */
+    public void ensureNotificationPermission() {
+        if (Build.VERSION.SDK_INT < 33) return;
+        if (checkSelfPermission(PERM_NOTIFY) == PackageManager.PERMISSION_GRANTED) return;
+        try {
+            requestPermissions(new String[]{PERM_NOTIFY}, REQ_NOTIFY);
+        } catch (RuntimeException ignored) {
+        }
+    }
+
+    /** Called when the user sends a message: the first time, ask for notifications (if they're on). */
+    public void onUserSent() {
+        if (Build.VERSION.SDK_INT < 33 || !engine.settings.notifications()) return;
+        SharedPreferences sp = getSharedPreferences("omnideck-shell", MODE_PRIVATE);
+        if (sp.getBoolean("notify_asked", false)) return;
+        sp.edit().putBoolean("notify_asked", true).apply();
+        ensureNotificationPermission();
     }
 
     // ------------------------------------------------------------------
@@ -830,39 +1215,55 @@ public final class MainActivity extends Activity implements Engine.Listener {
         StringBuilder sb = new StringBuilder();
         if (s == Engine.State.ONLINE && srv != null) {
             sb.append("Connected to Ollama").append(srv.version.length() > 0 ? " " + srv.version : "")
-                    .append(" at ").append(srv.label()).append(".\n\n");
+                    .append(" at ").append(srv.label()).append(".\n");
             int loaded = 0;
             for (ModelInfo m : engine.models()) {
                 if (engine.isLoaded(m.name)) loaded++;
             }
-            sb.append(engine.models().size()).append(" models installed, ").append(loaded).append(" loaded.\n");
+            sb.append(engine.models().size()).append(" models installed, ").append(loaded).append(" loaded.");
             double lat = engine.telemetry.latencyMs.last();
-            if (!Double.isNaN(lat)) sb.append("Latency ").append(Math.round(lat)).append(" ms.\n");
+            if (!Double.isNaN(lat)) sb.append(" Latency ").append(Math.round(lat)).append(" ms.");
         } else {
-            sb.append(engine.stateDetail()).append("\n\n");
+            sb.append(engine.stateDetail());
         }
+        Sheet sheet = ui.sheet("Link", s == Engine.State.ONLINE ? "Connected"
+                : s == Engine.State.SEARCHING ? "Searching…" : "Not connected");
+        sheet.eyebrowColor(s == Engine.State.ONLINE ? theme.ok : s == Engine.State.SEARCHING ? theme.warn
+                : theme.danger);
+        sheet.message(sb.toString());
         String manual = engine.settings.server();
-        sb.append(manual.length() > 0 ? "Address: " + manual + " (set manually)" : "Address: auto-detect");
-        sb.append("\nPhone network: ").append(Net.describe(engine.subnets()));
-        sb.append("\nPC bridge: port ").append(engine.settings.bridgePort())
-                .append(engine.bridgePaired() ? ", paired" : ", not paired");
-        new AlertDialog.Builder(this)
-                .setTitle(s == Engine.State.ONLINE ? "Connected" : s == Engine.State.SEARCHING ? "Searching…" : "Not connected")
-                .setMessage(sb.toString())
-                .setPositiveButton("Rescan", new DialogInterface.OnClickListener() {
-                    @Override
-                    public void onClick(DialogInterface d, int w) {
-                        engine.discover(true);
-                    }
-                })
-                .setNeutralButton("Set address", new DialogInterface.OnClickListener() {
-                    @Override
-                    public void onClick(DialogInterface d, int w) {
-                        promptServerAddress();
-                    }
-                })
-                .setNegativeButton("Close", null)
-                .show();
+        sheet.body.addView(detailRow("Address", manual.length() > 0 ? manual + " (manual)" : "auto-detect"));
+        sheet.body.addView(detailRow("Phone network", Net.describe(engine.subnets())));
+        sheet.body.addView(detailRow("PC bridge", "port " + engine.settings.bridgePort()
+                + (engine.bridgePaired() ? " · paired" : " · not paired")));
+        sheet.neutral("Set address", new Runnable() {
+            @Override
+            public void run() {
+                promptServerAddress();
+            }
+        });
+        sheet.negative("Close", null);
+        sheet.positive("Rescan", Ui.PRIMARY, new Runnable() {
+            @Override
+            public void run() {
+                engine.discover(true);
+            }
+        });
+        sheet.show();
+    }
+
+    /** A spec-sheet line for dialogs: micro-caps key, mono value. */
+    private View detailRow(String key, String value) {
+        LinearLayout r = ui.hbox();
+        r.setPadding(0, ui.dp(9), 0, 0);
+        TextView k = ui.label(key);
+        r.addView(k, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.9f));
+        TextView v = ui.text(value, 13, theme.ink, theme.mono);
+        v.setGravity(Gravity.END);
+        v.setMaxLines(2);
+        v.setEllipsize(TextUtils.TruncateAt.END);
+        r.addView(v, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.4f));
+        return r;
     }
 
     public void promptServerAddress() {

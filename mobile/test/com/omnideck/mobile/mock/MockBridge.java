@@ -41,6 +41,8 @@ public final class MockBridge {
     public volatile String token = "tok-" + Long.toHexString(System.nanoTime());
     public volatile int volume = 35;
     public final List<String> launched = Collections.synchronizedList(new ArrayList<String>());
+    /** App ids launched (not dry runs), in order. */
+    public final List<String> launchedIds = Collections.synchronizedList(new ArrayList<String>());
 
     // --- Rich mode (PC tab UI tests) ---------------------------------------
     /**
@@ -135,13 +137,22 @@ public final class MockBridge {
             JSONObject app;
             if (req.has("app_id")) {
                 String id = req.getString("app_id");
-                app = new JSONObject().put("id", id).put("name", id.equals("app-spotify") ? "Spotify" : "Notepad");
+                String name = id.equals("app-spotify") ? "Spotify" : id.equals("app-vscode") ? "Visual Studio Code"
+                        : id.equals("app-vscodium") ? "VSCodium" : "Notepad";
+                app = new JSONObject().put("id", id).put("name", name);
             } else {
                 String q = req.optString("query", "").toLowerCase();
                 if (q.contains("code")) {
-                    JSONArray c = new JSONArray().put(new JSONObject().put("id", "app-vscode").put("name", "Visual Studio Code"))
-                            .put(new JSONObject().put("id", "app-vscodium").put("name", "VSCodium"));
+                    // Ambiguous: the phone asks which one.
+                    JSONArray c = new JSONArray().put(new JSONObject().put("id", "app-vscode").put("name", "Visual Studio Code")
+                            .put("path", "C:\\Program Files\\Microsoft VS Code\\Code.exe"))
+                            .put(new JSONObject().put("id", "app-vscodium").put("name", "VSCodium")
+                                    .put("path", "C:\\Program Files\\VSCodium\\VSCodium.exe"));
                     send(ex, 200, new JSONObject().put("needs_choice", true).put("candidates", c).toString());
+                    return;
+                }
+                if (q.contains("ghost")) {
+                    send(ex, 200, new JSONObject().put("needs_choice", true).put("candidates", new JSONArray()).toString());
                     return;
                 }
                 if (q.contains("nothing")) {
@@ -155,6 +166,7 @@ public final class MockBridge {
                 send(ex, 200, new JSONObject().put("would_launch", app).toString());
             } else {
                 launched.add(app.getString("name"));
+                launchedIds.add(app.getString("id"));
                 send(ex, 200, new JSONObject().put("ok", true).put("app", app).toString());
             }
         } else if ("GET".equals(method) && "/desk/capabilities".equals(path)) {
@@ -218,6 +230,7 @@ public final class MockBridge {
             for (String[] app : CATALOG) {
                 if (app[0].equals(id)) {
                     launched.add(app[1]);
+                    launchedIds.add(id);
                     send(ex, 200, new JSONObject().put("ok", true).put("app", new JSONObject().put("id", id)
                             .put("name", app[1]).put("path", app[2])).toString());
                     return true;

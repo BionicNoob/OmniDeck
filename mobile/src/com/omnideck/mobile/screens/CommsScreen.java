@@ -1,7 +1,6 @@
 package com.omnideck.mobile.screens;
 
 import android.animation.ValueAnimator;
-import android.app.AlertDialog;
 import android.app.Dialog;
 import android.content.Context;
 import android.graphics.Bitmap;
@@ -9,8 +8,12 @@ import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.Typeface;
 import android.graphics.drawable.Drawable;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.SystemClock;
 import android.text.Editable;
 import android.text.InputType;
+import android.text.SpannableStringBuilder;
 import android.text.TextUtils;
 import android.text.TextWatcher;
 import android.text.method.LinkMovementMethod;
@@ -46,7 +49,6 @@ import com.omnideck.mobile.ui.Panel;
 import com.omnideck.mobile.ui.Theme;
 import com.omnideck.mobile.ui.Ui;
 
-import java.text.DateFormat;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashMap;
@@ -58,13 +60,22 @@ import java.util.Set;
 
 /**
  * COMMS — the conversation with the AI: streaming replies, slash commands,
- * voice input, read-aloud, image attachments for vision models, code copy,
- * and the chat archive.
+ * voice turns (a spoken question gets a spoken answer; hands-free listens
+ * again), read-aloud, image attachments for vision models (picked, shared
+ * from other apps, or a PC screenshot), code copy, and the chat archive.
  */
 public final class CommsScreen extends Screen {
     static final int INITIAL_RENDER = 80;
+    /** Up to this many images per message. */
+    static final int MAX_IMAGES = 4;
+    /** Context fill (of num_ctx) at which Comms warns and offers /compact. */
+    static final double CONTEXT_WARN = 0.8;
+    /** Hands-free: how long to wait for the spoken reply to start before listening anyway. */
+    static final long SPEECH_START_WAIT_MS = 6000;
+    static final long RELISTEN_POLL_MS = 350;
 
     private MarkdownRenderer md;
+    private final Handler handler = new Handler(Looper.getMainLooper());
     private final Map<String, Holder> holders = new HashMap<String, Holder>();
     private final Set<String> expandedThoughts = new HashSet<String>();
     private final List<String> pendingImages = new ArrayList<String>();
@@ -72,14 +83,27 @@ public final class CommsScreen extends Screen {
     private int renderedFrom;
     private boolean suppressSuggest;
 
+    // Voice turns
+    /** The next submit came from the speech recognizer. */
+    private boolean voiceArmed;
+    /** The reply to a voice turn: spoken when it finishes. */
+    private String voiceReplyId;
+    private boolean relistenPending;
+    private boolean sawSpeech;
+    private long relistenDeadline;
+    private boolean speakingNow;
+
     private TextView chatTitle;
     private TextView chatSub;
     private ImageView speakerBtn;
+    private ImageView handsFreeBtn;
     private ChatScrollView scroll;
     private LinearLayout list;
     private LinearLayout emptyState;
     private TextView emptySub;
     private View jumpBtn;
+    private LinearLayout ctxWarn;
+    private TextView ctxWarnText;
     private ScrollView suggestScroll;
     private LinearLayout suggestBox;
     private HorizontalScrollView attachScroll;
@@ -92,7 +116,6 @@ public final class CommsScreen extends Screen {
     private LinearLayout historyList;
     private EditText historySearch;
     private List<ConversationStore.Entry> historyEntries = new ArrayList<ConversationStore.Entry>();
-    private final DateFormat timeFormat = DateFormat.getTimeInstance(DateFormat.SHORT);
 
     public CommsScreen(MainActivity a) {
         super(a);
@@ -110,6 +133,12 @@ public final class CommsScreen extends Screen {
         final TextView body;
         final LinearLayout images;
         final TextView footer;
+        /** A failed reply: the reason in plain words, and Retry. */
+        final LinearLayout retryRow;
+        final TextView retryReason;
+        final View retryBtn;
+        /** A PC screenshot: "Ask about this" attaches it to the composer. */
+        final View askRow;
         String shownContent;
         String shownThinking;
         boolean shownStreaming;
@@ -182,6 +211,46 @@ public final class CommsScreen extends Screen {
             footer.setPadding(0, ui.dp(7), 0, 0);
             footer.setVisibility(View.GONE);
             bubble.addView(footer, Ui.wrap());
+
+            if (m.isAssistant()) {
+                retryRow = ui.hbox();
+                retryRow.setVisibility(View.GONE);
+                retryReason = ui.text("", 13.5f, t.ink, t.body);
+                retryReason.setLineSpacing(0, 1.2f);
+                retryRow.addView(retryReason, Ui.weight(1));
+                retryBtn = ui.button("Retry", IconDrawable.REFRESH, Ui.SECONDARY, new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        e.regenerate();
+                    }
+                });
+                retryBtn.setContentDescription("Retry this reply");
+                LinearLayout.LayoutParams blp = Ui.wrap();
+                blp.leftMargin = ui.dp(10);
+                retryRow.addView(retryBtn, blp);
+                LinearLayout.LayoutParams rrl = Ui.fillW();
+                rrl.topMargin = ui.dp(10);
+                bubble.addView(retryRow, rrl);
+            } else {
+                retryRow = null;
+                retryReason = null;
+                retryBtn = null;
+            }
+            if (m.isNotice()) {
+                askRow = ui.actionChip("Ask about this", false, new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        askAbout(m);
+                    }
+                });
+                askRow.setContentDescription("Ask OMNI about this image");
+                askRow.setVisibility(View.GONE);
+                LinearLayout.LayoutParams alp = Ui.wrap();
+                alp.topMargin = ui.dp(10);
+                bubble.addView(askRow, alp);
+            } else {
+                askRow = null;
+            }
 
             View.OnLongClickListener lc = new View.OnLongClickListener() {
                 @Override
@@ -269,7 +338,8 @@ public final class CommsScreen extends Screen {
         scroll = new ChatScrollView(a);
         scroll.setClipToPadding(false);
         list = ui.vbox();
-        list.setPadding(ui.dp(12), ui.dp(10), ui.dp(12), ui.dp(12));
+        // 14dp gutters, like the cards and the top bar's icons.
+        list.setPadding(ui.dp(14), ui.dp(10), ui.dp(14), ui.dp(12));
         scroll.addView(list, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT));
         chat.addView(scroll, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
@@ -303,8 +373,12 @@ public final class CommsScreen extends Screen {
         });
         column.addView(chat, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
 
+        ctxWarn = buildContextWarning();
+        ctxWarn.setVisibility(View.GONE);
+        column.addView(ctxWarn, Ui.fillW());
+
         suggestScroll = new ScrollView(a);
-        suggestScroll.setBackgroundColor(Theme.alpha(MainActivityColors.opaque(t.surface2, t.bg), 0xFF));
+        suggestScroll.setBackgroundColor(Theme.flatten(t.surface2, t.bg));
         suggestBox = ui.vbox();
         suggestBox.setPadding(0, ui.dp(4), 0, ui.dp(4));
         suggestScroll.addView(suggestBox);
@@ -312,7 +386,7 @@ public final class CommsScreen extends Screen {
         column.addView(suggestScroll, Ui.fillW());
 
         attachStrip = ui.hbox();
-        attachStrip.setPadding(ui.dp(12), ui.dp(8), ui.dp(12), 0);
+        attachStrip.setPadding(ui.dp(14), ui.dp(8), ui.dp(14), 0);
         attachScroll = new HorizontalScrollView(a);
         attachScroll.setHorizontalScrollBarEnabled(false);
         attachScroll.addView(attachStrip);
@@ -331,23 +405,29 @@ public final class CommsScreen extends Screen {
         renderAll();
         onStateChanged();
         onBusyChanged();
-        if (e.draft.length() > 0) {
-            input.setText(e.draft);
+        // The draft outlives the process too (Android may kill the app in the background).
+        String draft = e.draft.length() > 0 ? e.draft : savedDraft();
+        if (draft.length() > 0) {
+            input.setText(draft);
             input.setSelection(input.getText().length());
         }
         return root;
     }
 
-    /** Solid color helper (surface colors can be translucent glass). */
-    private static final class MainActivityColors {
-        static int opaque(int c, int base) {
-            int al = (c >>> 24) & 0xFF;
-            if (al == 0xFF) return c;
-            int r = (((c >> 16) & 0xFF) * al + ((base >> 16) & 0xFF) * (255 - al)) / 255;
-            int g = (((c >> 8) & 0xFF) * al + ((base >> 8) & 0xFF) * (255 - al)) / 255;
-            int b = ((c & 0xFF) * al + (base & 0xFF) * (255 - al)) / 255;
-            return 0xFF000000 | (r << 16) | (g << 8) | b;
-        }
+    private android.content.SharedPreferences shellPrefs() {
+        return a.getSharedPreferences("omnideck-shell", Context.MODE_PRIVATE);
+    }
+
+    private String savedDraft() {
+        String d = shellPrefs().getString("draft", "");
+        return d == null ? "" : d;
+    }
+
+    /** Keeps the composer's text in the Engine (and on disk, for a cold start). */
+    private void keepDraft() {
+        if (input == null) return;
+        e.draft = input.getText().toString();
+        shellPrefs().edit().putString("draft", e.draft).apply();
     }
 
     private View buildHeader() {
@@ -362,7 +442,8 @@ public final class CommsScreen extends Screen {
             }
         }));
         LinearLayout titles = ui.vbox();
-        titles.setPadding(ui.dp(4), 0, ui.dp(4), 0);
+        // Titles start where the top bar's do (after its logo slot).
+        titles.setPadding(ui.dp(7), 0, ui.dp(4), 0);
         chatTitle = ui.text("", 15, t.inkStrong, t.bodySemi);
         chatTitle.setSingleLine(true);
         chatTitle.setEllipsize(TextUtils.TruncateAt.END);
@@ -371,6 +452,7 @@ public final class CommsScreen extends Screen {
         chatSub.setPadding(0, ui.dp(3), 0, 0);
         titles.addView(chatSub);
         titles.setClickable(true);
+        titles.setContentDescription("Switch model");
         titles.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -385,9 +467,22 @@ public final class CommsScreen extends Screen {
             }
         });
         h.addView(titles, Ui.weight(1));
+        handsFreeBtn = ui.iconButton(IconDrawable.HEADSET, "Hands-free conversation", t.dim, new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                setHandsFree(!e.settings.handsFree());
+            }
+        });
+        h.addView(handsFreeBtn);
         speakerBtn = ui.iconButton(IconDrawable.SPEAKER_OFF, "Read replies aloud", t.dim, new View.OnClickListener() {
             @Override
             public void onClick(View v) {
+                if (speakingNow) {
+                    // While the phone talks, this is its Stop control.
+                    e.speechStop();
+                    onSpeechChanged(false);
+                    return;
+                }
                 e.setReadAloud(!e.settings.readAloud());
                 ui.toast(e.settings.readAloud() ? "Reading replies aloud" : "Read-aloud off");
             }
@@ -408,7 +503,8 @@ public final class CommsScreen extends Screen {
         box.setGravity(Gravity.CENTER_HORIZONTAL);
         box.setPadding(ui.dp(28), ui.dp(24), ui.dp(28), ui.dp(24));
         ImageView big = new ImageView(a);
-        big.setImageDrawable(new IconDrawable(IconDrawable.LOGO, t.accent, t.hud ? t.inkStrong : t.accent2, ui.dp(56)));
+        big.setImageDrawable(new IconDrawable(IconDrawable.LOGO, t.accent, t.logoCore, ui.dp(56)));
+        big.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
         box.addView(big, new LinearLayout.LayoutParams(ui.dp(56), ui.dp(56)));
         TextView title = ui.title(t.hud ? "Comms channel open" : "Talk to OMNI", t.hud ? 14 : 20);
         title.setGravity(Gravity.CENTER);
@@ -423,18 +519,15 @@ public final class CommsScreen extends Screen {
         LinearLayout row2 = ui.hbox();
         row2.setGravity(Gravity.CENTER);
         row2.setPadding(0, ui.dp(8), 0, 0);
+        // {label, command ("" = send the label as a message)}; commands are identifiers → mono.
         String[][] prompts = {{"What can you do?", ""}, {"/help", "/help"}, {"/models", "/models"},
                 {"Speak", "/voice"}};
         for (int i = 0; i < prompts.length; i++) {
             final String label = prompts[i][0];
             final String cmd = prompts[i][1];
-            TextView c = ui.chip(label, t.accent);
-            c.setTextSize(TypedValue.COMPLEX_UNIT_SP, t.hud ? 10 : 12.5f);
-            c.setPadding(ui.dp(11), ui.dp(7), ui.dp(11), ui.dp(7));
-            c.setOnClickListener(new View.OnClickListener() {
+            TextView c = ui.actionChip(label, label.startsWith("/"), new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
-                    ui.tick(v);
                     if (cmd.length() > 0) a.commander().run(cmd);
                     else submitText(label);
                 }
@@ -448,6 +541,37 @@ public final class CommsScreen extends Screen {
         return box;
     }
 
+    /** "Context 86% full" with a one-tap Compact, above the composer. */
+    private LinearLayout buildContextWarning() {
+        LinearLayout bar = ui.hbox();
+        bar.setPadding(ui.dp(14), ui.dp(8), ui.dp(6), ui.dp(8));
+        bar.setBackgroundColor(Theme.flatten(Theme.alpha(t.warn, t.isDark ? 0x1F : 0x14), t.hud ? t.surface2 : t.surface));
+        ImageView icon = new ImageView(a);
+        icon.setImageDrawable(new IconDrawable(IconDrawable.WARN, t.warn, t.warn, ui.dp(18)));
+        icon.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        bar.addView(icon, new LinearLayout.LayoutParams(ui.dp(18), ui.dp(18)));
+        ctxWarnText = ui.text("", 13, t.ink, t.body);
+        ctxWarnText.setLineSpacing(0, 1.15f);
+        ctxWarnText.setPadding(ui.dp(10), 0, ui.dp(8), 0);
+        bar.addView(ctxWarnText, Ui.weight(1));
+        TextView compact = ui.button("Compact", 0, Ui.SECONDARY, new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                hideContextWarning();
+                a.commander().run("/compact");
+            }
+        });
+        compact.setContentDescription("Compact the chat");
+        bar.addView(compact);
+        bar.addView(ui.iconButton(IconDrawable.CLOSE, "Dismiss context warning", t.dim, new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                hideContextWarning();
+            }
+        }));
+        return bar;
+    }
+
     private View buildComposer() {
         LinearLayout wrap = ui.vbox();
         View line = ui.divider();
@@ -456,7 +580,8 @@ public final class CommsScreen extends Screen {
         LinearLayout composer = ui.hbox();
         composer.setGravity(Gravity.BOTTOM);
         composer.setBackgroundColor(t.hud ? Theme.alpha(t.surface2, 0xE6) : t.surface);
-        composer.setPadding(ui.dp(6), ui.dp(8), ui.dp(10), ui.dp(10));
+        // Both ends sit on the 14dp grid: the attach glyph (centred in its 40dp slot) and the send button.
+        composer.setPadding(ui.dp(4), ui.dp(8), ui.dp(14), ui.dp(10));
 
         attachBtn = ui.iconButton(IconDrawable.IMAGE, "Attach image", t.dim, new View.OnClickListener() {
             @Override
@@ -520,7 +645,7 @@ public final class CommsScreen extends Screen {
             }
         });
         LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(ui.dp(46), ui.dp(46));
-        slp.leftMargin = ui.dp(8);
+        slp.leftMargin = ui.dp(10);
         composer.addView(sendBtn, slp);
         wrap.addView(composer, Ui.fillW());
         return wrap;
@@ -639,26 +764,50 @@ public final class CommsScreen extends Screen {
         return m.role + "|" + m.tone + "|" + m.error;
     }
 
-    String headerText(ChatMessage m) {
-        String time = timeFormat.format(new Date(m.time));
+    /** The meta line over a message; model tags stay in mono, in their own case. */
+    CharSequence headerText(ChatMessage m) {
+        String time = ui.clock(m.time, false);
         if (m.isUser()) return (t.hud ? "OPERATOR // YOU" : "You") + " · " + time;
         if (m.isSystem()) return t.hud ? "CONTEXT // SUMMARY" : "Earlier conversation (summary)";
         if (m.isNotice()) {
             String k = "ok".equals(m.tone) ? "OK" : "error".equals(m.tone) ? "Error" : "warn".equals(m.tone) ? "Notice" : "Info";
             return (t.hud ? "SYSTEM // " + k.toUpperCase(Locale.US) : k) + " · " + time;
         }
-        String who = m.model.length() > 0 ? m.model : "AI";
-        String s = (t.hud ? "OMNI // " + who.toUpperCase(Locale.US) : who) + " · " + time;
+        SpannableStringBuilder s = new SpannableStringBuilder();
+        if (t.hud) s.append("OMNI // ");
+        if (m.model.length() > 0) s.append(ui.mono(m.model));
+        else s.append(t.hud ? "AI" : "OMNI");
+        s.append(" · ").append(time);
         if (m.streaming) {
             long secs = (System.currentTimeMillis() - m.startedAt) / 1000;
             if (m.content.length() == 0) {
-                s += m.thinking.length() > 0 ? " · thinking " + secs + "s"
-                        : secs >= 2 ? " · loading model " + secs + "s" : " · connecting";
+                s.append(m.thinking.length() > 0 ? " · thinking " + secs + "s"
+                        : secs >= 2 ? " · loading model " + secs + "s" : " · connecting");
             } else {
-                s += " · streaming";
+                s.append(" · streaming");
             }
         }
         return s;
+    }
+
+    /** A failed reply's error, in plain words (the raw error stays in the footer). */
+    static String failureReason(String error) {
+        String e = error == null ? "" : error.toLowerCase(Locale.US);
+        if (e.contains("not found") && (e.contains("model") || e.contains("pull"))) {
+            return "The PC doesn't have this model any more — pick another one in Models.";
+        }
+        if (e.contains("memory") || e.contains("oom") || e.contains("cuda")) {
+            return "The PC ran out of memory for this model. Try a smaller model, or unload others.";
+        }
+        if (e.contains("context") && (e.contains("length") || e.contains("exceed") || e.contains("too long"))) {
+            return "This chat no longer fits the model's context. Compact it, or start a new chat.";
+        }
+        if (e.contains("connect") || e.contains("reset") || e.contains("refused") || e.contains("timed out")
+                || e.contains("timeout") || e.contains("broken pipe") || e.contains("closed") || e.contains("eof")
+                || e.contains("unexpected end") || e.contains("socket") || e.contains("network")) {
+            return "The connection to your PC dropped before the reply finished.";
+        }
+        return "Your AI couldn't finish this reply.";
     }
 
     private Holder addHolder(ChatMessage m, int index) {
@@ -768,14 +917,28 @@ public final class CommsScreen extends Screen {
             }
             h.images.setVisibility(h.images.getChildCount() > 0 ? View.VISIBLE : View.GONE);
         }
+        if (h.askRow != null) h.askRow.setVisibility(m.image.length() > 0 ? View.VISIBLE : View.GONE);
 
         String foot = m.stats;
         if (foot.length() > 0 && !m.streaming) {
-            h.footer.setText(t.hud ? foot.toUpperCase(Locale.US) : foot);
+            // Cyber's stats line is micro-caps, but units stay lower-case: "40.0 tok/s · 2.7s", never "TOK/S · 2.7S".
+            h.footer.setText(t.hud ? t.labelUnits(foot) : foot);
             h.footer.setTextColor(m.error ? t.danger : m.stopped ? t.warn : t.faint);
             h.footer.setVisibility(View.VISIBLE);
         } else {
             h.footer.setVisibility(View.GONE);
+        }
+
+        if (h.retryRow != null) {
+            boolean failed = m.error && !m.streaming;
+            if (failed) {
+                h.retryReason.setText(failureReason(m.stats));
+                // Retry answers the last question again, so it's offered on the latest reply only.
+                boolean latest = m == e.conversation().lastOfRole(ChatMessage.ASSISTANT)
+                        && !e.isWorking();
+                h.retryBtn.setVisibility(latest ? View.VISIBLE : View.GONE);
+            }
+            h.retryRow.setVisibility(failed ? View.VISIBLE : View.GONE);
         }
     }
 
@@ -854,8 +1017,11 @@ public final class CommsScreen extends Screen {
         Engine.State s = e.state();
         String model = e.currentModel();
         if (s == Engine.State.ONLINE) {
-            emptySub.setText("Linked to " + (e.server() != null ? e.server().label() : "your PC")
-                    + (model.length() > 0 ? " · " + model : "") + ".\nType, tap the mic to speak, or / for commands.");
+            SpannableStringBuilder sb = new SpannableStringBuilder("Linked to ");
+            sb.append(ui.mono(e.server() != null ? e.server().label() : "your PC"));
+            if (model.length() > 0) sb.append(" · ").append(ui.mono(model));
+            sb.append(".\nType, tap the mic to speak, or / for commands.");
+            emptySub.setText(sb);
         } else if (s == Engine.State.SEARCHING) {
             emptySub.setText("Searching the network for your AI…");
         } else {
@@ -871,14 +1037,50 @@ public final class CommsScreen extends Screen {
         String model = e.currentModel();
         String mode = e.mode();
         String modeLabel = Settings.MODE_DEEP.equals(mode) ? "Deep" : Settings.MODE_FAST.equals(mode) ? "Fast" : "Auto";
-        chatSub.setText(t.label((model.length() > 0 ? model : "No model") + " · " + modeLabel
-                + (e.settings.incognito() ? " · incognito" : "")));
-        boolean speaking = e.settings.readAloud();
-        speakerBtn.setImageDrawable(new IconDrawable(speaking ? IconDrawable.SPEAKER : IconDrawable.SPEAKER_OFF,
-                speaking ? t.accent : t.dim, 0, ui.dp(20)));
+        // The model tag is an identifier: mono, its own case. Plain words stay micro-caps.
+        SpannableStringBuilder sub = new SpannableStringBuilder();
+        if (model.length() > 0) sub.append(ui.mono(model));
+        else sub.append(t.label("No model"));
+        sub.append(t.label(" · " + modeLabel + (e.settings.incognito() ? " · incognito" : "")));
+        chatSub.setText(sub);
+        if (speakingNow) {
+            speakerBtn.setImageDrawable(new IconDrawable(IconDrawable.STOP_CIRCLE, t.accent, t.accent, ui.dp(20)));
+            speakerBtn.setContentDescription("Stop speaking");
+        } else {
+            boolean on = e.settings.readAloud();
+            speakerBtn.setImageDrawable(new IconDrawable(on ? IconDrawable.SPEAKER : IconDrawable.SPEAKER_OFF,
+                    on ? t.accent : t.dim, 0, ui.dp(20)));
+            speakerBtn.setContentDescription("Read replies aloud");
+        }
+        boolean hf = e.settings.handsFree();
+        handsFreeBtn.setImageDrawable(new IconDrawable(IconDrawable.HEADSET, hf ? t.accent : t.dim,
+                hf ? t.accent : t.dim, ui.dp(20)));
+        handsFreeBtn.setSelected(hf);
         Boolean vision = e.supportsVision(model);
         attachBtn.setImageDrawable(new IconDrawable(IconDrawable.IMAGE,
                 Boolean.TRUE.equals(vision) ? t.accent : t.faint, 0, ui.dp(20)));
+    }
+
+    // ------------------------------------------------------------------
+    // Context window warning
+    // ------------------------------------------------------------------
+
+    private void showContextWarning(double fill) {
+        if (ctxWarn == null) return;
+        int pct = (int) Math.round(fill * 100);
+        ctxWarnText.setText("Context " + pct + "% full — the AI will start forgetting the beginning of this "
+                + "chat. Compact it to keep going.");
+        ctxWarn.setContentDescription("Context " + pct + " percent full");
+        ctxWarn.setVisibility(View.VISIBLE);
+    }
+
+    private void hideContextWarning() {
+        if (ctxWarn != null) ctxWarn.setVisibility(View.GONE);
+    }
+
+    /** True while the "context nearly full" row shows (tests). */
+    public boolean contextWarningShown() {
+        return ctxWarn != null && ctxWarn.getVisibility() == View.VISIBLE;
     }
 
     // ------------------------------------------------------------------
@@ -893,6 +1095,8 @@ public final class CommsScreen extends Screen {
 
     @Override
     public void onConversationReplaced() {
+        hideContextWarning();
+        voiceReplyId = null;
         renderAll();
     }
 
@@ -909,6 +1113,21 @@ public final class CommsScreen extends Screen {
     public void onMessageChanged(ChatMessage m) {
         Holder h = holders.get(m.id);
         if (h != null) bind(h);
+        if (!m.isAssistant() || m.streaming) return;
+        if (m.id.equals(voiceReplyId)) {
+            voiceReplyId = null;
+            if (!m.error && !m.stopped && m.content.trim().length() > 0) {
+                // A spoken question gets a spoken answer, even with read-aloud off
+                // (with it on, the reply was already read as it streamed).
+                if (!e.settings.readAloud()) e.speakNow(m.content);
+                if (e.settings.handsFree()) armRelisten();
+            }
+        }
+        if (!m.error && !m.stopped && m == e.conversation().lastOfRole(ChatMessage.ASSISTANT)) {
+            double fill = e.telemetry.contextFill.last();
+            if (!Double.isNaN(fill) && fill >= CONTEXT_WARN) showContextWarning(fill);
+            else hideContextWarning();
+        }
     }
 
     @Override
@@ -921,6 +1140,16 @@ public final class CommsScreen extends Screen {
     @Override
     public void onBusyChanged() {
         updateSendButton();
+        // A failed reply's Retry shows once nothing else is running.
+        ChatMessage last = e.conversation().lastOfRole(ChatMessage.ASSISTANT);
+        Holder h = last == null ? null : holders.get(last.id);
+        if (h != null && last.error) bind(h);
+    }
+
+    @Override
+    public void onSpeechChanged(boolean speaking) {
+        speakingNow = speaking;
+        if (chatTitle != null) updateHeader();
     }
 
     @Override
@@ -956,12 +1185,17 @@ public final class CommsScreen extends Screen {
     @Override
     protected void onHide() {
         scroll.removeCallbacks(ticker);
-        e.draft = input.getText().toString();
+        keepDraft();
     }
 
     @Override
     public void onActivityStop() {
-        if (input != null) e.draft = input.getText().toString();
+        keepDraft();
+    }
+
+    @Override
+    public void onDestroy() {
+        handler.removeCallbacksAndMessages(null);
     }
 
     @Override
@@ -995,7 +1229,31 @@ public final class CommsScreen extends Screen {
         submit();
     }
 
+    /**
+     * Sends recognized speech. The reply to a voice turn is spoken back even
+     * when read-aloud is off, and in hands-free mode the mic opens again
+     * once it has been said.
+     */
+    public void submitVoice(String text) {
+        voiceArmed = true;
+        submitText(text);
+    }
+
+    /** Opens the speech recognizer for a voice turn (the mic button, the "Talk" shortcut). */
+    public void talk() {
+        if (input == null) view();
+        voice();
+    }
+
+    /** Puts the cursor in the composer (e.g. after "New chat" from the launcher). */
+    public void focusComposer() {
+        if (input == null) view();
+        input.requestFocus();
+    }
+
     private void submit() {
+        boolean voiceTurn = voiceArmed;
+        voiceArmed = false;
         String raw = input.getText().toString();
         if (raw.trim().length() == 0 && pendingImages.isEmpty()) return;
         Commands.Parsed pc = Commands.parse(raw);
@@ -1015,6 +1273,11 @@ public final class CommsScreen extends Screen {
             clearInput();
             clearAttachments();
             scroll.stickToBottom(false);
+            if (voiceTurn) {
+                ChatMessage reply = e.streamingMessage();
+                voiceReplyId = reply != null ? reply.id : null;
+            }
+            a.onUserSent();
         }
     }
 
@@ -1029,10 +1292,68 @@ public final class CommsScreen extends Screen {
         a.startVoice(t.hud ? "Speak to OMNI" : "Speak your message", new MainActivity.TextResult() {
             @Override
             public void onText(String text) {
-                submitText(text);
+                submitVoice(text);
             }
         });
     }
+
+    // ------------------------------------------------------------------
+    // Hands-free conversation
+    // ------------------------------------------------------------------
+
+    private void setHandsFree(boolean on) {
+        e.settings.setHandsFree(on);
+        updateHeader();
+        if (!on) {
+            relistenPending = false;
+            handler.removeCallbacks(relisten);
+            ui.toast("Hands-free off");
+            return;
+        }
+        ui.toast("Hands-free on: after each spoken reply, OMNI listens again");
+        if (!e.isWorking()) voice();
+    }
+
+    /** After a voice turn's spoken reply ends (or never starts), listen again. */
+    private void armRelisten() {
+        relistenPending = true;
+        sawSpeech = false;
+        relistenDeadline = SystemClock.uptimeMillis() + SPEECH_START_WAIT_MS;
+        handler.removeCallbacks(relisten);
+        handler.postDelayed(relisten, RELISTEN_POLL_MS);
+    }
+
+    /** True while hands-free waits for the spoken reply to end (tests). */
+    public boolean relistenPending() {
+        return relistenPending;
+    }
+
+    private final Runnable relisten = new Runnable() {
+        @Override
+        public void run() {
+            if (!relistenPending) return;
+            if (!e.settings.handsFree() || !isAppVisible()) {
+                relistenPending = false;
+                return;
+            }
+            if (e.speaking()) {
+                sawSpeech = true;
+                handler.postDelayed(this, RELISTEN_POLL_MS);
+                return;
+            }
+            if (!sawSpeech && SystemClock.uptimeMillis() < relistenDeadline) {
+                // The voice may still be starting up.
+                handler.postDelayed(this, RELISTEN_POLL_MS);
+                return;
+            }
+            relistenPending = false;
+            if (!e.isWorking()) voice();
+        }
+    };
+
+    // ------------------------------------------------------------------
+    // Attachments
+    // ------------------------------------------------------------------
 
     private void attachImage() {
         String model = e.currentModel();
@@ -1042,17 +1363,61 @@ public final class CommsScreen extends Screen {
                     + "(llava, gemma3, qwen2.5vl…) to attach photos.");
             return;
         }
-        if (pendingImages.size() >= 4) {
+        if (pendingImages.size() >= MAX_IMAGES) {
             ui.toast("Up to 4 images per message.");
             return;
         }
         a.pickImage(new MainActivity.ImageResult() {
             @Override
             public void onImage(String base64, Bitmap preview) {
-                pendingImages.add(base64);
-                pendingPreviews.add(preview);
-                renderAttachments();
-                updateSendButton();
+                addAttachment(base64, preview);
+            }
+        });
+    }
+
+    /**
+     * Adds an encoded image (base64 JPEG/PNG) to the next message — a
+     * picked photo, one shared from another app, or a PC screenshot.
+     * {@code preview} may be null (it is decoded from the image).
+     */
+    public void addAttachment(String base64, Bitmap preview) {
+        if (input == null) view();
+        if (base64 == null || base64.length() == 0) return;
+        if (pendingImages.size() >= MAX_IMAGES) {
+            ui.toast("Up to 4 images per message.");
+            return;
+        }
+        pendingImages.add(base64);
+        pendingPreviews.add(preview != null ? preview : decode(base64, ui.dp(116)));
+        renderAttachments();
+        updateSendButton();
+        String model = e.currentModel();
+        if (Boolean.FALSE.equals(e.supportsVision(model))) {
+            ui.toast(model + " can't see images — switch to a vision model (llava, gemma3, qwen2.5vl…) to send it.");
+        }
+    }
+
+    /** The images waiting in the composer (tests). */
+    public List<String> pendingImages() {
+        return new ArrayList<String>(pendingImages);
+    }
+
+    /** "Ask about this" on a PC screenshot: attach it (downscaled) and suggest a question. */
+    private void askAbout(ChatMessage m) {
+        if (m.image.length() == 0) return;
+        if (pendingImages.size() >= MAX_IMAGES) {
+            ui.toast("Up to 4 images per message.");
+            return;
+        }
+        a.downscaleImage(m.image, 1280, new MainActivity.ImageResult() {
+            @Override
+            public void onImage(String base64, Bitmap preview) {
+                addAttachment(base64, preview);
+                if (input.getText().toString().trim().length() == 0) {
+                    input.setText("What's on my PC screen?");
+                    input.selectAll();
+                }
+                input.requestFocus();
             }
         });
     }
@@ -1066,11 +1431,13 @@ public final class CommsScreen extends Screen {
             iv.setImageBitmap(pendingPreviews.get(i));
             iv.setScaleType(ImageView.ScaleType.CENTER_CROP);
             iv.setBackground(ui.rounded(0, t.edge, 8));
+            iv.setContentDescription("Attached image " + (i + 1));
             f.addView(iv, new FrameLayout.LayoutParams(ui.dp(58), ui.dp(58)));
             ImageView x = new ImageView(a);
-            x.setImageDrawable(new IconDrawable(IconDrawable.CLOSE, 0xFFFFFFFF, 0, ui.dp(12)));
+            // A dark puck with a light ×, readable on any photo.
+            x.setImageDrawable(new IconDrawable(IconDrawable.CLOSE, t.isDark ? t.inkStrong : t.surface, 0, ui.dp(12)));
             x.setScaleType(ImageView.ScaleType.CENTER);
-            x.setBackground(ui.rounded(0xCC000000, 0, 10));
+            x.setBackground(ui.rounded(Theme.alpha(t.isDark ? t.bg : t.ink, 0xCC), 0, 10));
             x.setContentDescription("Remove image");
             x.setOnClickListener(new View.OnClickListener() {
                 @Override
@@ -1129,7 +1496,7 @@ public final class CommsScreen extends Screen {
     private View suggestionRow(final Commands.Cmd c, boolean clickable) {
         LinearLayout row = ui.vbox();
         row.setPadding(ui.dp(16), ui.dp(8), ui.dp(16), ui.dp(8));
-        TextView name = ui.text(clickable ? c.name : c.usage, 13.5f, t.accent, t.mono);
+        TextView name = ui.text(clickable ? c.name : c.usage, 13.5f, t.id == Theme.DARK ? t.data : t.accent, t.mono);
         row.addView(name);
         TextView desc = ui.dim(c.desc, 12);
         desc.setSingleLine(true);
@@ -1137,9 +1504,7 @@ public final class CommsScreen extends Screen {
         desc.setPadding(0, ui.dp(2), 0, 0);
         row.addView(desc);
         if (clickable) {
-            TypedValue tv = new TypedValue();
-            a.getTheme().resolveAttribute(android.R.attr.selectableItemBackground, tv, true);
-            if (tv.resourceId != 0) row.setBackground(a.getDrawable(tv.resourceId));
+            row.setBackground(ui.pressableRow(0));
             row.setOnClickListener(new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
@@ -1165,8 +1530,8 @@ public final class CommsScreen extends Screen {
         String cur = e.currentModel();
         List<Ui.Row> rows = new ArrayList<Ui.Row>();
         for (final ModelInfo m : ms) {
-            rows.add(new Ui.Row(m.name + (e.isLoaded(m.name) ? "  ●" : ""), m.describe(), m.name.equals(cur),
-                    new Runnable() {
+            rows.add(new Ui.Row(ui.mono(m.name), (e.isLoaded(m.name) ? "loaded · " : "") + m.describe(),
+                    m.name.equals(cur), new Runnable() {
                         @Override
                         public void run() {
                             e.setModel(m.name);
@@ -1174,7 +1539,9 @@ public final class CommsScreen extends Screen {
                         }
                     }, null));
         }
-        ui.pick("Switch model", rows, "Mode: " + e.mode(), new Runnable() {
+        String mode = e.mode();
+        ui.pick("Model", "Switch model", rows, "Mode: " + (Settings.MODE_DEEP.equals(mode) ? "Deep"
+                : Settings.MODE_FAST.equals(mode) ? "Fast" : "Auto"), new Runnable() {
             @Override
             public void run() {
                 a.commander().cycleMode();
@@ -1182,76 +1549,99 @@ public final class CommsScreen extends Screen {
         });
     }
 
+    /** The first line of a message, shortened, as the actions sheet's title. */
+    private static String excerpt(ChatMessage m) {
+        String s = m.content.trim();
+        int nl = s.indexOf('\n');
+        if (nl > 0) s = s.substring(0, nl);
+        if (s.length() == 0) return m.images.isEmpty() && m.image.length() == 0 ? "Empty message" : "Image";
+        return "“" + Fmt.ellipsize(s, 64) + "”";
+    }
+
     private void showMessageActions(final ChatMessage m) {
-        final List<String> labels = new ArrayList<String>();
-        final List<Runnable> actions = new ArrayList<Runnable>();
-        labels.add("Copy text");
-        actions.add(new Runnable() {
-            @Override
-            public void run() {
-                a.copy("message", m.content);
-            }
-        });
+        List<Ui.Row> rows = new ArrayList<Ui.Row>();
+        if (m.content.length() > 0) {
+            rows.add(new Ui.Row("Copy text", null, false, new Runnable() {
+                @Override
+                public void run() {
+                    a.copy("message", m.content);
+                }
+            }, null).icon(IconDrawable.COPY));
+        }
         if (m.thinking.length() > 0) {
-            labels.add("Copy reasoning");
-            actions.add(new Runnable() {
+            rows.add(new Ui.Row("Copy reasoning", null, false, new Runnable() {
                 @Override
                 public void run() {
                     a.copy("reasoning", m.thinking);
                 }
-            });
+            }, null).icon(IconDrawable.BRAIN));
         }
         if (m.isAssistant() && m.content.length() > 0) {
-            labels.add("Read aloud");
-            actions.add(new Runnable() {
+            rows.add(new Ui.Row("Read aloud", null, false, new Runnable() {
                 @Override
                 public void run() {
                     e.speakNow(m.content);
                 }
-            });
+            }, null).icon(IconDrawable.SPEAKER));
         }
-        labels.add("Share");
-        actions.add(new Runnable() {
-            @Override
-            public void run() {
-                a.share("OMNI-DECK", m.content);
-            }
-        });
-        if (m.isAssistant() && !e.isBusy() && m == e.conversation().lastOfRole(ChatMessage.ASSISTANT)) {
-            labels.add("Regenerate");
-            actions.add(new Runnable() {
+        if (m.content.length() > 0) {
+            rows.add(new Ui.Row("Share", null, false, new Runnable() {
+                @Override
+                public void run() {
+                    a.share("OMNI-DECK", m.content);
+                }
+            }, null).icon(IconDrawable.SHARE));
+        }
+        if (m.isNotice() && m.image.length() > 0) {
+            rows.add(new Ui.Row("Ask about this", "Attach it to your next message", false, new Runnable() {
+                @Override
+                public void run() {
+                    askAbout(m);
+                }
+            }, null).icon(IconDrawable.IMAGE));
+        }
+        if (m.isAssistant() && !e.isWorking() && m == e.conversation().lastOfRole(ChatMessage.ASSISTANT)) {
+            rows.add(new Ui.Row("Regenerate", "Answer the last question again", false, new Runnable() {
                 @Override
                 public void run() {
                     e.regenerate();
                 }
-            });
+            }, null).icon(IconDrawable.REFRESH));
         }
-        if (m.isUser() && !e.isBusy()) {
-            labels.add("Edit & resend");
-            actions.add(new Runnable() {
-                @Override
-                public void run() {
-                    String text = e.editFrom(m);
-                    input.setText(text);
-                    input.setSelection(input.getText().length());
-                    input.requestFocus();
-                }
-            });
+        if (m.isUser() && !e.isWorking()) {
+            rows.add(new Ui.Row("Edit & resend", "Removes this message and everything after it", false,
+                    new Runnable() {
+                        @Override
+                        public void run() {
+                            editAndResend(m);
+                        }
+                    }, null).icon(IconDrawable.EDIT));
         }
-        labels.add("Delete");
-        actions.add(new Runnable() {
+        rows.add(new Ui.Row("Delete", null, false, new Runnable() {
             @Override
             public void run() {
                 e.deleteMessage(m);
             }
-        });
-        new AlertDialog.Builder(a).setItems(labels.toArray(new CharSequence[0]),
-                new android.content.DialogInterface.OnClickListener() {
-                    @Override
-                    public void onClick(android.content.DialogInterface d, int which) {
-                        actions.get(which).run();
-                    }
-                }).show();
+        }, null).icon(IconDrawable.TRASH).danger());
+        ui.pick(m.isUser() ? "Your message" : m.isAssistant() ? "OMNI's reply" : "Notice", excerpt(m), rows,
+                null, null);
+    }
+
+    /** Puts a sent message back in the composer (with its images) and drops it and everything after. */
+    private void editAndResend(ChatMessage m) {
+        List<String> images = new ArrayList<String>(m.images);
+        String text = e.editFrom(m);
+        clearAttachments();
+        for (String b64 : images) {
+            if (pendingImages.size() >= MAX_IMAGES) break;
+            pendingImages.add(b64);
+            pendingPreviews.add(decode(b64, ui.dp(116)));
+        }
+        renderAttachments();
+        input.setText(text);
+        input.setSelection(input.getText().length());
+        input.requestFocus();
+        updateSendButton();
     }
 
     // ------------------------------------------------------------------
@@ -1260,11 +1650,11 @@ public final class CommsScreen extends Screen {
 
     private FrameLayout buildHistoryLayer() {
         FrameLayout layer = new FrameLayout(a);
-        layer.setBackgroundColor(t.hud ? 0xF003060B : t.bg);
+        layer.setBackgroundColor(t.hud ? Theme.flatten(t.surface2, t.bg) : t.bg);
         layer.setClickable(true);
         LinearLayout col = ui.vbox();
         LinearLayout head = ui.hbox();
-        head.setPadding(ui.dp(4), ui.dp(4), ui.dp(8), ui.dp(4));
+        head.setPadding(ui.dp(4), ui.dp(4), ui.dp(14), ui.dp(4));
         head.addView(ui.iconButton(IconDrawable.BACK, "Close history", t.dim, new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -1272,6 +1662,7 @@ public final class CommsScreen extends Screen {
             }
         }));
         TextView title = ui.title(t.hud ? "Archive" : "Chats", t.hud ? 14 : 18);
+        title.setPadding(ui.dp(7), 0, 0, 0);
         head.addView(title, Ui.weight(1));
         head.addView(ui.button("New", IconDrawable.PLUS, Ui.SECONDARY, new View.OnClickListener() {
             @Override
@@ -1334,20 +1725,22 @@ public final class CommsScreen extends Screen {
         historyList.removeAllViews();
         String q = historySearch.getText().toString().trim().toLowerCase(Locale.US);
         String current = e.conversation().id;
-        DateFormat df = DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT);
+        java.text.DateFormat day = android.text.format.DateFormat.getMediumDateFormat(a);
         int shown = 0;
         for (final ConversationStore.Entry en : historyEntries) {
             if (q.length() > 0 && !en.title.toLowerCase(Locale.US).contains(q)) continue;
             shown++;
             LinearLayout card = ui.card();
-            card.setPadding(ui.dp(14), ui.dp(12), ui.dp(10), ui.dp(12));
+            card.setPadding(ui.dp(14), ui.dp(12), ui.dp(4), ui.dp(12));
             LinearLayout row = ui.hbox();
             LinearLayout text = ui.vbox();
-            TextView tt = ui.text(en.title, 15, en.id.equals(current) ? t.accent : t.ink, t.bodyMedium);
+            TextView tt = ui.text(en.title, 15, en.id.equals(current) ? (t.id == Theme.DARK ? t.data : t.accent)
+                    : t.ink, t.bodyMedium);
             tt.setSingleLine(true);
             tt.setEllipsize(TextUtils.TruncateAt.END);
             text.addView(tt);
-            TextView st = ui.label(en.count + " messages · " + df.format(new Date(en.updated)));
+            TextView st = ui.readout(en.count + " messages · " + day.format(new Date(en.updated)) + " · "
+                    + ui.clock(en.updated, false), 11.5f, t.dim);
             st.setPadding(0, ui.dp(5), 0, 0);
             text.addView(st);
             row.addView(text, Ui.weight(1));
@@ -1393,7 +1786,7 @@ public final class CommsScreen extends Screen {
                 e.openChat(en.id);
                 closeHistory();
             }
-        }, null));
+        }, null).icon(IconDrawable.NAV_COMMS));
         rows.add(new Ui.Row("Rename", null, false, new Runnable() {
             @Override
             public void run() {
@@ -1412,7 +1805,7 @@ public final class CommsScreen extends Screen {
                     }
                 });
             }
-        }, null));
+        }, null).icon(IconDrawable.EDIT));
         rows.add(new Ui.Row("Delete", null, false, new Runnable() {
             @Override
             public void run() {
@@ -1425,7 +1818,7 @@ public final class CommsScreen extends Screen {
                     }
                 });
             }
-        }, null));
-        ui.pick(Fmt.ellipsize(en.title, 40), rows, null, null);
+        }, null).icon(IconDrawable.TRASH).danger());
+        ui.pick("Chat", Fmt.ellipsize(en.title, 40), rows, null, null);
     }
 }

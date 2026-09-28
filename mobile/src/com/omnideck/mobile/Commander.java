@@ -1,9 +1,8 @@
 package com.omnideck.mobile;
 
-import android.app.AlertDialog;
 import android.content.ClipboardManager;
 import android.content.Context;
-import android.content.DialogInterface;
+import android.widget.TextView;
 
 import com.omnideck.mobile.core.Commands;
 import com.omnideck.mobile.core.Conversation;
@@ -11,6 +10,8 @@ import com.omnideck.mobile.core.ConversationStore;
 import com.omnideck.mobile.core.HostPort;
 import com.omnideck.mobile.core.ModelInfo;
 import com.omnideck.mobile.core.OllamaClient;
+import com.omnideck.mobile.ui.IconDrawable;
+import com.omnideck.mobile.ui.Sheet;
 import com.omnideck.mobile.ui.Ui;
 
 import org.json.JSONArray;
@@ -222,8 +223,9 @@ public final class Commander {
             act.startVoice("Speak to OMNI", new MainActivity.TextResult() {
                 @Override
                 public void onText(String text) {
+                    // A spoken question gets a spoken answer (see CommsScreen.submitVoice).
                     act.select(MainActivity.TAB_COMMS, true);
-                    act.comms().submitText(text);
+                    act.comms().submitVoice(text);
                 }
             });
         } else if ("/mute".equals(name)) {
@@ -315,6 +317,18 @@ public final class Commander {
                 ? "Fast: no thinking" : "Auto: fast, deep model for hard questions");
     }
 
+    /**
+     * The activity on screen now. Commander belongs to the activity that
+     * created it, which may be gone by the time a slow answer arrives
+     * (recreated for a theme or dark-mode switch, or closed): dialogs go to
+     * the live one, or nowhere (null) when the app has no visible activity.
+     */
+    private MainActivity host() {
+        Engine.Listener l = e.listener();
+        MainActivity live = l instanceof MainActivity ? (MainActivity) l : act;
+        return live.isFinishing() || live.isDestroyed() ? null : live;
+    }
+
     public void openApp(final String query) {
         e.bridgePreviewLaunch(query, new Engine.Callback<JSONObject>() {
             @Override
@@ -323,6 +337,7 @@ public final class Commander {
                     e.notice("Couldn't open “" + query + "”: " + error, "error");
                     return;
                 }
+                MainActivity h = host();
                 if (r.optBoolean("needs_choice", false)) {
                     JSONArray cands = r.optJSONArray("candidates");
                     if (cands == null || cands.length() == 0) {
@@ -330,18 +345,26 @@ public final class Commander {
                         return;
                     }
                     List<Ui.Row> rows = new ArrayList<Ui.Row>();
+                    StringBuilder names = new StringBuilder();
                     for (int i = 0; i < cands.length(); i++) {
                         final JSONObject c = cands.optJSONObject(i);
                         if (c == null) continue;
                         final String nm = OllamaClient.str(c, "name");
+                        if (names.length() > 0) names.append(", ");
+                        names.append("**").append(nm).append("**");
                         rows.add(new Ui.Row(nm, OllamaClient.str(c, "path"), false, new Runnable() {
                             @Override
                             public void run() {
                                 e.bridgeLaunch(OllamaClient.str(c, "id"), nm);
                             }
-                        }, null));
+                        }, null).icon(IconDrawable.APPS));
                     }
-                    ui.pick("Which app?", rows, null, null);
+                    if (h == null) {
+                        e.notice("Several apps on the PC match “" + query + "”: " + names
+                                + ". Run `/open` with the one you mean.", "info");
+                        return;
+                    }
+                    h.ui().pick("Open on PC", "Which app?", rows, null, null);
                     return;
                 }
                 final JSONObject target = r.optJSONObject("would_launch");
@@ -352,18 +375,28 @@ public final class Commander {
                     return;
                 }
                 final String nm = OllamaClient.str(target, "name");
+                if (h == null) {
+                    e.notice("Found **" + nm + "** on the PC. Run `/open " + query + "` again to open it.", "info");
+                    return;
+                }
                 String path = OllamaClient.str(target, "path");
-                new AlertDialog.Builder(act)
-                        .setTitle("Open " + nm + " on the PC?")
-                        .setMessage(path.length() > 0 ? path : "LaunchBridge will start it on your PC.")
-                        .setPositiveButton("Open", new DialogInterface.OnClickListener() {
-                            @Override
-                            public void onClick(DialogInterface d, int w) {
-                                e.bridgeLaunch(OllamaClient.str(target, "id"), nm);
-                            }
-                        })
-                        .setNegativeButton("Cancel", null)
-                        .show();
+                Ui hu = h.ui();
+                Sheet s = hu.sheet("Open on PC", "Open " + nm + " on the PC?");
+                if (path.length() > 0) {
+                    TextView p = hu.text(path, 12.5f, h.theme().dim, h.theme().mono);
+                    p.setLineSpacing(0, 1.2f);
+                    s.body.addView(p, Ui.fillW());
+                } else {
+                    s.message("LaunchBridge will start it on your PC.");
+                }
+                s.negative("Cancel", null);
+                s.positive("Open", Ui.PRIMARY, new Runnable() {
+                    @Override
+                    public void run() {
+                        e.bridgeLaunch(OllamaClient.str(target, "id"), nm);
+                    }
+                });
+                s.show();
             }
         });
     }

@@ -60,6 +60,20 @@ public class CommsFlowTest extends Harness {
                 && engine().conversation().messages.size() >= before + 2);
     }
 
+    /** Taps the row titled {@code title} in a pick sheet (rows are the title's parent). */
+    static void clickDialogRow(android.app.Dialog d, String title) {
+        List<View> all = new ArrayList<>();
+        collect(d.getWindow().getDecorView(), all);
+        for (View v : all) {
+            if (v instanceof TextView && title.contentEquals(((TextView) v).getText())) {
+                ((View) v.getParent()).performClick();
+                idle();
+                return;
+            }
+        }
+        throw new AssertionError("no row " + title);
+    }
+
     private void command(String text, String expectInNotice) {
         submit(text);
         waitFor(text + " → " + expectInNotice, () -> lastNotice().contains(expectInNotice));
@@ -300,15 +314,16 @@ public class CommsFlowTest extends Harness {
         waitOnline();
         chatAndWait("copy me");
 
-        // Long-press the reply → actions → Copy text.
+        // Long-press the reply → actions (a themed sheet) → Copy text.
         TextView reply = textView("You said: copy me");
         assertNotNull(reply);
         reply.performLongClick();
         idle();
         AlertDialog actions = ShadowAlertDialog.getLatestAlertDialog();
         assertNotNull(actions);
-        shadowOf(actions).clickOnItem(0);
-        idle();
+        assertTrue(actions.isShowing());
+        clickDialogRow(actions, "Copy text");
+        assertFalse(actions.isShowing());
         ClipboardManager cm = (ClipboardManager) act.getSystemService(Context.CLIPBOARD_SERVICE);
         assertTrue(cm.getPrimaryClip().getItemAt(0).getText().toString().startsWith("You said: copy me"));
         assertEquals("Copied", ShadowToast.getTextOfLatestToast());

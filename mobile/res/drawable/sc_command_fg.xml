@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Adaptive-icon foreground (108dp canvas, glyph inside the 66dp safe zone). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <group android:translateX="32" android:translateY="32" android:scaleX="1.8333" android:scaleY="1.8333">
+        <path android:fillColor="#00000000" android:strokeColor="@color/cyber_accent"
+            android:strokeWidth="1.7" android:strokeLineCap="round" android:strokeLineJoin="round"
+            android:pathData="@string/sc_path_command" />
+    </group>
+</vector>
