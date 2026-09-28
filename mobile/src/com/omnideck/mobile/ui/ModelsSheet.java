@@ -1,16 +1,12 @@
 package com.omnideck.mobile.ui;
 
-import android.app.Dialog;
-import android.content.Context;
-import android.graphics.drawable.ColorDrawable;
+import android.app.AlertDialog;
 import android.text.TextUtils;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
-import android.view.Window;
-import android.widget.FrameLayout;
+import android.widget.Button;
 import android.widget.LinearLayout;
-import android.widget.ScrollView;
 import android.widget.TextView;
 
 import com.omnideck.mobile.Engine;
@@ -21,189 +17,199 @@ import com.omnideck.mobile.core.OllamaClient;
 import java.util.Locale;
 
 /**
- * The model spec sheet: a themed dialog with everything Ollama reports about
- * one model — context window, parameters, quantization, format, family, disk
- * and memory footprint, capabilities, license and runtime parameters — plus
- * the two actions you most likely want next (use it, load/unload it).
+ * The model spec sheet, on the app's shared dialog chrome ({@link Sheet}):
+ * everything Ollama reports about one model — context window, parameters,
+ * quantization, format, family, disk and memory footprint, capabilities,
+ * license and runtime parameters — plus the two actions you most likely want
+ * next. Load / Unload keeps the sheet open and it follows along live (the
+ * model bay calls {@link #refresh()} on every change); "Use model" switches
+ * and closes it.
  */
 public final class ModelsSheet {
-    /** What the sheet's buttons do (implemented by the model bay). */
+    /** What the sheet's buttons do, and what's running (implemented by the model bay). */
     public interface Actions {
         void use(String model);
 
         void openChat();
 
         void toggleLoad(String model);
+
+        /** The operation running on {@code model} ("load", "unload" or "delete"), or null. */
+        String busy(String model);
     }
 
-    private final Context c;
+    private static final String OP_LOAD = ModelsOps.LOAD;
+    private static final String OP_UNLOAD = ModelsOps.UNLOAD;
+    private static final String OP_DELETE = ModelsOps.DELETE;
+
     private final Engine e;
     private final ModelsKit kit;
     private final Ui ui;
     private final Theme t;
     private final String model;
     private final Actions actions;
-    private Dialog dialog;
+    private final boolean embedding;
+    private Sheet sheet;
     private LinearLayout content;
+    /** Chat models: Load / Unload. Embedding models: Unload (only while one is resident). */
+    private Button loadBtn;
+    /** Chat models: Use model / Open chat. */
+    private Button useBtn;
+    private OllamaClient.ModelDetails details;
+    /** null while the details are on their way, "" once read, else why they couldn't be. */
+    private String error;
+    private String key = "";
 
-    private ModelsSheet(Context c, Engine e, ModelsKit kit, String model, Actions actions) {
-        this.c = c;
+    private ModelsSheet(Engine e, ModelsKit kit, String model, Actions actions) {
         this.e = e;
         this.kit = kit;
         this.ui = kit.ui;
         this.t = kit.t;
         this.model = model;
         this.actions = actions;
+        this.embedding = e.isEmbeddingOnly(model);
     }
 
     /** Opens the sheet for {@code model}; details load in place if they aren't cached yet. */
-    public static Dialog show(Context c, Engine e, ModelsKit kit, String model, Actions actions) {
-        return new ModelsSheet(c, e, kit, model, actions).open();
+    public static ModelsSheet show(Engine e, ModelsKit kit, String model, Actions actions) {
+        ModelsSheet s = new ModelsSheet(e, kit, model, actions);
+        s.open();
+        return s;
     }
 
-    private Dialog open() {
-        dialog = new Dialog(c);
-        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
-        LinearLayout card = ui.vbox();
-        card.setBackground(sheetBackground());
-        card.setClickable(true);
-        card.addView(header(), Ui.fillW());
-        View line = new View(c);
-        line.setBackgroundColor(t.hud ? Theme.alpha(t.accent, 0x33) : t.hair);
-        card.addView(line, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, Math.max(1, ui.dp(1))));
+    public String model() {
+        return model;
+    }
 
-        ScrollView sv = new CappedScroll(c, (int) (c.getResources().getDisplayMetrics().heightPixels * 0.6f));
-        sv.setVerticalScrollBarEnabled(false);
-        sv.setOverScrollMode(View.OVER_SCROLL_IF_CONTENT_SCROLLS);
+    public AlertDialog dialog() {
+        return sheet.dialog;
+    }
+
+    public boolean isShowing() {
+        return sheet != null && sheet.isShowing();
+    }
+
+    public void dismiss() {
+        if (sheet != null) sheet.dismiss();
+    }
+
+    private void open() {
+        sheet = ui.sheet(t.hud ? "Model spec sheet" : "Model details", kit.monoName(model, t.inkStrong));
+        sheet.closeButton("Close details");
+        sheet.footerRule(true);   // the spec list scrolls under the actions
         content = ui.vbox();
-        content.setPadding(ui.dp(18), ui.dp(14), ui.dp(18), ui.dp(6));
-        sv.addView(content, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT));
-        card.addView(sv, Ui.fillW());
-        View rule = new View(c);
-        rule.setBackgroundColor(t.hud ? t.hair : t.hairSoft);
-        card.addView(rule, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, Math.max(1, ui.dp(1))));
-        card.addView(footer(), Ui.fillW());
+        sheet.body.addView(content, Ui.fillW());
+        buildFooter();
 
-        FrameLayout frame = new FrameLayout(c);
-        frame.setPadding(ui.dp(4), ui.dp(4), ui.dp(4), ui.dp(4));
-        frame.addView(card, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT));
-        dialog.setContentView(frame);
-        Window w = dialog.getWindow();
-        if (w != null) w.setBackgroundDrawable(new ColorDrawable(0));
-
-        OllamaClient.ModelDetails d = e.details(model);
-        fill(d, d == null ? null : "");
-        if (d == null) {
+        details = e.details(model);
+        error = details == null ? null : "";
+        refresh();
+        if (details == null) {
             e.fetchDetails(model, new Engine.Callback<OllamaClient.ModelDetails>() {
                 @Override
-                public void done(OllamaClient.ModelDetails v, String error) {
-                    if (dialog.isShowing()) fill(v, error);
+                public void done(OllamaClient.ModelDetails v, String err) {
+                    details = v;
+                    error = v != null ? "" : err == null ? "No details." : err;
+                    if (isShowing()) refresh();
                 }
             });
         }
-        dialog.show();
-        if (w != null) {
-            int screenW = c.getResources().getDisplayMetrics().widthPixels;
-            w.setLayout(Math.min(screenW - ui.dp(24), ui.dp(460)), ViewGroup.LayoutParams.WRAP_CONTENT);
-        }
-        return dialog;
+        sheet.show();
     }
 
-    private android.graphics.drawable.Drawable sheetBackground() {
-        Panel.Builder b = Panel.builder().fill(opaque(t.hud ? t.surface2 : t.surface, t.bg))
-                .edge(t.hud ? t.edgeStrong : t.edge, Math.max(1, ui.dp(1))).radius(ui.dp(t.radius + 2))
-                .highlight(t.panelHi);
-        if (t.hud) {
-            b.grid(ui.dp(22), t.gridColor).bloom(t.bloomColor)
-                    .brackets(ui.dp(12), ui.dp(1.3f), t.bracketColor).bracketInset(ui.dp(6));
-        }
-        return b.build();
-    }
-
-    /** Solid version of a translucent color over {@code base} (dialogs sit over a dim scrim). */
-    static int opaque(int color, int base) {
-        int a = (color >>> 24) & 0xFF;
-        if (a == 0xFF) return color;
-        int r = (((color >> 16) & 0xFF) * a + ((base >> 16) & 0xFF) * (255 - a)) / 255;
-        int g = (((color >> 8) & 0xFF) * a + ((base >> 8) & 0xFF) * (255 - a)) / 255;
-        int bl = ((color & 0xFF) * a + (base & 0xFF) * (255 - a)) / 255;
-        return 0xFF000000 | (r << 16) | (g << 8) | bl;
-    }
-
-    private View header() {
-        LinearLayout h = ui.hbox();
-        h.setGravity(Gravity.TOP);
-        h.setPadding(ui.dp(18), ui.dp(16), ui.dp(6), ui.dp(14));
-        LinearLayout titles = ui.vbox();
-        TextView kicker = ui.label(t.hud ? "Model spec sheet" : "Model details");
-        titles.addView(kicker);
-        TextView name = ui.text(kit.name(model, t.inkStrong), 18, t.inkStrong, t.bodySemi);
-        name.setMaxLines(2);
-        name.setEllipsize(TextUtils.TruncateAt.END);
-        name.setPadding(0, ui.dp(7), 0, 0);
-        titles.addView(name);
-        h.addView(titles, Ui.weight(1));
-        View close = ui.iconButton(IconDrawable.CLOSE, "Close details", t.dim, new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                dialog.dismiss();
+    private void buildFooter() {
+        if (embedding) {
+            // Embedding models can't chat, and Ollama loads them on demand: the only
+            // action worth a button is releasing one that another app left resident.
+            if (e.isLoaded(model)) {
+                loadBtn = sheet.neutral("Unload", null);
+                keepOpenOnTap(loadBtn);
             }
-        });
-        close.setLayoutParams(new LinearLayout.LayoutParams(ui.dp(40), ui.dp(40)));
-        h.addView(close);
-        return h;
-    }
-
-    private View footer() {
-        LinearLayout f = ui.hbox();
-        f.setPadding(ui.dp(18), ui.dp(14), ui.dp(18), ui.dp(18));
-        final boolean active = model.equals(e.currentModel());
-        final boolean loaded = e.isLoaded(model);
-        OllamaClient.ModelDetails d = e.details(model);
-        boolean embedding = d != null && d.supports("embedding") && !d.supports("completion");
-        TextView load = ui.button(loaded ? "Unload" : "Load", loaded ? IconDrawable.POWER : IconDrawable.BOLT,
-                Ui.SECONDARY, new View.OnClickListener() {
-                    @Override
-                    public void onClick(View v) {
-                        dialog.dismiss();
-                        actions.toggleLoad(model);
-                    }
-                });
-        load.setContentDescription((loaded ? "Unload " : "Load ") + model);
-        View loadWrap = kit.wide(load);
-        if (embedding) ModelsKit.disable(loadWrap);
-        f.addView(loadWrap, Ui.weight(1));
-        f.addView(ui.space(10, 1));
-        TextView use = ui.button(active ? "Open chat" : "Use model", active ? IconDrawable.NAV_COMMS
-                : IconDrawable.CHECK, Ui.PRIMARY, new View.OnClickListener() {
+            sheet.negative("Close", null);
+            return;
+        }
+        loadBtn = sheet.negative("Load", null);
+        keepOpenOnTap(loadBtn);
+        useBtn = sheet.positive("Use model", Ui.PRIMARY, new Runnable() {
             @Override
-            public void onClick(View v) {
-                dialog.dismiss();
-                if (active) actions.openChat();
+            public void run() {
+                if (model.equals(e.currentModel())) actions.openChat();
                 else actions.use(model);
             }
         });
-        View useWrap = kit.wide(use);
-        if (embedding) ModelsKit.disable(useWrap);
-        f.addView(useWrap, Ui.weight(1));
-        return f;
     }
 
-    /** (Re)builds the body; {@code error} null = still loading, "" = loaded. */
-    private void fill(OllamaClient.ModelDetails d, String error) {
-        content.removeAllViews();
-        ModelInfo m = find();
-        ModelInfo run = e.runningInfo(model);
-        long now = System.currentTimeMillis();
-        String deep = e.resolveInstalled(e.settings.deepModel());
+    /** Load / Unload runs in place: the sheet stays up and shows the model coming and going. */
+    private void keepOpenOnTap(Button b) {
+        b.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                ui.tick(v);
+                if (actions.busy(model) == null) actions.toggleLoad(model);
+            }
+        });
+    }
 
-        ModelsFlow chips = new ModelsFlow(c, ui.dp(6), ui.dp(6));
-        kit.addChips(chips, d, model.equals(e.currentModel()), model.equals(deep), run != null, error == null);
+    /** Re-reads the model's state (memory, activity, busy) and redraws what changed. */
+    public void refresh() {
+        if (sheet == null) return;
+        ModelInfo m = find();
+        if (m == null && !e.models().isEmpty()) {
+            // Deleted (here or on the PC): nothing left to describe.
+            dismiss();
+            return;
+        }
+        ModelInfo run = e.runningInfo(model);
+        String op = actions.busy(model);
+        boolean active = model.equals(e.currentModel());
+        boolean deep = model.equals(e.resolveInstalled(e.settings.deepModel()));
+        String k = System.identityHashCode(details) + "|" + error + "|" + op + "|" + active + "|" + deep + "|"
+                + (run == null ? "-" : run.sizeVram + "/" + run.size + "/" + run.contextLength + "/" + run.expiresAt)
+                + "|" + (m == null ? "-" : m.size + m.modifiedAt);
+        if (!k.equals(key)) {
+            key = k;
+            fill(m, run, op, active, deep);
+        }
+        bindFooter(run != null, op, active);
+    }
+
+    private void bindFooter(boolean loaded, String op, boolean active) {
+        boolean chat = !embedding && !e.isEmbeddingOnly(model);
+        if (loadBtn != null) {
+            String label = OP_LOAD.equals(op) ? "Loading…" : OP_UNLOAD.equals(op) ? "Releasing…"
+                    : loaded || embedding ? "Unload" : "Load";
+            setLabel(loadBtn, label);
+            loadBtn.setContentDescription((loaded ? "Unload " : "Load ") + model);
+            setEnabled(loadBtn, op == null && (chat || loaded));
+        }
+        if (useBtn != null) {
+            setLabel(useBtn, active ? "Open chat" : "Use model");
+            useBtn.setContentDescription(active ? "Open chat with " + model : "Use " + model);
+            setEnabled(useBtn, chat && !OP_DELETE.equals(op));
+        }
+    }
+
+    /** Relabels a footer button the way the kit styles one (Cyber: HUD caps). */
+    private void setLabel(Button b, String label) {
+        b.setText(t.hud ? label.toUpperCase(Locale.US) : label);
+    }
+
+    private static void setEnabled(View v, boolean on) {
+        v.setEnabled(on);
+        v.setAlpha(on ? 1f : 0.45f);
+    }
+
+    /** (Re)builds the body. */
+    private void fill(ModelInfo m, ModelInfo run, String op, boolean active, boolean deep) {
+        content.removeAllViews();
+        OllamaClient.ModelDetails d = details;
+        long now = System.currentTimeMillis();
+
+        ModelsFlow chips = new ModelsFlow(ui.c, ui.dp(6), ui.dp(6));
+        kit.addChips(chips, d, active, deep, run != null, error == null, e.isEmbeddingOnly(model));
         if (chips.getChildCount() > 0) {
             LinearLayout.LayoutParams lp = Ui.fillW();
-            lp.bottomMargin = ui.dp(12);
+            lp.bottomMargin = ui.dp(10);
             content.addView(chips, lp);
         }
 
@@ -211,7 +217,7 @@ public final class ModelsSheet {
             LinearLayout wait = ui.hbox();
             wait.setPadding(0, ui.dp(2), 0, ui.dp(10));
             Widgets.Meter meter = kit.meter(t.data);
-            if (e.settings.reduceMotion()) meter.setFraction(0.33f);
+            if (ui.reduceMotion) meter.setFraction(0.33f);
             else meter.setIndeterminate(true);
             wait.addView(meter, new LinearLayout.LayoutParams(ui.dp(56), ui.dp(3)));
             TextView tx = ui.dim("Reading the model sheet from your PC…", 12.5f);
@@ -219,9 +225,16 @@ public final class ModelsSheet {
             wait.addView(tx, Ui.weight(1));
             content.addView(wait, Ui.fillW());
         } else if (d == null) {
-            TextView err = ui.text("Couldn't read details: " + error, 13, t.danger, t.body);
+            TextView err = ui.dim("Couldn't read the rest from Ollama: " + error, 13);
+            err.setTextColor(t.danger);
             err.setPadding(0, 0, 0, ui.dp(10));
             content.addView(err, Ui.fillW());
+        }
+        if (embedding || e.isEmbeddingOnly(model)) {
+            TextView note = ui.dim("An embedding model: it turns text into vectors for search and memory apps. "
+                    + "It can't chat, and Ollama loads it when an app asks.", 13);
+            note.setPadding(0, 0, 0, ui.dp(6));
+            content.addView(note, Ui.fillW());
         }
 
         String family = pick(m == null ? "" : m.family, d == null ? "" : d.family);
@@ -239,7 +252,10 @@ public final class ModelsSheet {
         String age = ModelsFormat.ago(modified, now);
         row(content, "Modified", age.length() == 0 ? "—" : age + (modified.length() >= 10
                 ? "  ·  " + modified.substring(0, 10) : ""), false);
-        if (run != null) {
+        if (op != null) {
+            row(content, "In memory", OP_LOAD.equals(op) ? "Loading…" : OP_UNLOAD.equals(op) ? "Releasing…"
+                    : "Deleting…", false);
+        } else if (run != null) {
             row(content, "In memory", kit.residency(run), false);
             String detail = kit.residencyDetail(run, now);
             if (detail.length() > 0) row(content, "Session", detail, false);
@@ -260,7 +276,7 @@ public final class ModelsSheet {
             code.setBackground(ui.rounded(t.codeBg, t.hud ? t.hair : t.edge, 8));
             content.addView(code, Ui.fillW());
         }
-        content.addView(ui.space(1, 8));
+        content.addView(ui.space(1, 10));
     }
 
     private ModelInfo find() {
@@ -295,8 +311,10 @@ public final class ModelsSheet {
         v.setMaxLines(3);
         v.setEllipsize(TextUtils.TruncateAt.END);
         r.addView(v, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.3f));
-        if (into.getChildCount() > 0 && !(into.getChildAt(into.getChildCount() - 1) instanceof ModelsFlow)) {
-            View hair = new View(c);
+        r.setTag(ROW);
+        View last = into.getChildCount() > 0 ? into.getChildAt(into.getChildCount() - 1) : null;
+        if (last != null && last.getTag() == ROW) {
+            View hair = new View(ui.c);
             hair.setBackgroundColor(t.hairSoft);
             into.addView(hair, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
                     Math.max(1, ui.dp(0.7f))));
@@ -304,21 +322,6 @@ public final class ModelsSheet {
         into.addView(r, Ui.fillW());
     }
 
-    /** A ScrollView that never grows taller than {@code maxPx}. */
-    private static final class CappedScroll extends ScrollView {
-        private final int maxPx;
-
-        CappedScroll(Context c, int maxPx) {
-            super(c);
-            this.maxPx = maxPx;
-        }
-
-        @Override
-        protected void onMeasure(int widthSpec, int heightSpec) {
-            int mode = MeasureSpec.getMode(heightSpec);
-            int size = MeasureSpec.getSize(heightSpec);
-            int cap = mode == MeasureSpec.UNSPECIFIED ? maxPx : Math.min(size, maxPx);
-            super.onMeasure(widthSpec, MeasureSpec.makeMeasureSpec(cap, MeasureSpec.AT_MOST));
-        }
-    }
+    /** Marks spec rows, so hairlines go between rows only. */
+    private static final Object ROW = new Object();
 }

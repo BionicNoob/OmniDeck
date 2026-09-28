@@ -5,10 +5,18 @@ import com.omnideck.mobile.Engine;
 /**
  * Loads a specific model into the PC's memory, or releases it, without
  * touching the active model or posting chat notices (the model bay reports
- * in place). Callbacks arrive on the main thread.
+ * in place). Callbacks arrive on the main thread. Also names the operations
+ * the bay tracks per model while they run.
  */
 public final class ModelsOps {
     private ModelsOps() {}
+
+    /** Operation in flight on a model: loading it into memory. */
+    public static final String LOAD = "load";
+    /** Operation in flight on a model: releasing its memory. */
+    public static final String UNLOAD = "unload";
+    /** Operation in flight on a model: deleting it from the PC's disk. */
+    public static final String DELETE = "delete";
 
     public interface Done {
         /** Called on the main thread; error is null on success. */

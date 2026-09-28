@@ -16,6 +16,7 @@ import android.graphics.drawable.Drawable;
 import android.graphics.drawable.RippleDrawable;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.text.Editable;
 import android.text.InputType;
 import android.text.SpannableString;
@@ -45,15 +46,19 @@ import com.omnideck.mobile.Settings;
 import com.omnideck.mobile.core.Fmt;
 import com.omnideck.mobile.core.ModelInfo;
 import com.omnideck.mobile.core.OllamaClient;
+import com.omnideck.mobile.core.ReplyError;
 import com.omnideck.mobile.ui.IconDrawable;
 import com.omnideck.mobile.ui.ModelsFlow;
 import com.omnideck.mobile.ui.ModelsFormat;
 import com.omnideck.mobile.ui.ModelsKit;
+import com.omnideck.mobile.ui.ModelsList;
 import com.omnideck.mobile.ui.ModelsOps;
+import com.omnideck.mobile.ui.ModelsPullMemo;
 import com.omnideck.mobile.ui.ModelsSheet;
 import com.omnideck.mobile.ui.ModelsSkeleton;
 import com.omnideck.mobile.ui.ModelsStorageBar;
 import com.omnideck.mobile.ui.Panel;
+import com.omnideck.mobile.ui.Sheet;
 import com.omnideck.mobile.ui.Theme;
 import com.omnideck.mobile.ui.Ui;
 import com.omnideck.mobile.ui.Widgets;
@@ -85,12 +90,12 @@ public final class ModelsScreen extends Screen {
     static final int FILTER_AFTER = 5;
     static final long POLL_MS = 20000;
     static final long HIGHLIGHT_MS = 5000;
-    /** How long a "download complete" card stays up unless dismissed. */
+    /** How long a "download complete" card stays up, from when it was first on screen, unless dismissed. */
     static final long SUCCESS_CARD_MS = 90000;
 
-    private static final String OP_LOAD = "load";
-    private static final String OP_UNLOAD = "unload";
-    private static final String OP_DELETE = "delete";
+    private static final String OP_LOAD = ModelsOps.LOAD;
+    private static final String OP_UNLOAD = ModelsOps.UNLOAD;
+    private static final String OP_DELETE = ModelsOps.DELETE;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private ModelsKit kit;
@@ -118,6 +123,8 @@ public final class ModelsScreen extends Screen {
     private TextView statLoaded;
     private TextView statDisk;
     private ModelsStorageBar storage;
+    private ModelsFlow legend;
+    private String legendKey = "";
     private TextView activeValue;
     private TextView deepValue;
     private TextView modeTag;
@@ -125,7 +132,7 @@ public final class ModelsScreen extends Screen {
 
     // List
     private TextView listTitle;
-    private LinearLayout list;
+    private ModelsList list;
     private LinearLayout skeletonBox;
     private final List<ModelsSkeleton> skeletons = new ArrayList<ModelsSkeleton>();
     private LinearLayout emptyCard;
@@ -141,6 +148,7 @@ public final class ModelsScreen extends Screen {
     private Widgets.StatusDot tDot;
     private TextView tTitle;
     private TextView tStatus;
+    private TextView tRaw;
     private Widgets.Meter tMeter;
     private LinearLayout tNums;
     private TextView tBytes;
@@ -168,10 +176,10 @@ public final class ModelsScreen extends Screen {
     private boolean listed;
     private Engine.State lastState;
     private String lastServer = "";
-    private Engine.PullState dismissedPull;
-    private Engine.PullState handledPull;
     private String pendingHighlight;
     private String highlight;
+    /** The open spec sheet (kept in step with every change), or null. */
+    private ModelsSheet sheet;
 
     public ModelsScreen(MainActivity a) {
         super(a);
@@ -195,7 +203,7 @@ public final class ModelsScreen extends Screen {
         transfer = buildTransfer();
         bay.addView(transfer, ui.margins(Ui.fillW(), 0, 12, 0, 0));
         bay.addView(buildListHeader(), ui.margins(Ui.fillW(), 2, 20, 2, 10));
-        list = ui.vbox();
+        list = new ModelsList(a);
         bay.addView(list, Ui.fillW());
         skeletonBox = buildSkeletons();
         bay.addView(skeletonBox, Ui.fillW());
@@ -212,6 +220,10 @@ public final class ModelsScreen extends Screen {
         lastState = e.state();
         lastServer = serverKey();
         listed = !e.models().isEmpty();
+        // A download that finished before this bay existed (another tab, or before a theme
+        // change rebuilt it) still gets its "New" flag — once.
+        Engine.PullState ps = e.pullState();
+        if (ps != null && ps.done && ps.error == null && ModelsPullMemo.claim(ps)) pendingHighlight = ps.name;
         render();
         bindTransfer();
         return root;
@@ -219,7 +231,7 @@ public final class ModelsScreen extends Screen {
 
     private View buildSummary() {
         LinearLayout right = ui.hbox();
-        versionText = ui.readout("", 10.5f, t.faint);
+        versionText = ui.readout("", 10.5f, t.dim);
         versionText.setPadding(0, 0, ui.dp(2), 0);
         right.addView(versionText);
         ImageView pullShortcut = ui.iconButton(IconDrawable.DOWNLOAD, "Pull a model", t.dim, new View.OnClickListener() {
@@ -251,11 +263,9 @@ public final class ModelsScreen extends Screen {
         storage = new ModelsStorageBar(a, kit.meterTrack(), ui.dp(2));
         body.addView(storage, ui.margins(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
                 ui.dp(5)), 0, 16, 0, 0));
-        ModelsFlow legend = new ModelsFlow(a, 0, ui.dp(4));
-        legend.addView(legendItem(kit.activeColor(), "Active"));
-        legend.addView(legendItem(kit.loadedColor(), "Loaded"));
-        legend.addView(legendItem(storedColor(), "Stored"));
-        body.addView(legend, ui.margins(Ui.fillW(), 0, 9, 0, 0));
+        legend = new ModelsFlow(a, 0, ui.dp(4));
+        legend.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        body.addView(legend, ui.margins(Ui.fillW(), 0, 8, 0, 0));
 
         LinearLayout slots = ui.hbox();
         slots.setGravity(Gravity.TOP);
@@ -328,17 +338,27 @@ public final class ModelsScreen extends Screen {
         return v;
     }
 
+    /**
+     * Models that are only on disk. Opaque (the steel ink over the card), so
+     * the legend's swatch and the bar's segments — drawn over different
+     * backgrounds — come out the same color.
+     */
     private int storedColor() {
-        return Theme.alpha(t.dim, t.isDark ? 0x66 : 0x59);
+        return Theme.flatten(Theme.alpha(t.dim, t.isDark ? 0x66 : 0x59), Theme.flatten(t.surface, t.bg));
     }
 
+    /**
+     * One legend key: a swatch and a small caps word. Smaller and dimmer than
+     * the stat captions above it — it annotates the bar, it isn't a reading.
+     */
     private View legendItem(int color, String text) {
         LinearLayout item = ui.hbox();
         View sw = new View(a);
-        sw.setBackground(ui.rounded(color, 0, 2));
-        item.addView(sw, new LinearLayout.LayoutParams(ui.dp(8), ui.dp(8)));
-        TextView l = ui.label(text);
-        l.setTextColor(t.dim);
+        sw.setBackground(ui.rounded(color, 0, 1.5f));
+        item.addView(sw, new LinearLayout.LayoutParams(ui.dp(7), ui.dp(7)));
+        TextView l = ui.text(t.label(text), t.hud ? 8.5f : 10, t.dim, t.labelFace);
+        l.setLetterSpacing(t.labelTracking);
+        l.setSingleLine(true);
         l.setPadding(ui.dp(6), 0, ui.dp(14), 0);
         item.addView(l);
         return item;
@@ -352,7 +372,7 @@ public final class ModelsScreen extends Screen {
         LinearLayout top = ui.hbox();
         TextView lab = ui.label(label);
         top.addView(lab, Ui.weight(1));
-        TextView tag = ui.text("", 9.5f, t.faint, t.mono);
+        TextView tag = ui.text("", 9.5f, t.dim, t.mono);
         tag.setPadding(ui.dp(4), 0, ui.dp(2), 0);
         top.addView(tag);
         ImageView chev = new ImageView(a);
@@ -395,7 +415,7 @@ public final class ModelsScreen extends Screen {
         int sheen = Theme.alpha(t.hud ? t.accent : t.ink, t.isDark ? 0x14 : 0x0F);
         for (int i = 0; i < 3; i++) {
             LinearLayout c = ui.card();
-            c.setPadding(ui.dp(14), ui.dp(14), ui.dp(14), ui.dp(14));
+            c.setPadding(ui.dp(16), ui.dp(16), ui.dp(16), ui.dp(14));
             ModelsSkeleton sk = new ModelsSkeleton(a, bar, sheen, i);
             skeletons.add(sk);
             c.addView(sk, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ui.dp(128)));
@@ -440,6 +460,7 @@ public final class ModelsScreen extends Screen {
         body.setPadding(ui.dp(14), ui.dp(12), ui.dp(14), ui.dp(14));
         LinearLayout head = ui.hbox();
         tDot = new Widgets.StatusDot(a);
+        tDot.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
         head.addView(tDot, new LinearLayout.LayoutParams(ui.dp(14), ui.dp(14)));
         tTitle = ui.text("", 15, t.inkStrong, t.bodySemi);
         tTitle.setSingleLine(true);
@@ -448,10 +469,16 @@ public final class ModelsScreen extends Screen {
         head.addView(tTitle, Ui.weight(1));
         body.addView(head, Ui.fillW());
         tStatus = ui.text("", 12, t.dim, t.mono);
-        tStatus.setMaxLines(3);
+        tStatus.setMaxLines(4);
         tStatus.setEllipsize(TextUtils.TruncateAt.END);
         tStatus.setPadding(ui.dp(22), ui.dp(5), 0, 0);
         body.addView(tStatus, Ui.fillW());
+        tRaw = ui.text("", 11, t.dim, t.mono);
+        tRaw.setMaxLines(2);
+        tRaw.setEllipsize(TextUtils.TruncateAt.END);
+        tRaw.setPadding(ui.dp(22), ui.dp(6), 0, 0);
+        tRaw.setVisibility(View.GONE);
+        body.addView(tRaw, Ui.fillW());
         tMeter = kit.meter(t.data);
         body.addView(tMeter, ui.margins(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
                 ui.dp(5)), 0, 14, 0, 0));
@@ -470,7 +497,7 @@ public final class ModelsScreen extends Screen {
     }
 
     private LinearLayout buildPullBay() {
-        TextView lib = ui.readout("ollama.com/library", 10, t.faint);
+        TextView lib = ui.readout("ollama.com/library", 10, t.dim);
         lib.setPadding(0, 0, ui.dp(4), 0);
         LinearLayout card = ui.capCard("Pull a model", lib);
         LinearLayout body = ui.cardBody();
@@ -507,10 +534,11 @@ public final class ModelsScreen extends Screen {
         body.addView(sl, Ui.fillW());
         suggestFlow = new ModelsFlow(a, ui.dp(7), ui.dp(7));
         body.addView(suggestFlow, Ui.fillW());
-        TextView hint = ui.dim("Add a tag for a specific size, like qwen3:14b. Downloads run on your PC, so you can "
-                + "leave this screen.", 12.5f);
-        hint.setPadding(0, ui.dp(14), 0, 0);
-        body.addView(hint, Ui.fillW());
+        SpannableStringBuilder hint = new SpannableStringBuilder("Add a tag for a specific size, like ");
+        hint.append(ui.mono("qwen3:14b")).append(". Downloads run on your PC, so you can leave this screen.");
+        TextView hintView = ui.dim(hint, 12.5f);
+        hintView.setPadding(0, ui.dp(14), 0, 0);
+        body.addView(hintView, Ui.fillW());
         card.addView(body, Ui.fillW());
         return card;
     }
@@ -529,7 +557,7 @@ public final class ModelsScreen extends Screen {
         stateTitle.setGravity(Gravity.CENTER);
         stateTitle.setPadding(0, ui.dp(18), 0, 0);
         p.addView(stateTitle, Ui.fillW());
-        stateDetail = ui.text("", 12, t.faint, t.mono);
+        stateDetail = ui.text("", 12, t.dim, t.mono);
         stateDetail.setGravity(Gravity.CENTER);
         stateDetail.setLineSpacing(0, 1.2f);
         stateDetail.setPadding(0, ui.dp(10), 0, 0);
@@ -582,10 +610,11 @@ public final class ModelsScreen extends Screen {
 
             LinearLayout top = ui.hbox();
             top.setGravity(Gravity.TOP);
-            title = ui.text("", 16.5f, t.inkStrong, t.bodySemi);
+            // The model tag is an identifier: Share Tech Mono in its own case, like everywhere else.
+            title = ui.text("", 17, t.inkStrong, t.mono);
             title.setMaxLines(2);
             title.setEllipsize(TextUtils.TruncateAt.END);
-            title.setPadding(0, ui.dp(6), 0, 0);
+            title.setPadding(0, ui.dp(7), 0, 0);
             top.addView(title, Ui.weight(1));
             ImageView more = ui.iconButton(IconDrawable.MENU, "More actions for " + n, t.dim, new View.OnClickListener() {
                 @Override
@@ -599,7 +628,7 @@ public final class ModelsScreen extends Screen {
             meta = ui.text("", 11.5f, t.dim, t.mono);
             meta.setMaxLines(2);
             meta.setLineSpacing(0, 1.15f);
-            meta.setPadding(0, ui.dp(2), ui.dp(10), 0);
+            meta.setPadding(0, ui.dp(3), ui.dp(10), 0);
             root.addView(meta, Ui.fillW());
 
             chips = new ModelsFlow(a, ui.dp(6), ui.dp(6));
@@ -607,9 +636,10 @@ public final class ModelsScreen extends Screen {
 
             resident = ui.vbox();
             resident.setPadding(ui.dp(10), ui.dp(9), ui.dp(10), ui.dp(9));
-            resident.setBackground(ui.rounded(t.input, t.hud ? t.hairSoft : t.hairSoft, 8));
+            resident.setBackground(ui.rounded(t.input, t.hairSoft, 8));
             LinearLayout rrow = ui.hbox();
             residentDot = new Widgets.StatusDot(a);
+            residentDot.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
             rrow.addView(residentDot, new LinearLayout.LayoutParams(ui.dp(12), ui.dp(12)));
             residentLabel = ui.label("");
             residentLabel.setPadding(ui.dp(6), 0, ui.dp(8), 0);
@@ -621,7 +651,7 @@ public final class ModelsScreen extends Screen {
             residentMeter = kit.meter(t.ok);
             resident.addView(residentMeter, ui.margins(new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ui.dp(3)), 0, 8, 0, 0));
-            residentDetail = ui.text("", 10.5f, t.faint, t.mono);
+            residentDetail = ui.text("", 10.5f, t.dim, t.mono);
             residentDetail.setSingleLine(true);
             residentDetail.setEllipsize(TextUtils.TruncateAt.END);
             residentDetail.setPadding(0, ui.dp(7), 0, 0);
@@ -673,6 +703,7 @@ public final class ModelsScreen extends Screen {
         String op = busy.get(m.name);
         OllamaClient.ModelDetails d = e.details(m.name);
         boolean flash = m.name.equals(highlight);
+        boolean embedding = e.isEmbeddingOnly(m.name);
 
         String bgKey = (active ? "a" : "-") + (flash ? "f" : "-");
         if (!bgKey.equals(c.bgKey)) {
@@ -683,12 +714,12 @@ public final class ModelsScreen extends Screen {
         c.meta.setText(kit.meta(m, d, now));
 
         boolean pending = d == null && !detailFailed.contains(m.name);
-        String chipKey = active + "|" + isDeep + "|" + loaded + "|" + flash + "|" + (d == null ? (pending ? "?" : "x")
-                : d.capabilities.toString());
+        String chipKey = active + "|" + isDeep + "|" + loaded + "|" + flash + "|" + embedding + "|"
+                + (d == null ? (pending ? "?" : "x") : d.capabilities.toString());
         if (!chipKey.equals(c.chipKey)) {
             c.chips.removeAllViews();
             if (flash) c.chips.addView(kit.chip("New", t.ok));
-            kit.addChips(c.chips, d, active, isDeep, loaded, pending);
+            kit.addChips(c.chips, d, active, isDeep, loaded, pending, embedding);
             c.chipKey = chipKey;
         }
         c.chips.setVisibility(c.chips.getChildCount() > 0 ? View.VISIBLE : View.GONE);
@@ -696,18 +727,18 @@ public final class ModelsScreen extends Screen {
         boolean motion = motion();
         if (op != null) {
             boolean del = OP_DELETE.equals(op);
-            int color = del ? t.danger : t.engaged;
             c.resident.setVisibility(View.VISIBLE);
-            c.residentDot.setColor(color);
+            c.residentDot.setColor(del ? t.danger : t.engaged);
             c.residentDot.setPulsing(motion);
             c.residentLabel.setText(t.label(del ? "Deleting from PC" : OP_LOAD.equals(op) ? "Loading into memory"
                     : "Releasing memory"));
-            c.residentLabel.setTextColor(color);
+            c.residentLabel.setTextColor(del ? t.danger : t.engagedInk);
             c.residentValue.setText("");
-            c.residentMeter.setBarColor(color);
+            c.residentMeter.setBarColor(del ? t.danger : t.engaged);
             if (motion) c.residentMeter.setIndeterminate(true);
             else c.residentMeter.setFraction(0);
             c.residentDetail.setText(t.hud ? "STANDBY…" : "Working…");
+            c.residentDetail.setVisibility(View.VISIBLE);
         } else if (loaded) {
             c.resident.setVisibility(View.VISIBLE);
             c.residentDot.setColor(t.ok);
@@ -728,7 +759,6 @@ public final class ModelsScreen extends Screen {
         }
         c.root.setAlpha(OP_DELETE.equals(op) ? 0.6f : 1f);
 
-        boolean embedding = embeddingOnly(m.name);
         String actionKey = active + "|" + loaded + "|" + op + "|" + embedding;
         if (!actionKey.equals(c.actionKey)) {
             buildActions(c, active, loaded, op, embedding);
@@ -765,15 +795,13 @@ public final class ModelsScreen extends Screen {
                         }
                     });
             unload.setContentDescription("Unload " + n);
-            View detailsWrap = kit.wide(details);
-            View unloadWrap = kit.wide(unload);
             if (op != null) {
-                ModelsKit.disable(detailsWrap);
-                ModelsKit.disable(unloadWrap);
+                ModelsKit.disable(details);
+                ModelsKit.disable(unload);
             }
-            c.actions.addView(detailsWrap, Ui.weight(1));
+            c.actions.addView(details, Ui.weight(1));
             c.actions.addView(ui.space(8, 1));
-            c.actions.addView(unloadWrap, Ui.weight(1));
+            c.actions.addView(unload, Ui.weight(1));
             return;
         }
         TextView primary;
@@ -795,7 +823,7 @@ public final class ModelsScreen extends Screen {
             primary.setContentDescription("Use " + n);
         }
         String loadLabel = OP_LOAD.equals(op) ? "Loading…" : OP_UNLOAD.equals(op) ? "Releasing…"
-                : loaded ? "Unload" : "Load";
+                : OP_DELETE.equals(op) ? "Deleting…" : loaded ? "Unload" : "Load";
         TextView load = ui.button(loadLabel, loaded && op == null ? IconDrawable.POWER : IconDrawable.BOLT,
                 Ui.SECONDARY, new View.OnClickListener() {
                     @Override
@@ -804,15 +832,13 @@ public final class ModelsScreen extends Screen {
                     }
                 });
         load.setContentDescription((loaded ? "Unload " : "Load ") + n);
-        View primaryWrap = kit.wide(primary);
-        View loadWrap = kit.wide(load);
         if (op != null) {
-            ModelsKit.disable(primaryWrap);
-            ModelsKit.disable(loadWrap);
+            ModelsKit.disable(primary);
+            ModelsKit.disable(load);
         }
-        c.actions.addView(primaryWrap, Ui.weight(1));
+        c.actions.addView(primary, Ui.weight(1));
         c.actions.addView(ui.space(8, 1));
-        c.actions.addView(loadWrap, Ui.weight(1));
+        c.actions.addView(load, Ui.weight(1));
     }
 
     // ------------------------------------------------------------------
@@ -823,6 +849,7 @@ public final class ModelsScreen extends Screen {
         return e.server() == null ? "" : e.server().label();
     }
 
+    /** Animate only while the bay is really on screen (this tab, app in the foreground) and motion is on. */
     private boolean motion() {
         return isShown() && !e.settings.reduceMotion();
     }
@@ -841,6 +868,21 @@ public final class ModelsScreen extends Screen {
         }
         deleted.retainAll(present);
         return out;
+    }
+
+    /**
+     * The active model as the bay shows it. Right after a delete, the
+     * Engine's list still has the deleted model until its refresh lands; with
+     * no saved choice left to resolve, {@link Engine#currentModel()} would pick
+     * — and save — that very model, so the bay doesn't ask it then.
+     */
+    private String activeModel(List<ModelInfo> all) {
+        if (all.isEmpty()) return "";
+        if (!deleted.isEmpty()) {
+            String saved = e.resolveInstalled(e.settings.model());
+            if (saved == null || deleted.contains(saved)) return "";
+        }
+        return e.currentModel();
     }
 
     private boolean matches(ModelInfo m, String q) {
@@ -900,8 +942,9 @@ public final class ModelsScreen extends Screen {
 
         List<ModelInfo> all = installed();
         if (!all.isEmpty()) listed = true;
-        String cur = all.isEmpty() ? "" : e.currentModel();
+        String cur = activeModel(all);
         String deep = e.resolveInstalled(e.settings.deepModel());
+        if (deep != null && deleted.contains(deep)) deep = null;
         long now = System.currentTimeMillis();
         sort(all, cur);
         bindSummary(all, cur, deep);
@@ -938,12 +981,8 @@ public final class ModelsScreen extends Screen {
                 it.remove();
             }
         }
-        boolean same = list.getChildCount() == order.size();
-        for (int i = 0; same && i < order.size(); i++) same = list.getChildAt(i) == order.get(i);
-        if (!same) {
-            list.removeAllViews();
-            for (View v : order) list.addView(v);
-        }
+        // Re-sorts by moving cards in place: they stay attached, so their animations keep running.
+        list.setOrder(order);
 
         listTitle.setText(t.label(loading ? "Installed · reading…" : q.length() > 0
                 ? "Installed · " + shown.size() + " of " + all.size() : "Installed · " + all.size()));
@@ -951,7 +990,7 @@ public final class ModelsScreen extends Screen {
         bindSuggestions(all);
         queueDetails(shown);
 
-        // Flag the freshly pulled model — once the tab is on screen, so the cue isn't missed.
+        // Flag the freshly pulled model — once the bay is really on screen, so the cue isn't missed.
         if (pendingHighlight != null && isShown()) {
             String r = exactInstalled(pendingHighlight);
             if (r != null) {
@@ -960,12 +999,17 @@ public final class ModelsScreen extends Screen {
                 handler.removeCallbacks(clearHighlight);
                 handler.postDelayed(clearHighlight, HIGHLIGHT_MS);
                 Card c = cards.get(r);
-                if (c != null) {
+                ModelInfo m = find(r);
+                if (c != null && m != null) {
                     c.bgKey = "";
-                    bind(c, find(r), cur, deep, now);
+                    bind(c, m, cur, deep, now);
                     scrollTo(c.root);
                 }
             }
+        }
+        if (sheet != null) {
+            if (sheet.isShowing()) sheet.refresh();
+            else sheet = null;
         }
     }
 
@@ -1001,13 +1045,18 @@ public final class ModelsScreen extends Screen {
         long disk = 0;
         long[] sizes = new long[all.size()];
         int[] colors = new int[all.size()];
+        boolean anyActive = false, anyLoaded = false, anyStored = false;
         for (int i = 0; i < all.size(); i++) {
             ModelInfo m = all.get(i);
             boolean loaded = e.isLoaded(m.name);
+            boolean active = m.name.equals(cur);
             if (loaded) loadedCount++;
             disk += Math.max(0, m.size);
             sizes[i] = Math.max(1, m.size);
-            colors[i] = m.name.equals(cur) ? kit.activeColor() : loaded ? kit.loadedColor() : storedColor();
+            colors[i] = active ? kit.activeColor() : loaded ? kit.loadedColor() : storedColor();
+            anyActive |= active;
+            anyLoaded |= loaded && !active;
+            anyStored |= !loaded && !active;
         }
         statInstalled.setText(known ? String.valueOf(all.size()) : "—");
         statLoaded.setText(known ? String.valueOf(loadedCount) : "—");
@@ -1015,25 +1064,38 @@ public final class ModelsScreen extends Screen {
         statDisk.setText(known ? withUnit(disk > 0 ? Fmt.bytes(disk) : "0 GB") : "—");
         storage.setSegments(sizes, colors);
         storage.setContentDescription(all.size() + " models, " + Fmt.bytes(disk) + " on disk");
+        bindLegend(anyActive, anyLoaded, anyStored);
 
         if (cur.length() > 0) {
             activeValue.setText(kit.name(cur, t.ink));
             activeValue.setTextColor(t.ink);
         } else {
-            activeValue.setText(known ? "None installed" : "Reading…");
-            activeValue.setTextColor(t.faint);
+            activeValue.setText(!known ? "Reading…" : all.isEmpty() ? "None installed" : "Not set");
+            activeValue.setTextColor(t.dim);
         }
         if (deep != null) {
             deepValue.setText(kit.name(deep, t.ink));
             deepValue.setTextColor(t.ink);
         } else {
             deepValue.setText(known ? "Not set" : "Reading…");
-            deepValue.setTextColor(t.faint);
+            deepValue.setTextColor(t.dim);
         }
         String mode = e.mode();
         modeTag.setText((Settings.MODE_DEEP.equals(mode) ? "DEEP" : Settings.MODE_FAST.equals(mode) ? "FAST"
                 : "AUTO"));
-        modeTag.setTextColor(Settings.MODE_DEEP.equals(mode) ? kit.deepColor() : t.faint);
+        modeTag.setTextColor(Settings.MODE_DEEP.equals(mode) ? kit.deepInk() : t.dim);
+    }
+
+    /** The storage bar's key lists only the states it actually draws (active+loaded shows as active). */
+    private void bindLegend(boolean active, boolean loaded, boolean stored) {
+        String key = (active ? "a" : "-") + (loaded ? "l" : "-") + (stored ? "s" : "-");
+        if (key.equals(legendKey)) return;
+        legendKey = key;
+        legend.removeAllViews();
+        if (active) legend.addView(legendItem(kit.activeColor(), "Active"));
+        if (loaded) legend.addView(legendItem(kit.loadedColor(), "Loaded"));
+        if (stored) legend.addView(legendItem(storedColor(), "Stored"));
+        legend.setVisibility(legend.getChildCount() > 0 ? View.VISIBLE : View.GONE);
     }
 
     /** "7.2 GB" with a smaller, dimmer unit. */
@@ -1058,15 +1120,20 @@ public final class ModelsScreen extends Screen {
         emptyAction.removeAllViews();
         if ("none".equals(key)) {
             emptyTitle.setText(t.hud ? "NO MODELS INSTALLED" : "No models installed");
-            emptyBody.setText("Your AI needs at least one model to think with. llama3.2 is a quick 2 GB "
-                    + "all-rounder; qwen3 reasons step by step; llava can see images. Pull one below.");
-            TextView b = ui.button("Pull llama3.2", IconDrawable.DOWNLOAD, Ui.PRIMARY, new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    pullField.setText("llama3.2");
-                    startPull("llama3.2");
-                }
-            });
+            SpannableStringBuilder body = new SpannableStringBuilder("Your AI needs at least one model to think "
+                    + "with. ");
+            body.append(ui.mono("llama3.2")).append(" is a quick 2 GB all-rounder; ").append(ui.mono("qwen3"))
+                    .append(" reasons step by step; ").append(ui.mono("llava")).append(" can see images. Pull one "
+                    + "below.");
+            emptyBody.setText(body);
+            TextView b = ui.button("Pull llama3.2", IconDrawable.DOWNLOAD, Ui.PRIMARY, true,
+                    new View.OnClickListener() {
+                        @Override
+                        public void onClick(View v) {
+                            pullField.setText("llama3.2");
+                            startPull("llama3.2");
+                        }
+                    });
             emptyAction.addView(b);
         } else if ("nomatch".equals(key)) {
             emptyTitle.setText(t.hud ? "NO MATCHES" : "No matches");
@@ -1091,27 +1158,24 @@ public final class ModelsScreen extends Screen {
         for (int i = 0; i < SUGGESTIONS.length; i++) {
             final String s = SUGGESTIONS[i];
             boolean have = key.charAt(i) == '1';
-            TextView chip = ui.text(s, 12.5f, have ? t.dim : t.ink, t.mono);
-            chip.setSingleLine(true);
-            chip.setPadding(ui.dp(have ? 8 : 11), ui.dp(7), ui.dp(11), ui.dp(7));
-            chip.setBackground(kit.pressable(ui.rounded(have ? 0 : t.chip, t.hud ? t.hair : t.edge,
-                    t.hud ? 5 : 7), t.hud ? 5 : 7));
-            if (have) {
-                IconDrawable ok = new IconDrawable(IconDrawable.CHECK, t.ok, t.ok, ui.dp(13));
-                ok.setBounds(0, 0, ui.dp(13), ui.dp(13));
-                chip.setCompoundDrawables(ok, null, null, null);
-                chip.setCompoundDrawablePadding(ui.dp(5));
-            }
-            chip.setContentDescription("Suggest " + s + (have ? ", installed" : ""));
-            chip.setOnClickListener(new View.OnClickListener() {
+            TextView chip = ui.actionChip(s, true, new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
-                    ui.tick(v);
                     pullField.setText(s);
                     pullField.setSelection(pullField.getText().length());
                     pullField.requestFocus();
                 }
             });
+            if (have) {
+                // Already on the PC: quieter, with a check (pulling it again fetches any update).
+                chip.setTextColor(t.dim);
+                IconDrawable ok = new IconDrawable(IconDrawable.CHECK, t.ok, t.ok, ui.dp(13));
+                ok.setBounds(0, 0, ui.dp(13), ui.dp(13));
+                chip.setCompoundDrawables(ok, null, null, null);
+                chip.setCompoundDrawablePadding(ui.dp(5));
+                chip.setPadding(ui.dp(8), chip.getPaddingTop(), chip.getPaddingRight(), chip.getPaddingBottom());
+            }
+            chip.setContentDescription("Suggest " + s + (have ? ", installed" : ""));
             suggestFlow.addView(chip);
         }
     }
@@ -1145,7 +1209,7 @@ public final class ModelsScreen extends Screen {
                     e.discover(true);
                 }
             });
-            stateButtons.addView(kit.wide(scan), new LinearLayout.LayoutParams(ui.dp(236), ui.dp(44)));
+            stateButtons.addView(scan, new LinearLayout.LayoutParams(ui.dp(236), ui.dp(44)));
         }
         TextView addr = ui.button("Set address", IconDrawable.LINK, Ui.SECONDARY, new View.OnClickListener() {
             @Override
@@ -1153,7 +1217,7 @@ public final class ModelsScreen extends Screen {
                 a.promptServerAddress();
             }
         });
-        stateButtons.addView(kit.wide(addr), ui.margins(new LinearLayout.LayoutParams(ui.dp(236), ui.dp(44)),
+        stateButtons.addView(addr, ui.margins(new LinearLayout.LayoutParams(ui.dp(236), ui.dp(44)),
                 0, searching ? 0 : 10, 0, 0));
         TextView cmd = ui.button("Open Command", IconDrawable.NAV_COMMAND, Ui.GHOST, new View.OnClickListener() {
             @Override
@@ -1161,7 +1225,7 @@ public final class ModelsScreen extends Screen {
                 a.select(MainActivity.TAB_COMMAND, true);
             }
         });
-        stateButtons.addView(kit.wide(cmd), ui.margins(new LinearLayout.LayoutParams(ui.dp(236), ui.dp(44)),
+        stateButtons.addView(cmd, ui.margins(new LinearLayout.LayoutParams(ui.dp(236), ui.dp(44)),
                 0, 6, 0, 0));
     }
 
@@ -1169,26 +1233,34 @@ public final class ModelsScreen extends Screen {
     // Pull progress
     // ------------------------------------------------------------------
 
+    private void hideTransfer() {
+        transfer.setVisibility(View.GONE);
+        tMeter.setIndeterminate(false);
+        tDot.setPulsing(false);
+        ui.setCapLive(transfer, false);
+        handler.removeCallbacks(autoDismiss);
+    }
+
+    /** Shows the latest download — running, finished or failed — unless the user closed its card. */
     private void bindTransfer() {
         if (transfer == null) return;
         pullBtn.setAlpha(e.pulling() ? 0.45f : 1f);
         Engine.PullState ps = e.pullState();
-        if (ps == null || ps == dismissedPull) {
-            transfer.setVisibility(View.GONE);
-            tMeter.setIndeterminate(false);
-            tDot.setPulsing(false);
+        if (ps == null || ModelsPullMemo.isDismissed(ps)) {
+            hideTransfer();
             return;
         }
-        transfer.setVisibility(View.VISIBLE);
         boolean motion = motion();
         String key;
+        String installed = null;
         if (!ps.done) {
             key = "run";
             tDot.setColor(t.data);
             tDot.setPulsing(motion);
-            tTitle.setText("Downloading " + ps.name);
-            tStatus.setText(ModelsFormat.pullStatus(ps.status));
-            tStatus.setTextColor(t.dim);
+            ui.setCapLive(transfer, motion);
+            tTitle.setText(kit.withName("Downloading ", ps.name, null));
+            status(ModelsFormat.pullStatus(ps.status), false, t.dim);
+            tRaw.setVisibility(View.GONE);
             tMeter.setBarColor(t.data);
             if (ps.total > 0) {
                 tMeter.setFraction(ps.completed / (float) ps.total);
@@ -1205,13 +1277,29 @@ public final class ModelsScreen extends Screen {
             tRate.setText(rate + (rate.length() > 0 && eta.length() > 0 ? "  ·  " : "") + eta);
             tPercent.setTextColor(t.data);
         } else if (ps.error == null) {
-            key = "ok";
-            String name = exactInstalled(ps.name);
+            // Retire the card SUCCESS_CARD_MS after it was first on screen; a download that
+            // finished while nobody was looking waits for its audience.
+            if (isShown()) {
+                long now = SystemClock.elapsedRealtime();
+                long left = SUCCESS_CARD_MS - (now - ModelsPullMemo.seenAt(ps, now));
+                if (left <= 0) {
+                    ModelsPullMemo.dismiss(ps);
+                    hideTransfer();
+                    return;
+                }
+                handler.removeCallbacks(autoDismiss);
+                handler.postDelayed(autoDismiss, left);
+            }
+            installed = exactInstalled(ps.name);
+            boolean embed = installed != null && e.isEmbeddingOnly(installed);
+            key = embed ? "ok-embed" : "ok";
             tDot.setColor(t.ok);
             tDot.setPulsing(false);
-            tTitle.setText("Installed " + (name != null ? name : ps.name));
-            tStatus.setText("Verified and ready. Use it now or keep it for later.");
-            tStatus.setTextColor(t.dim);
+            ui.setCapLive(transfer, false);
+            tTitle.setText(kit.withName("Installed ", installed != null ? installed : ps.name, null));
+            status(embed ? "An embedding model — ready for search and memory apps (it can't chat)."
+                    : "Verified and ready. Use it now or keep it for later.", true, t.dim);
+            tRaw.setVisibility(View.GONE);
             tMeter.setBarColor(t.ok);
             tMeter.setFraction(1f);
             tPercent.setText("100%");
@@ -1220,14 +1308,24 @@ public final class ModelsScreen extends Screen {
             tRate.setText("");
         } else {
             boolean stopped = "stopped".equals(ps.error);
-            key = stopped ? "stop" : "err";
+            ReplyError why = stopped ? null : ReplyError.explainPull(ps.error, ps.name);
+            boolean badName = why != null && ReplyError.NOT_IN_LIBRARY.equals(why.kind);
+            key = stopped ? "stop" : badName ? "name" : "err";
             int color = stopped ? t.warn : t.danger;
             tDot.setColor(color);
             tDot.setPulsing(false);
-            tTitle.setText((stopped ? "Download stopped · " : "Download failed · ") + ps.name);
-            tStatus.setText(stopped ? "Finished layers are kept on the PC — pulling again resumes."
-                    : ps.error);
-            tStatus.setTextColor(stopped ? t.dim : t.danger);
+            ui.setCapLive(transfer, false);
+            tTitle.setText(kit.withName(stopped ? "Download stopped · " : "Download failed · ", ps.name, null));
+            if (stopped) {
+                status("Finished layers are kept on the PC — pulling again resumes.", true, t.dim);
+                tRaw.setVisibility(View.GONE);
+            } else {
+                // The plain-language reason first; Ollama's own words below it, for the curious.
+                String reason = ps.reason != null ? ps.reason : ReplyError.plain(why.message);
+                status(reason, true, t.ink);
+                tRaw.setText(ps.error);
+                tRaw.setVisibility(ps.error.length() > 0 && !ps.error.equals(reason) ? View.VISIBLE : View.GONE);
+            }
             tMeter.setBarColor(color);
             tMeter.setFraction(ps.total > 0 ? ps.completed / (float) ps.total : 0);
             tPercent.setText(ps.total > 0 ? ps.percent() + "%" : "");
@@ -1235,6 +1333,7 @@ public final class ModelsScreen extends Screen {
             tBytes.setText(ModelsFormat.transferred(ps.completed, ps.total));
             tRate.setText("");
         }
+        transfer.setVisibility(View.VISIBLE);
         // A failure before any bytes arrived has no progress worth showing.
         tMeter.setVisibility(ps.done && ps.error != null && ps.total <= 0 ? View.GONE : View.VISIBLE);
         tNums.setVisibility(tBytes.length() == 0 && tRate.length() == 0 ? View.GONE : View.VISIBLE);
@@ -1258,33 +1357,69 @@ public final class ModelsScreen extends Screen {
                 @Override
                 public void onClick(View v) {
                     String n = exactInstalled(fps.name);
-                    if (n != null) use(n);
-                    dismissedPull = fps;
+                    if (n == null) {
+                        ui.toast("Still reading the model list — try again in a moment.");
+                        return;
+                    }
+                    use(n);
+                    ModelsPullMemo.dismiss(fps);
                     bindTransfer();
                 }
             });
+            useNow.setContentDescription("Use the new model");
             tActions.addView(useNow);
+        } else if ("ok-embed".equals(key)) {
+            TextView details = ui.button("Details", IconDrawable.INFO, Ui.SECONDARY, new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    String n = exactInstalled(fps.name);
+                    if (n != null) openSheet(n);
+                }
+            });
+            details.setContentDescription("Details for the new model");
+            tActions.addView(details);
+        } else if ("name".equals(key)) {
+            // Nothing by that name in the library: retrying can't help, fixing the name can.
+            TextView edit = ui.button("Edit name", IconDrawable.EDIT, Ui.SECONDARY, new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    pullField.setText(fps.name);
+                    pullField.selectAll();
+                    focusPull();
+                }
+            });
+            edit.setContentDescription("Edit the model name");
+            tActions.addView(edit);
         } else {
             TextView again = ui.button("stop".equals(key) ? "Resume" : "Retry", IconDrawable.DOWNLOAD, Ui.SECONDARY,
                     new View.OnClickListener() {
                         @Override
                         public void onClick(View v) {
-                            dismissedPull = fps;
                             startPull(fps.name);
                         }
                     });
+            again.setContentDescription("stop".equals(key) ? "Resume download" : "Retry download");
             tActions.addView(again);
         }
         tActions.addView(ui.space(8, 1));
         TextView dismiss = ui.button("Dismiss", 0, Ui.GHOST, new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                dismissedPull = fps;
+                ModelsPullMemo.dismiss(fps);
                 bindTransfer();
             }
         });
         dismiss.setContentDescription("Dismiss download");
         tActions.addView(dismiss);
+    }
+
+    /** The transfer card's status line: telemetry in mono, sentences in the reading face. */
+    private void status(String s, boolean prose, int color) {
+        tStatus.setText(s);
+        tStatus.setTypeface(prose ? t.body : t.mono);
+        tStatus.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, prose ? 13 : 12);
+        tStatus.setLineSpacing(0, prose ? 1.2f : 1f);
+        tStatus.setTextColor(color);
     }
 
     // ------------------------------------------------------------------
@@ -1300,23 +1435,20 @@ public final class ModelsScreen extends Screen {
     @Override
     public void onPull() {
         Engine.PullState ps = e.pullState();
-        if (ps != null && ps.done && ps.error == null && ps != handledPull) {
-            handledPull = ps;
+        if (ps != null && ps.done && ps.error == null && ModelsPullMemo.claim(ps)) {
             pendingHighlight = ps.name;
             if (pullField != null && pullField.getText().toString().trim().equals(ps.name)) pullField.setText("");
-            handler.removeCallbacks(autoDismiss);
-            handler.postDelayed(autoDismiss, SUCCESS_CARD_MS);
         }
         bindTransfer();
     }
 
-    /** A finished download's card retires on its own after a while. */
+    /** A finished download's card retires on its own once it has been on screen a while. */
     private final Runnable autoDismiss = new Runnable() {
         @Override
         public void run() {
             Engine.PullState ps = e.pullState();
-            if (ps != null && ps.done && ps.error == null) {
-                dismissedPull = ps;
+            if (ps != null && ps.done && ps.error == null && isShown()) {
+                ModelsPullMemo.dismiss(ps);
                 bindTransfer();
             }
         }
@@ -1359,17 +1491,20 @@ public final class ModelsScreen extends Screen {
     public void onDestroy() {
         pause();
         handler.removeCallbacksAndMessages(null);
+        if (sheet != null) sheet.dismiss();
     }
 
-    /** Stops polling and every animation (tab hidden or app in the background). */
+    /** Stops polling, timers and every animation (tab hidden or app in the background). */
     private void pause() {
         handler.removeCallbacks(poller);
+        handler.removeCallbacks(autoDismiss);
         stopSpin();
         if (bay == null) return;
         setSkeletonsAnimating(false);
         stateMeter.setIndeterminate(false);
         tMeter.setIndeterminate(false);
         tDot.setPulsing(false);
+        ui.setCapLive(transfer, false);
         for (Card c : cards.values()) {
             c.residentDot.setPulsing(false);
             if (busy.containsKey(c.name)) c.residentMeter.setFraction(0);
@@ -1389,11 +1524,17 @@ public final class ModelsScreen extends Screen {
     // Refresh & capabilities
     // ------------------------------------------------------------------
 
-    /** Re-reads installed and loaded models; {@code manual} spins the refresh icon. */
+    /**
+     * Re-reads installed and loaded models. {@code manual} (the refresh
+     * button) spins the icon and also retries capability reads that failed.
+     */
     private void refresh(boolean manual) {
         if (e.state() != Engine.State.ONLINE || refreshing) return;
         refreshing = true;
-        if (manual) startSpin();
+        if (manual) {
+            detailFailed.clear();
+            startSpin();
+        }
         e.refreshModels(new Runnable() {
             @Override
             public void run() {
@@ -1406,7 +1547,7 @@ public final class ModelsScreen extends Screen {
     }
 
     private void startSpin() {
-        if (refreshBtn == null || e.settings.reduceMotion()) return;
+        if (refreshBtn == null || e.settings.reduceMotion() || !isShown()) return;
         if (spin == null) {
             spin = ObjectAnimator.ofFloat(refreshBtn, "rotation", 0f, 360f);
             spin.setDuration(900);
@@ -1458,13 +1599,20 @@ public final class ModelsScreen extends Screen {
     // Actions
     // ------------------------------------------------------------------
 
-    private boolean embeddingOnly(String name) {
-        OllamaClient.ModelDetails d = e.details(name);
-        return d != null && d.supports("embedding") && !d.supports("completion");
+    /** "llava:7b is still loading — …" for a model with an operation in flight. */
+    private String busyNote(String name) {
+        String op = busy.get(name);
+        String doing = OP_LOAD.equals(op) ? "loading into memory" : OP_UNLOAD.equals(op) ? "releasing its memory"
+                : "being deleted";
+        return name + " is still " + doing + " — try again when it's done.";
     }
 
     private void use(String name) {
-        if (embeddingOnly(name)) {
+        if (OP_DELETE.equals(busy.get(name))) {
+            ui.toast(busyNote(name));
+            return;
+        }
+        if (e.isEmbeddingOnly(name)) {
             ui.toast(name + " is an embedding model — it turns text into vectors and can't chat. "
                     + "Pick a chat model.");
             return;
@@ -1480,9 +1628,12 @@ public final class ModelsScreen extends Screen {
     }
 
     private void toggleLoad(final String name) {
-        if (busy.containsKey(name)) return;
+        if (busy.containsKey(name)) {
+            ui.toast(busyNote(name));
+            return;
+        }
         final boolean unload = e.isLoaded(name);
-        if (!unload && embeddingOnly(name)) {
+        if (!unload && e.isEmbeddingOnly(name)) {
             ui.toast(name + " is an embedding model — Ollama loads it on demand.");
             return;
         }
@@ -1507,16 +1658,15 @@ public final class ModelsScreen extends Screen {
      */
     private void pinActive() {
         if (e.models().isEmpty() || e.resolveInstalled(e.settings.model()) != null) return;
-        String cur = e.currentModel();
+        String cur = activeModel(installed());
         if (cur.length() > 0) e.setModel(cur);
     }
 
     private void toggleDeep(String name) {
+        if (name == null) return;
         String deep = e.resolveInstalled(e.settings.deepModel());
         if (name.equals(deep)) {
-            e.setDeepModel("");
-            e.log("info", "Deep model cleared");
-            ui.toast("Deep model cleared — deep questions use the active model.");
+            clearDeep();
             return;
         }
         e.setDeepModel(name);
@@ -1526,27 +1676,67 @@ public final class ModelsScreen extends Screen {
                 ? " (it can't think step by step — qwen3 or deepseek-r1 can)" : ""));
     }
 
+    /** Clears the deep-model setting, whatever it names (even a model that has since left the list). */
+    private void clearDeep() {
+        e.setDeepModel("");
+        e.log("info", "Deep model cleared");
+        ui.toast("Deep model cleared — deep questions use the active model.");
+    }
+
+    /** Who takes over when the active model {@code gone} is deleted: a loaded chat model, else the first. */
+    private String successorFor(String gone) {
+        String first = null;
+        for (ModelInfo m : e.models()) {
+            String n = m.name;
+            if (n.equals(gone) || deleted.contains(n) || OP_DELETE.equals(busy.get(n)) || e.isEmbeddingOnly(n)) {
+                continue;
+            }
+            if (e.isLoaded(n)) return n;
+            if (first == null) first = n;
+        }
+        return first;
+    }
+
     private void confirmDelete(final String name) {
+        if (busy.containsKey(name)) {
+            ui.toast(busyNote(name));
+            return;
+        }
         ModelInfo m = find(name);
-        StringBuilder msg = new StringBuilder("This removes ").append(name).append(" from your PC");
+        Sheet s = ui.sheet("Confirm", kit.withName("Delete ", name, "?"));
+        s.eyebrowColor(t.danger);
+        SpannableStringBuilder msg = new SpannableStringBuilder("This removes ");
+        msg.append(ui.mono(name)).append(" from your PC");
         if (m != null && m.size > 0) msg.append(" and frees ").append(Fmt.bytes(m.size));
         msg.append(". You can pull it again any time.");
-        if (name.equals(e.currentModel())) {
-            msg.append("\n\nIt's your active model — replies will switch to another installed model.");
+        if (name.equals(activeModel(installed()))) {
+            String next = successorFor(name);
+            if (next != null) {
+                msg.append("\n\nIt's your active model — replies will switch to ").append(ui.mono(next)).append(".");
+            } else {
+                msg.append("\n\nIt's your active model, and no other chat model is installed — pull one to keep "
+                        + "chatting.");
+            }
         }
-        android.app.AlertDialog dlg = ui.confirm("Delete " + name + "?", msg.toString(), "Delete", new Runnable() {
+        s.message(msg);
+        s.negative("Cancel", null);
+        s.positive("Delete", Ui.DANGER, new Runnable() {
             @Override
             public void run() {
                 delete(name);
             }
         });
-        TextView yes = dlg.getButton(android.app.AlertDialog.BUTTON_POSITIVE);
-        if (yes != null) yes.setTextColor(t.danger);
+        s.show();
     }
 
     private void delete(final String name) {
-        if (busy.containsKey(name)) return;
+        if (busy.containsKey(name)) {
+            ui.toast(busyNote(name));
+            return;
+        }
+        final boolean wasActive = name.equals(activeModel(installed()));
         final boolean wasDeep = name.equals(e.resolveInstalled(e.settings.deepModel()));
+        final String deepSetting = e.settings.deepModel();
         busy.put(name, OP_DELETE);
         render();
         e.deleteModel(name, new Engine.Callback<Boolean>() {
@@ -1559,72 +1749,112 @@ public final class ModelsScreen extends Screen {
                     return;
                 }
                 deleted.add(name);
-                if (wasDeep) e.setDeepModel("");
-                ui.toast("Deleted " + name);
+                // The Engine's list keeps the deleted model until its refresh lands, and with the saved
+                // choice cleared, currentModel() asked now would pick — and save — that very model.
+                // So the successor is named first, before anything else asks.
+                String next = wasActive ? successorFor(name) : null;
+                if (next != null) {
+                    e.setModel(next);
+                    e.log("info", "Active model · " + next);
+                }
+                if (wasDeep) clearDeepAfterDelete(deepSetting);
+                ui.toast(next != null ? "Deleted " + name + " · now using " + next : "Deleted " + name);
                 render();
             }
         });
     }
 
+    /**
+     * Forgets a deleted deep model. Clearing notifies every screen, and they
+     * ask the Engine for the active model: fine while a real model is saved,
+     * but with none (the last chat model went) that waits for the list refresh,
+     * or they'd be handed the deleted model.
+     */
+    private void clearDeepAfterDelete(final String deepSetting) {
+        String saved = e.resolveInstalled(e.settings.model());
+        if (saved != null && !deleted.contains(saved)) {
+            e.setDeepModel("");
+            return;
+        }
+        e.refreshModels(new Runnable() {
+            @Override
+            public void run() {
+                if (e.settings.deepModel().equals(deepSetting)) e.setDeepModel("");
+            }
+        });
+    }
+
     private void showActions(final String name) {
-        final boolean active = name.equals(e.currentModel());
+        String op = busy.get(name);
+        final boolean active = name.equals(activeModel(installed()));
         final boolean loaded = e.isLoaded(name);
         final boolean isDeep = name.equals(e.resolveInstalled(e.settings.deepModel()));
-        final boolean embedding = embeddingOnly(name);
+        final boolean embedding = e.isEmbeddingOnly(name);
         ModelInfo m = find(name);
         List<Ui.Row> rows = new ArrayList<Ui.Row>();
-        if (!active && !embedding) {
-            rows.add(new Ui.Row("Use for chat", "Make it the active model", false, new Runnable() {
-                @Override
-                public void run() {
-                    use(name);
-                }
-            }, null));
+        if (op != null) {
+            // What's running, and why Load / Delete aren't offered until it's done.
+            boolean del = OP_DELETE.equals(op);
+            rows.add(new Ui.Row(del ? "Deleting from the PC…" : OP_LOAD.equals(op) ? "Loading into memory…"
+                    : "Releasing memory…", del ? "It leaves the list when the PC is done"
+                    : "Unload and Delete come back when it's done", false, null, null)
+                    .icon(del ? IconDrawable.TRASH : OP_LOAD.equals(op) ? IconDrawable.BOLT : IconDrawable.POWER));
         }
-        if (!embedding || loaded) {
-            rows.add(new Ui.Row(loaded ? "Unload from memory" : "Load into memory", loaded
-                    ? "Free its memory on the PC" : "Warm it up so the first reply is quick", false, new Runnable() {
-                @Override
-                public void run() {
-                    toggleLoad(name);
-                }
-            }, null));
-        }
-        if (!embedding || isDeep) {
-            rows.add(new Ui.Row(isDeep ? "Remove as deep model" : "Set as deep model",
-                    "Hard questions in Auto mode go here, with thinking on", isDeep, new Runnable() {
-                @Override
-                public void run() {
-                    toggleDeep(name);
-                }
-            }, null));
+        if (!OP_DELETE.equals(op)) {
+            if (!active && !embedding) {
+                rows.add(new Ui.Row("Use for chat", "Make it the active model", false, new Runnable() {
+                    @Override
+                    public void run() {
+                        use(name);
+                    }
+                }, null).icon(IconDrawable.CHECK));
+            }
+            if (op == null && (!embedding || loaded)) {
+                rows.add(new Ui.Row(loaded ? "Unload from memory" : "Load into memory", loaded
+                        ? "Free its memory on the PC" : "Warm it up so the first reply is quick", false, new Runnable() {
+                    @Override
+                    public void run() {
+                        toggleLoad(name);
+                    }
+                }, null).icon(loaded ? IconDrawable.POWER : IconDrawable.BOLT));
+            }
+            if (!embedding || isDeep) {
+                rows.add(new Ui.Row(isDeep ? "Remove as deep model" : "Set as deep model",
+                        "Hard questions in Auto mode go here, with thinking on", isDeep, new Runnable() {
+                    @Override
+                    public void run() {
+                        toggleDeep(name);
+                    }
+                }, null).icon(IconDrawable.BRAIN));
+            }
         }
         rows.add(new Ui.Row("Details", "Context window, family, license, parameters", false, new Runnable() {
             @Override
             public void run() {
                 openSheet(name);
             }
-        }, null));
+        }, null).icon(IconDrawable.INFO));
         rows.add(new Ui.Row("Copy name", null, false, new Runnable() {
             @Override
             public void run() {
                 a.copy("model", name);
             }
-        }, null));
-        SpannableStringBuilder del = new SpannableStringBuilder("Delete from PC…");
-        del.setSpan(new ForegroundColorSpan(t.danger), 0, del.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-        rows.add(new Ui.Row(del, m != null && m.size > 0 ? "Frees " + Fmt.bytes(m.size) + " on disk" : null, false,
-                new Runnable() {
-                    @Override
-                    public void run() {
-                        confirmDelete(name);
-                    }
-                }, null));
-        ui.pick(Fmt.ellipsize(name, 40), rows, null, null);
+        }, null).icon(IconDrawable.COPY));
+        if (op == null) {
+            rows.add(new Ui.Row("Delete from PC…", m != null && m.size > 0 ? "Frees " + Fmt.bytes(m.size) + " on disk"
+                    : null, false, new Runnable() {
+                @Override
+                public void run() {
+                    confirmDelete(name);
+                }
+            }, null).icon(IconDrawable.TRASH).danger());
+        }
+        ui.pick("Model", ui.mono(name), rows, null, null);
     }
 
     private void openSheet(String name) {
-        ModelsSheet.show(a, e, kit, name, new ModelsSheet.Actions() {
+        if (sheet != null) sheet.dismiss();
+        sheet = ModelsSheet.show(e, kit, name, new ModelsSheet.Actions() {
             @Override
             public void use(String model) {
                 ModelsScreen.this.use(model);
@@ -1639,11 +1869,16 @@ public final class ModelsScreen extends Screen {
             public void toggleLoad(String model) {
                 ModelsScreen.this.toggleLoad(model);
             }
+
+            @Override
+            public String busy(String model) {
+                return busy.get(model);
+            }
         });
     }
 
     private void pickActive() {
-        pickModel("Active model", e.currentModel(), false, new ModelChoice() {
+        pickModel("Active model", activeModel(installed()), false, new ModelChoice() {
             @Override
             public void chose(String name) {
                 use(name);
@@ -1667,34 +1902,36 @@ public final class ModelsScreen extends Screen {
 
     private void pickModel(String title, String current, final boolean deep, final ModelChoice choice) {
         List<ModelInfo> ms = installed();
-        if (ms.isEmpty()) {
-            ui.toast("No models installed yet — pull one below.");
-            focusPull();
-            return;
-        }
         List<Ui.Row> rows = new ArrayList<Ui.Row>();
         for (final ModelInfo m : ms) {
-            if (embeddingOnly(m.name)) continue;
+            if (e.isEmbeddingOnly(m.name) || OP_DELETE.equals(busy.get(m.name))) continue;
             String detail = m.describe();
             Boolean thinks = e.supportsThinking(m.name);
             if (deep && Boolean.TRUE.equals(thinks)) detail = "thinking · " + detail;
             if (e.isLoaded(m.name)) detail = "loaded · " + detail;
-            rows.add(new Ui.Row(m.name, detail, m.name.equals(current), new Runnable() {
+            rows.add(new Ui.Row(ui.mono(m.name), detail, m.name.equals(current), new Runnable() {
                 @Override
                 public void run() {
                     choice.chose(m.name);
                 }
             }, null));
         }
+        if (rows.isEmpty()) {
+            ui.toast(ms.isEmpty() ? "No models installed yet — pull one below."
+                    : "No chat models installed yet — pull one below.");
+            focusPull();
+            return;
+        }
         if (deep) {
-            ui.pick(title, rows, current != null ? "Clear" : null, new Runnable() {
+            // Clear works on the setting itself: the model it names may have left the list meanwhile.
+            ui.pick("Model bay", title, rows, e.settings.deepModel().length() > 0 ? "Clear" : null, new Runnable() {
                 @Override
                 public void run() {
-                    toggleDeep(e.resolveInstalled(e.settings.deepModel()));
+                    clearDeep();
                 }
             });
         } else {
-            ui.pick(title, rows, null, null);
+            ui.pick("Model bay", title, rows, null, null);
         }
     }
 
@@ -1720,7 +1957,6 @@ public final class ModelsScreen extends Screen {
         }
         hideKeyboard(pullField);
         pullField.clearFocus();
-        dismissedPull = null;
         e.pull(name);
         bindTransfer();
         scrollTo(transfer);

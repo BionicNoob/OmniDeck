@@ -336,8 +336,14 @@ public class ModelsScreenTest extends Harness {
         waitFor("pull failed", () -> engine().pullState() != null && engine().pullState().done);
         advance(100);
         assertTrue(shows("Download failed"));
+        // The plain-language reason leads; Ollama's own words follow, for diagnosis.
+        assertTrue(shows("no model called missing-model"));
         assertTrue(shows("file does not exist"));
-        assertNotNull(textView("Retry"));
+        // Nothing by that name in the library: retrying can't help, fixing the name can.
+        assertNull(textView("Retry"));
+        field.setText("");
+        click("Edit the model name");
+        assertEquals("missing-model", field.getText().toString());
         scrollTop();
         shoot("models-light-pull-error");
         click("Dismiss download");

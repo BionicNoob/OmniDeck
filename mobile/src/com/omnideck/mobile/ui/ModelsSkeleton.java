@@ -7,22 +7,23 @@ import android.graphics.LinearGradient;
 import android.graphics.Paint;
 import android.graphics.RectF;
 import android.graphics.Shader;
-import android.view.View;
 import android.view.animation.LinearInterpolator;
 
 /**
  * Placeholder for a model card while the list loads: the card's shape in
  * soft bars (name, spec line, chips, two controls) with an optional slow
- * shimmer sweeping across (off when motion is reduced).
+ * shimmer sweeping across (off when motion is reduced). The shimmer is a
+ * {@link Widgets.Animated} loop, so it only runs while the view is really
+ * on screen.
  */
-public final class ModelsSkeleton extends View {
+public final class ModelsSkeleton extends Widgets.Animated {
     private final Paint bar = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint sheen = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final RectF r = new RectF();
     private final float d;
     private final int sheenColor;
     private final float nameFraction;
-    private ValueAnimator anim;
+    private boolean animating;
     private float phase = -1;
 
     /** {@code variant} (0..2) varies the bar lengths so a stack doesn't look cloned. */
@@ -37,15 +38,25 @@ public final class ModelsSkeleton extends View {
 
     /** Starts or stops the shimmer. */
     public void setAnimating(boolean on) {
-        if (on == (anim != null)) return;
-        if (!on) {
-            anim.cancel();
-            anim = null;
-            phase = -1;
-            invalidate();
-            return;
-        }
-        anim = ValueAnimator.ofFloat(0, 1);
+        if (animating == on) return;
+        animating = on;
+        syncLoop();
+        invalidate();
+    }
+
+    /** Whether the shimmer is wanted (it runs while this is true and the view is on screen). */
+    public boolean isShimmering() {
+        return animating;
+    }
+
+    @Override
+    protected boolean wantsLoop() {
+        return animating;
+    }
+
+    @Override
+    protected ValueAnimator makeLoop() {
+        ValueAnimator anim = ValueAnimator.ofFloat(0, 1);
         anim.setDuration(1600);
         anim.setRepeatCount(ValueAnimator.INFINITE);
         anim.setInterpolator(new LinearInterpolator());
@@ -56,13 +67,12 @@ public final class ModelsSkeleton extends View {
                 invalidate();
             }
         });
-        anim.start();
+        return anim;
     }
 
     @Override
-    protected void onDetachedFromWindow() {
-        super.onDetachedFromWindow();
-        setAnimating(false);
+    protected void onLoopStopped() {
+        phase = -1;
     }
 
     @Override
@@ -86,9 +96,8 @@ public final class ModelsSkeleton extends View {
     protected void onDraw(Canvas c) {
         float w = getWidth();
         float y = 2 * d;
-        pill(c, 0, y + 2 * d, 10 * d, 10 * d, 5 * d);                    // state dot
-        pill(c, 18 * d, y, w * nameFraction, 14 * d, 4 * d);             // name
-        y += 26 * d;
+        pill(c, 0, y, w * nameFraction, 15 * d, 4 * d);                  // name
+        y += 25 * d;
         pill(c, 0, y, w * 0.72f, 9 * d, 3 * d);                           // spec line
         y += 22 * d;
         pill(c, 0, y, 58 * d, 18 * d, 4 * d);                             // chips

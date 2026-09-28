@@ -6,17 +6,13 @@ import android.graphics.drawable.RippleDrawable;
 import android.text.SpannableStringBuilder;
 import android.text.Spanned;
 import android.text.style.ForegroundColorSpan;
-import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
-import android.widget.FrameLayout;
 import android.widget.TextView;
 
 import com.omnideck.mobile.core.Fmt;
 import com.omnideck.mobile.core.ModelInfo;
 import com.omnideck.mobile.core.OllamaClient;
-
-import java.util.Locale;
 
 /**
  * View pieces shared by the model bay's cards and its spec-sheet dialog:
@@ -37,15 +33,21 @@ public final class ModelsKit {
         return t.data;
     }
 
+    /** The deep model's color for fills and edges (amber: "engaged"). */
     public int deepColor() {
         return t.engaged;
+    }
+
+    /** The deep model's color for text and icons (Light's amber fill is too pale to read as ink). */
+    public int deepInk() {
+        return t.engagedInk;
     }
 
     public int loadedColor() {
         return t.ok;
     }
 
-    /** "llama3.2" in ink with ":3b" dimmed. */
+    /** "llama3.2" in ink with ":3b" dimmed, for a view set in {@code t.mono}. */
     public CharSequence name(String name, int ink) {
         String[] p = ModelsFormat.splitTag(name);
         SpannableStringBuilder sb = new SpannableStringBuilder(p[0]);
@@ -55,6 +57,28 @@ public final class ModelsKit {
             sb.setSpan(new ForegroundColorSpan(t.dim), s, sb.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         }
         if (ink != 0) sb.setSpan(new ForegroundColorSpan(ink), 0, p[0].length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        return sb;
+    }
+
+    /**
+     * {@link #name} as an identifier span ({@link Ui#mono}), for views set in
+     * another face: dialog titles, sentences that mention a model.
+     */
+    public CharSequence monoName(String name, int ink) {
+        SpannableStringBuilder sb = new SpannableStringBuilder(ui.mono(name));
+        String[] p = ModelsFormat.splitTag(name);
+        if (ink != 0) sb.setSpan(new ForegroundColorSpan(ink), 0, p[0].length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        if (p[1].length() > 0) {
+            sb.setSpan(new ForegroundColorSpan(t.dim), p[0].length(), sb.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        }
+        return sb;
+    }
+
+    /** {@code before}, the model name as an identifier, then {@code after}: "Delete " llava:7b "?". */
+    public CharSequence withName(String before, String name, String after) {
+        SpannableStringBuilder sb = new SpannableStringBuilder(before == null ? "" : before);
+        sb.append(ui.mono(name));
+        if (after != null) sb.append(after);
         return sb;
     }
 
@@ -78,24 +102,33 @@ public final class ModelsKit {
         sb.append(s);
     }
 
-    /** A theme chip; Cyber upper-cases it like every HUD label. */
+    /** A theme status chip; Cyber upper-cases it like every HUD label. */
     public TextView chip(String text, int color) {
         TextView c = ui.chip(text, color);
         c.setSingleLine(true);
         return c;
     }
 
+    /** A status chip tinted {@code color} with its text in {@code ink} (amber fills need a darker ink). */
+    public TextView chip(String text, int color, int ink) {
+        TextView c = chip(text, color);
+        c.setTextColor(ink);
+        return c;
+    }
+
     /**
      * Adds the state chips (ACTIVE / DEEP / LOADED) then the capability chips
-     * to {@code into}. While details are unknown, two faint placeholder chips
-     * stand in for the capabilities.
+     * to {@code into}. While details are on their way, two faint placeholder
+     * chips stand in for the capabilities. When Ollama doesn't report them (an
+     * older version, or the read failed), {@code embedding} — the Engine's
+     * verdict, which falls back to the name — still earns its chip.
      */
     public void addChips(ViewGroup into, OllamaClient.ModelDetails d, boolean active, boolean deep, boolean loaded,
-                         boolean detailsPending) {
+                         boolean detailsPending, boolean embedding) {
         if (active) into.addView(chip("Active", activeColor()));
-        if (deep) into.addView(chip("Deep", deepColor()));
+        if (deep) into.addView(chip("Deep", deepColor(), deepInk()));
         if (loaded) into.addView(chip("Loaded", loadedColor()));
-        if (d != null) {
+        if (d != null && !d.capabilities.isEmpty()) {
             for (String cap : d.capabilities) {
                 String label = ModelsFormat.capability(cap);
                 if (label != null) into.addView(chip(label, t.dim));
@@ -103,6 +136,8 @@ public final class ModelsKit {
         } else if (detailsPending) {
             into.addView(placeholderChip(58));
             into.addView(placeholderChip(44));
+        } else if (embedding) {
+            into.addView(chip(ModelsFormat.capability("embedding"), t.dim));
         }
     }
 
@@ -147,7 +182,10 @@ public final class ModelsKit {
         return sb.toString();
     }
 
-    /** "CTX 8,192 · STAYS LOADED" / "ctx 8,192 · unloads in 4m". */
+    /**
+     * "ctx 8,192 · stays loaded" / "ctx 8,192 · unloads in 4m". Telemetry
+     * keeps its case in every theme, like the spec line above it.
+     */
     public String residencyDetail(ModelInfo run, long now) {
         if (run == null) return "";
         StringBuilder sb = new StringBuilder();
@@ -165,39 +203,10 @@ public final class ModelsKit {
                         : secs + "s");
             }
         }
-        String s = sb.toString();
-        return t.hud ? s.toUpperCase(Locale.US) : s;
+        return sb.toString();
     }
 
-    /**
-     * Wraps a {@link Ui#button} in a frame that takes over its background, so
-     * a wide (weighted) button keeps its icon and label together in the middle
-     * instead of pinning the icon to the far edge. The frame takes the click
-     * and the content description.
-     */
-    public FrameLayout wide(final TextView b) {
-        FrameLayout f = new FrameLayout(ui.c);
-        f.setBackground(b.getBackground());
-        b.setBackground(null);
-        f.setMinimumHeight(ui.dp(42));
-        CharSequence d = b.getContentDescription();
-        f.setContentDescription(d != null ? d : b.getText());
-        b.setContentDescription(null);
-        f.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                b.callOnClick();
-            }
-        });
-        b.setClickable(false);
-        b.setFocusable(false);
-        b.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-        f.addView(b, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER));
-        return f;
-    }
-
-    /** Greys out a {@link #wide} button (or any control) and stops it taking taps. */
+    /** Greys out a button (or any control) and stops it taking taps. */
     public static void disable(View v) {
         v.setEnabled(false);
         v.setClickable(false);
