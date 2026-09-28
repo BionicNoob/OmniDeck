@@ -227,7 +227,9 @@ public class CommsActionsTest extends Harness {
         assertTrue(failed.stats, failed.stats.contains("out of memory"));
         assertEquals(1, engine().telemetry.errors);
         assertTrue("a plain-language reason", shows("ran out of memory"));
+        assertTrue("the raw error under it", shows("llama runner process has terminated"));
         assertNotNull(button("Retry this reply"));
+        assertNotNull("the fix for running out of memory", button("Open Settings to lower the context size"));
         advance(300);
         shoot("comms-cyber-failed");
 
@@ -243,6 +245,89 @@ public class CommsActionsTest extends Harness {
     }
 
     @Test
+    public void aMissingModelOffersToDownloadIt() throws Exception {
+        launch("light", MainActivity.TAB_COMMS);
+        waitOnline();
+        // The model is deleted on the PC behind the phone's back.
+        ollama.clearModels();
+        ollama.addModel(new MockOllama.Model("qwen3:8b", 5225388164L, "8.2B", "Q4_K_M", true));
+        submit("still there?");
+        waitFor("failed", () -> !engine().isWorking() && last(ChatMessage.ASSISTANT) != null
+                && last(ChatMessage.ASSISTANT).error);
+        ChatMessage failed = last(ChatMessage.ASSISTANT);
+        assertEquals(com.omnideck.mobile.core.ReplyError.MODEL_MISSING, failed.errorKind);
+        assertTrue(shows("llama3.2:3b isn't installed on the PC"));
+        View pull = button("Download llama3.2:3b onto the PC");
+        assertNotNull(pull);
+        assertTrue(((TextView) pull).getText().toString().contains("/pull llama3.2:3b"));
+        advance(300);
+        shoot("comms-light-model-missing");
+        pull.performClick();
+        waitFor("downloaded", () -> lastNotice().contains("**llama3.2:3b** is downloaded"));
+        assertTrue(ollama.hasModel("llama3.2:3b"));
+    }
+
+    @Test
+    public void aTextOnlyModelOffersAVisionModel() throws Exception {
+        ollama.addModel(new MockOllama.Model("llava:7b", 4_700_000_000L, "7B", "Q4_0", false));
+        launch("dark", MainActivity.TAB_COMMS);
+        waitOnline();
+        java.util.concurrent.atomic.AtomicBoolean known = new java.util.concurrent.atomic.AtomicBoolean();
+        engine().fetchDetails("llava:7b", (d, err) -> known.set(true));
+        waitFor("llava details", known::get);
+        // A reply the PC refused because the model can't see the image.
+        ChatMessage q = new ChatMessage(ChatMessage.USER, "what is this?");
+        q.images.add(MockBridge.PNG_1PX);
+        ChatMessage f = new ChatMessage(ChatMessage.ASSISTANT, "");
+        f.model = "llama3.2:3b";
+        f.error = true;
+        f.errorKind = com.omnideck.mobile.core.ReplyError.NO_VISION;
+        f.stats = "llama3.2:3b can't see images. Switch to a vision model (llava, gemma3, qwen2.5vl…) or send the "
+                + "message again without the image. · image input is not supported (HTTP 400)";
+        messages().add(q);
+        messages().add(f);
+        act.onConversationReplaced();
+        idle();
+        assertTrue(shows("can't see images"));
+        assertTrue(shows("image input is not supported"));
+        click("Switch to a model that can see images");
+        AlertDialog d = ShadowAlertDialog.getLatestAlertDialog();
+        assertTrue(d.isShowing());
+        assertTrue(dialogShows(d, "llava:7b"));
+        CommsFlowTest.clickDialogRow(d, "llava:7b");
+        assertEquals("llava:7b", engine().currentModel());
+    }
+
+    @Test
+    public void stopAlsoStopsACompaction() throws Exception {
+        launch("cyber", MainActivity.TAB_COMMS);
+        waitOnline();
+        chatAndWait("one");
+        chatAndWait("two");
+        ollama.tokenDelayMs = 80;
+        submit("/compact");
+        waitFor("compacting", () -> engine().isWorking());
+        assertFalse("no reply streams", engine().isBusy());
+        assertNotNull("the send button is Stop while OMNI works", button("Stop"));
+        click("Stop");
+        waitFor("stopped", () -> !engine().isWorking());
+        assertTrue(lastNotice().contains("Compaction stopped"));
+        assertNotNull(button("Voice input"));
+    }
+
+    @Test
+    public void theArchiveNamesEachChatsModel() throws Exception {
+        launch("light", MainActivity.TAB_COMMS);
+        waitOnline();
+        chatAndWait("remember the milk");
+        click("Chat history");
+        waitFor("archive", () -> shows("remember the milk") && shows("2 messages"));
+        assertTrue("the chat's model, in its own case", shows("llama3.2:3b · 2 messages"));
+        advance(300);
+        shoot("comms-light-archive");
+    }
+
+    @Test
     public void aDroppedConnectionSaysSo() throws Exception {
         launch("light", MainActivity.TAB_COMMS);
         waitOnline();
@@ -250,7 +335,9 @@ public class CommsActionsTest extends Harness {
         submit("are you there");
         waitFor("failed", () -> !engine().isBusy() && last(ChatMessage.ASSISTANT) != null
                 && last(ChatMessage.ASSISTANT).error);
-        assertTrue(shows("connection to your PC dropped"));
+        // The plain words from the reply's footer (ReplyError), the raw error under them.
+        assertTrue(shows("connection to the PC dropped"));
+        assertTrue(shows("connection reset by peer"));
         ollama.midStreamError = null;
         chatAndWait("and now?");
         assertTrue("the next send works", last(ChatMessage.ASSISTANT).content.startsWith("You said: and now?"));
@@ -297,16 +384,19 @@ public class CommsActionsTest extends Harness {
 
     @Test
     public void aNearlyFullContextOffersCompact() throws Exception {
-        // The mock reports 26 prompt + ~10 reply tokens: with num_ctx 40 the window is ~90% full.
-        prefs().edit().putInt("num_ctx", 40).commit();
+        // The warning follows the Engine's estimate of this chat (about 4 characters a token, plus
+        // framing): with num_ctx 60, one exchange of ~150 characters fills it to ~80%.
+        prefs().edit().putInt("num_ctx", 60).commit();
         launch("light", MainActivity.TAB_COMMS);
         waitOnline();
         chatAndWait("one");
+        assertFalse("a short exchange fits", act.comms().contextWarningShown());
+        chatAndWait("two, a longer question with a few more words in it");
+        assertTrue(engine().contextFill() >= 0.8);
         assertTrue(act.comms().contextWarningShown());
-        assertTrue(shows("% full"));
+        assertTrue(shows("% full") || shows("Context full"));
         advance(300);
         shoot("comms-light-context");
-        chatAndWait("two");
         chatAndWait("three");
         click("Compact the chat");
         assertFalse(act.comms().contextWarningShown());

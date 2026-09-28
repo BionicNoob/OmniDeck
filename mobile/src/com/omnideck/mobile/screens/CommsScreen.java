@@ -1276,7 +1276,7 @@ public final class CommsScreen extends Screen {
         if (ctxWarn == null) return;
         int pct = (int) Math.round(fill * 100);
         if (pct >= 100) {
-            ctxWarnText.setText("Context full — the start of this chat no longer reaches the model.");
+            ctxWarnText.setText("Context full — the oldest messages no longer fit.");
             ctxWarn.setContentDescription("Context full");
         } else {
             ctxWarnText.setText("Context " + pct + "% full — the start of this chat will soon drop out.");
