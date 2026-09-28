@@ -369,12 +369,20 @@ public final class IconDrawable extends Drawable {
                 break;
             case LOGO:
             default: {
-                // Segmented ring + core, like the launcher icon.
+                // Arc-reactor emblem, like the launcher icon: hairline outer ring,
+                // four segments, inner ring, solid core (color2).
                 paint.setStrokeCap(Paint.Cap.BUTT);
-                paint.setStrokeWidth(3.1f);
-                for (int start = -35; start < 325; start += 90) arc(12, 12, 8.6f, start, 70);
+                int full = paint.getAlpha();
+                paint.setStrokeWidth(0.8f);
+                paint.setAlpha(full * 140 / 255);
+                c.drawCircle(12, 12, 11f, paint);
+                paint.setAlpha(full);
+                paint.setStrokeWidth(2.5f);
+                for (int start = -38; start < 322; start += 90) arc(12, 12, 7.9f, start, 76);
+                paint.setStrokeWidth(0.9f);
+                c.drawCircle(12, 12, 4.9f, paint);
                 paint2.setStyle(Paint.Style.FILL);
-                c.drawCircle(12, 12, 2.9f, paint2);
+                c.drawCircle(12, 12, 2.6f, paint2);
                 paint.setStrokeCap(Paint.Cap.ROUND);
                 break;
             }

@@ -135,6 +135,10 @@ public final class MainActivity extends Activity implements Engine.Listener {
         return settingsOpen ? -1 : tab;
     }
 
+    public boolean settingsOpen() {
+        return settingsOpen;
+    }
+
     public CommsScreen comms() {
         return (CommsScreen) tabScreen(TAB_COMMS);
     }
