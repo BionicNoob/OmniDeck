@@ -243,14 +243,14 @@ public final class MainActivity extends Activity implements Engine.Listener {
         }
         ui.haptics = engine.settings.haptics();
         engine.setVisible(true);
-        for (Screen s : built()) s.onActivityStart();
+        for (Screen s : built()) s.dispatchActivityStart();
         updateScanLine();
     }
 
     @Override
     protected void onStop() {
         super.onStop();
-        for (Screen s : built()) s.onActivityStop();
+        for (Screen s : built()) s.dispatchActivityStop();
         engine.setVisible(false);
         if (scanLine != null) scanLine.stop();
     }
@@ -312,7 +312,7 @@ public final class MainActivity extends Activity implements Engine.Listener {
         engine.settings.setTheme(pref);
         engine.log("info", "Appearance · " + pref.toUpperCase(Locale.US));
         if (Theme.resolve(this, pref) != themeId) {
-            for (Screen s : built()) s.onActivityStop();
+            for (Screen s : built()) s.dispatchActivityStop();
             recreate();
         } else {
             themePref = pref;

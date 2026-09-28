@@ -130,6 +130,41 @@ public final class Settings {
     public String bridgeToken() { return s("bridge_token", ""); }
     public void setBridgeToken(String v) { put("bridge_token", v.trim()); }
 
+    /**
+     * Where LaunchBridge runs: "" = the same PC as the AI (default), else a
+     * host/IP, so PC control works even before Ollama is reachable.
+     */
+    public String bridgeHost() { return s("bridge_host", ""); }
+    public void setBridgeHost(String v) { put("bridge_host", v == null ? "" : v.trim()); }
+
+    /** Host the current bridge token was issued by ("" = unknown / legacy). */
+    public String bridgeTokenHost() { return s("bridge_token_host", ""); }
+    public void setBridgeTokenHost(String v) { put("bridge_token_host", v == null ? "" : v.trim()); }
+
+    /** MAC address of the PC for Wake-on-LAN ("" = not set). */
+    public String pcMac() { return s("pc_mac", ""); }
+    public void setPcMac(String v) { put("pc_mac", v == null ? "" : v.trim()); }
+
+    /** Optional API key sent as "Authorization: Bearer …" to Ollama (reverse proxies). */
+    public String apiKey() { return s("api_key", ""); }
+    public void setApiKey(String v) { put("api_key", v == null ? "" : v.trim()); }
+
+    /** Let the AI use PC tools (LaunchBridge) through tool calling, when the model supports tools. */
+    public boolean aiTools() { return sp.getBoolean("ai_tools", true); }
+    public void setAiTools(boolean v) { put("ai_tools", v); }
+
+    /** Ask before the AI changes something on the PC (launch apps, volume, clipboard…). */
+    public boolean confirmPcActions() { return sp.getBoolean("confirm_pc_actions", true); }
+    public void setConfirmPcActions(boolean v) { put("confirm_pc_actions", v); }
+
+    /** Hands-free conversation: after a spoken reply, listen again automatically. */
+    public boolean handsFree() { return sp.getBoolean("hands_free", false); }
+    public void setHandsFree(boolean v) { put("hands_free", v); }
+
+    /** System notifications when a reply, download or timer finishes while the app is in the background. */
+    public boolean notifications() { return sp.getBoolean("notifications", true); }
+    public void setNotifications(boolean v) { put("notifications", v); }
+
     public boolean incognito() { return sp.getBoolean("incognito", false); }
     public void setIncognito(boolean v) { put("incognito", v); }
 

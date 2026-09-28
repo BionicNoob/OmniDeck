@@ -22,6 +22,8 @@ public abstract class Screen {
     protected final Theme t;
     private View root;
     private boolean shown;
+    /** False between the activity's onStop and onStart (app in the background). */
+    private boolean started = true;
 
     protected Screen(MainActivity a) {
         this.a = a;
@@ -39,8 +41,35 @@ public abstract class Screen {
         return root != null;
     }
 
+    /**
+     * True while this screen is actually on screen: it is the selected page
+     * AND the app is in the foreground. Gate animations, polling and
+     * "seen" effects on this — Engine events keep arriving while the app is
+     * in the background.
+     */
     public final boolean isShown() {
+        return shown && started;
+    }
+
+    /** The selected page in the shell, even while the app is in the background. */
+    public final boolean isSelected() {
         return shown;
+    }
+
+    /** Called by the shell from onStart: marks the app visible, then runs {@link #onActivityStart()}. */
+    public final void dispatchActivityStart() {
+        started = true;
+        onActivityStart();
+    }
+
+    /**
+     * Called by the shell from onStop: runs {@link #onActivityStop()} while
+     * {@link #isShown()} still reports the visible state (so a visible page
+     * can save its drafts), then marks the app as in the background.
+     */
+    public final void dispatchActivityStop() {
+        onActivityStop();
+        started = false;
     }
 
     /** Builds the screen's view tree (called once). */

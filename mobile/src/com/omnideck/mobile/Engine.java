@@ -277,6 +277,14 @@ public final class Engine {
         return job != null;
     }
 
+    /**
+     * True while a reply streams OR a background model task (compact,
+     * benchmark) runs. New messages wait until this is false.
+     */
+    public boolean isWorking() {
+        return job != null || auxBusy;
+    }
+
     public ChatMessage streamingMessage() {
         return job == null ? null : job.target;
     }
@@ -404,7 +412,33 @@ public final class Engine {
 
     /** The model a message would go to right now (after /deep and auto routing). */
     public String effectiveModel() {
-        return currentModel();
+        return routeModel("", false);
+    }
+
+    /**
+     * The model a message goes to, after Fast / Deep / Auto routing: the deep
+     * model in Deep mode (or in Auto for a hard-looking prompt), else the
+     * current model. A message with images never goes to a deep model that
+     * is known to be text-only — it stays on the current model.
+     */
+    public String routeModel(String prompt, boolean hasImages) {
+        String base = currentModel();
+        String deepModel = resolveInstalled(settings.deepModel());
+        if (deepModel == null || deepModel.equals(base)) return base;
+        String mode = settings.mode();
+        boolean deep = Settings.MODE_DEEP.equals(mode)
+                || (Settings.MODE_AUTO.equals(mode) && looksHard(prompt == null ? "" : prompt));
+        if (!deep) return base;
+        if (hasImages && Boolean.FALSE.equals(supportsVision(deepModel))) return base;
+        return deepModel;
+    }
+
+    /** Whether this message is answered in deep (thinking) mode. */
+    boolean deepFor(String prompt) {
+        String mode = settings.mode();
+        if (Settings.MODE_DEEP.equals(mode)) return true;
+        return Settings.MODE_AUTO.equals(mode) && resolveInstalled(settings.deepModel()) != null
+                && looksHard(prompt == null ? "" : prompt);
     }
 
     // ------------------------------------------------------------------
@@ -1066,6 +1100,11 @@ public final class Engine {
             toast("Wait for the reply to finish, or tap stop.");
             return false;
         }
+        if (auxBusy) {
+            // Compact rewrites the chat when it finishes; a message sent now would be lost.
+            toast("OMNI is finishing a task (compact / benchmark) — try again in a moment.");
+            return false;
+        }
         if (state != State.ONLINE || client == null) {
             toast(scanning ? "Still looking for your AI…" : "Your AI isn't connected — searching again.");
             if (!scanning) discover(false);
@@ -1087,12 +1126,8 @@ public final class Engine {
         String lastUser = "";
         ChatMessage lu = conv.lastOfRole(ChatMessage.USER);
         if (lu != null) lastUser = lu.content;
-        String base = currentModel();
-        String deepModel = resolveInstalled(settings.deepModel());
-        String mode = settings.mode();
-        boolean deep = Settings.MODE_DEEP.equals(mode)
-                || (Settings.MODE_AUTO.equals(mode) && deepModel != null && looksHard(lastUser));
-        final String model = deep && deepModel != null ? deepModel : base;
+        boolean deep = deepFor(lastUser);
+        final String model = routeModel(lastUser, lu != null && !lu.images.isEmpty());
         ensureCapabilities(model);
 
         JSONArray msgs = conv.toRequestMessages(systemPrompt(), null);
@@ -1111,6 +1146,11 @@ public final class Engine {
         final OllamaClient c = client;
         notifyBusy();
         save();
+        if (c == null) {
+            // The link dropped between the caller's check and now: fail the reply cleanly.
+            finish(j, null, "Not connected to your AI.", false, false);
+            return;
+        }
         io.execute(new Runnable() {
             @Override
             public void run() {
@@ -1217,7 +1257,11 @@ public final class Engine {
             toast("A reply is still streaming.");
             return;
         }
-        if (state != State.ONLINE) {
+        if (auxBusy) {
+            toast("OMNI is finishing a task (compact / benchmark) — try again in a moment.");
+            return;
+        }
+        if (state != State.ONLINE || client == null) {
             toast("Your AI isn't connected.");
             return;
         }
@@ -2057,8 +2101,19 @@ public final class Engine {
     // PC control via LaunchBridge
     // ------------------------------------------------------------------
 
+    /**
+     * The host LaunchBridge is reached at: the Bridge address from settings
+     * when set, else the PC running the AI (current link, or the last one
+     * that worked). "" when neither is known yet.
+     */
+    public String bridgeHost() {
+        String h = settings.bridgeHost();
+        if (h.length() > 0) return h;
+        return server != null ? server.host : settings.lastHost();
+    }
+
     private BridgeClient bridge() {
-        String host = server != null ? server.host : settings.lastHost();
+        String host = bridgeHost();
         if (host.length() == 0) return null;
         return new BridgeClient(host, settings.bridgePort(), settings.bridgeToken());
     }
@@ -2070,7 +2125,7 @@ public final class Engine {
     private <T> void bridgeAsync(final BridgeCall<T> call, final Callback<T> cb) {
         final BridgeClient b = bridge();
         if (b == null) {
-            cb.done(null, "Connect to your PC first — the bridge runs on the same machine as the AI.");
+            cb.done(null, "Set the PC's address first — connect to your AI, or enter the bridge address in Settings › PC bridge.");
             return;
         }
         io.execute(new Runnable() {
