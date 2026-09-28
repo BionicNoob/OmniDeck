@@ -27,10 +27,13 @@ public final class Conversation {
         this.updated = created;
     }
 
-    /** True when any message carries images (the model must support vision). */
+    /** True when any message carries images (the model must support vision), a tool's screenshot included. */
     public boolean hasImages() {
         for (ChatMessage m : messages) {
             if (!m.images.isEmpty()) return true;
+            for (ToolCall c : m.tools) {
+                if (c.image.length() > 0) return true;
+            }
         }
         return false;
     }
@@ -91,6 +94,17 @@ public final class Conversation {
      * an image was shared.
      */
     public JSONArray toRequestMessages(String systemPrompt, ChatMessage stopBefore, boolean includeImages) {
+        return toRequestMessages(systemPrompt, stopBefore, includeImages, true);
+    }
+
+    /**
+     * As above. With {@code toolCalls} (the model can call tools) a reply that
+     * used PC tools goes out as the real exchange: tool calls and "tool"
+     * results. Without, it is folded into one assistant message that lists
+     * the actions, for a model whose template has no place for tool messages.
+     */
+    public JSONArray toRequestMessages(String systemPrompt, ChatMessage stopBefore, boolean includeImages,
+                                       boolean toolCalls) {
         JSONArray arr = new JSONArray();
         try {
             if (systemPrompt != null && systemPrompt.trim().length() > 0) {
@@ -102,6 +116,11 @@ public final class Conversation {
             for (ChatMessage m : messages) {
                 if (m == stopBefore) break;
                 if (!m.sentToModel()) continue;
+                if (m.isAssistant() && !m.tools.isEmpty()) {
+                    if (toolCalls) putToolRounds(arr, m, includeImages);
+                    else arr.put(new JSONObject().put("role", ChatMessage.ASSISTANT).put("content", foldTools(m)));
+                    continue;
+                }
                 JSONObject o = new JSONObject();
                 o.put("role", m.role);
                 if (m.images.isEmpty()) {
@@ -123,6 +142,76 @@ public final class Conversation {
         return arr;
     }
 
+    /**
+     * A reply that used tools, as the model saw it: per round, the assistant
+     * message with its text and "tool_calls", then one "tool" message per
+     * call (its result, and a screenshot as "images" for vision models); then
+     * the text written after the last round.
+     */
+    static void putToolRounds(JSONArray arr, ChatMessage m, boolean includeImages) throws JSONException {
+        String text = m.content;
+        int prev = 0;
+        int rounds = 0;
+        for (ToolCall c : m.tools) rounds = Math.max(rounds, c.round);
+        for (int r = 1; r <= rounds; r++) {
+            List<ToolCall> calls = new ArrayList<ToolCall>();
+            for (ToolCall c : m.tools) {
+                if (c.round == r) calls.add(c);
+            }
+            if (calls.isEmpty()) continue;
+            int at = Math.max(prev, Math.min(text.length(), calls.get(0).at));
+            JSONObject a = new JSONObject();
+            a.put("role", ChatMessage.ASSISTANT);
+            a.put("content", text.substring(prev, at).trim());
+            JSONArray tc = new JSONArray();
+            for (ToolCall c : calls) tc.put(c.toRequest());
+            a.put("tool_calls", tc);
+            arr.put(a);
+            for (ToolCall c : calls) {
+                JSONObject t = new JSONObject();
+                t.put("role", "tool");
+                String result = c.resultForModel();
+                if (c.image.length() > 0) {
+                    if (includeImages) {
+                        t.put("images", new JSONArray().put(c.image));
+                    } else {
+                        result = result + "\n\n[The tool returned an image. The current model can't see images, "
+                                + "so it wasn't sent.]";
+                    }
+                }
+                t.put("content", result);
+                t.put("tool_name", c.name);
+                if (c.id.length() > 0) t.put("tool_call_id", c.id);
+                arr.put(t);
+            }
+            prev = at;
+        }
+        String rest = text.substring(Math.min(prev, text.length())).trim();
+        if (rest.length() > 0) {
+            JSONObject a = new JSONObject();
+            a.put("role", ChatMessage.ASSISTANT);
+            a.put("content", rest);
+            arr.put(a);
+        }
+    }
+
+    /** A reply that used tools as plain text: "[PC actions: Set volume → 40% (done: …)]" then the reply. */
+    static String foldTools(ChatMessage m) {
+        StringBuilder sb = new StringBuilder("[PC actions: ");
+        for (int i = 0; i < m.tools.size(); i++) {
+            ToolCall c = m.tools.get(i);
+            if (i > 0) sb.append("; ");
+            sb.append(c.label.length() > 0 ? c.label : c.name).append(" (").append(c.state);
+            if (ToolCall.DONE.equals(c.state) || ToolCall.FAILED.equals(c.state)) {
+                sb.append(": ").append(Fmt.ellipsize(c.resultForModel(), 300));
+            }
+            sb.append(')');
+        }
+        sb.append(']');
+        String text = m.content.trim();
+        return text.length() > 0 ? sb + "\n\n" + text : sb.toString();
+    }
+
     /** Rough context cost of one image for vision models (LLaVA-style: 576 patches). */
     public static final int IMAGE_TOKENS = 576;
 
@@ -140,6 +229,12 @@ public final class Conversation {
             chars += m.content.length();
             tokens += 4;
             if (includeImages) tokens += (long) IMAGE_TOKENS * m.images.size();
+            for (ToolCall c : m.tools) {
+                // The call (name + arguments) and its result message.
+                chars += c.name.length() + c.args.toString().length() + c.resultForModel().length();
+                tokens += 8;
+                if (includeImages && c.image.length() > 0) tokens += IMAGE_TOKENS;
+            }
         }
         return (int) Math.min(Integer.MAX_VALUE, tokens + (chars + 3) / 4);
     }
@@ -190,7 +285,13 @@ public final class Conversation {
         for (ChatMessage m : messages) {
             if (m.isNotice()) continue;
             String who = m.isUser() ? "You" : m.isSystem() ? "Context" : (m.model.length() > 0 ? m.model : "AI");
-            sb.append("**").append(who).append(":**\n\n").append(m.content.trim()).append("\n\n");
+            sb.append("**").append(who).append(":**\n\n");
+            for (ToolCall c : m.tools) {
+                sb.append("> PC action: ").append(c.label.length() > 0 ? c.label : c.name).append(" (")
+                        .append(c.state).append(")\n");
+            }
+            if (!m.tools.isEmpty()) sb.append('\n');
+            sb.append(m.content.trim()).append("\n\n");
         }
         return sb.toString().trim() + "\n";
     }

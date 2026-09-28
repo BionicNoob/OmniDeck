@@ -40,6 +40,8 @@ public final class ChatMessage {
     public List<String> images = new ArrayList<String>();
     /** Time to first token in ms (assistant replies), -1 if unknown. */
     public long ttftMs = -1;
+    /** PC tools the AI called while writing this reply, in order (see {@link ToolCall}). */
+    public List<ToolCall> tools = new ArrayList<ToolCall>();
 
     // Live state while a reply streams in (not persisted).
     public transient boolean streaming;
@@ -85,8 +87,22 @@ public final class ChatMessage {
     /** Whether this entry belongs in the model's context. */
     public boolean sentToModel() {
         if (isNotice()) return false;
-        if (isAssistant() && content.trim().length() == 0) return false;
+        if (isAssistant() && content.trim().length() == 0 && tools.isEmpty()) return false;
         return true;
+    }
+
+    /**
+     * The state of the tool work in progress: {@link ToolCall#ASKING} while a
+     * call waits for the user, {@link ToolCall#RUNNING} while one runs (or
+     * waits its turn), else null.
+     */
+    public String activeToolState() {
+        String s = null;
+        for (ToolCall c : tools) {
+            if (ToolCall.ASKING.equals(c.state)) return ToolCall.ASKING;
+            if (!c.isFinal()) s = ToolCall.RUNNING;
+        }
+        return s;
     }
 
     public JSONObject toJson() throws JSONException {
@@ -109,6 +125,11 @@ public final class ChatMessage {
             o.put("images", a);
         }
         if (ttftMs >= 0) o.put("ttft", ttftMs);
+        if (!tools.isEmpty()) {
+            JSONArray t = new JSONArray();
+            for (ToolCall c : tools) t.put(c.toJson());
+            o.put("tools", t);
+        }
         return o;
     }
 
@@ -133,6 +154,13 @@ public final class ChatMessage {
             }
         }
         m.ttftMs = o.optLong("ttft", -1);
+        JSONArray t = o.optJSONArray("tools");
+        if (t != null) {
+            for (int i = 0; i < t.length(); i++) {
+                JSONObject c = t.optJSONObject(i);
+                if (c != null && OllamaClient.str(c, "name").length() > 0) m.tools.add(ToolCall.fromJson(c));
+            }
+        }
         return m;
     }
 }

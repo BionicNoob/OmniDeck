@@ -59,11 +59,17 @@ public class OllamaClientTest {
         final AtomicBoolean cancelled = new AtomicBoolean();
         final CountDownLatch firstToken = new CountDownLatch(1);
         final CountDownLatch finished = new CountDownLatch(1);
+        final List<ToolCall> toolCalls = Collections.synchronizedList(new ArrayList<ToolCall>());
         int endCalls;
 
         @Override
         public void onThinking(String delta) {
             thinking.append(delta);
+        }
+
+        @Override
+        public void onToolCalls(List<ToolCall> calls) {
+            toolCalls.addAll(calls);
         }
 
         @Override
@@ -359,6 +365,91 @@ public class OllamaClientTest {
             }
         });
         assertTrue(err.get(), err.get().contains("file does not exist"));
+    }
+
+    @Test
+    public void toolsGoOutOnlyWhenThereAreSome() throws Exception {
+        JSONArray tools = ToolKit.toolsArray(Collections.singletonList(BridgeTool.parse("set_volume")), false);
+        assertEquals(1, OllamaClient.chatBody("m", new JSONArray(), null, -1, null, tools).getJSONArray("tools")
+                .length());
+        assertFalse(OllamaClient.chatBody("m", new JSONArray(), null, -1, null, null).has("tools"));
+        assertFalse(OllamaClient.chatBody("m", new JSONArray(), null, -1, null, new JSONArray()).has("tools"));
+        assertFalse(OllamaClient.chatBody("m", new JSONArray(), null, -1, null).has("tools"));
+    }
+
+    @Test
+    public void toolCallsArriveInAStreamedChunk() throws Exception {
+        JSONArray tools = ToolKit.toolsArray(Collections.singletonList(BridgeTool.parse("set_volume")), true);
+        mock.script = new MockOllama.ToolScript().on("volume", "set_volume", new JSONObject().put("level", 40));
+        Recorder r = new Recorder();
+        client.chat(OllamaClient.chatBody("llama3.2:3b", userOnly("Set the volume to 40"), null, -1, null, tools),
+                new Cancellable(), r);
+        assertNull(r.error.get());
+        assertEquals(1, r.endCalls);
+        assertNotNull("the reply still ends normally", r.stats.get());
+        assertEquals(1, r.toolCalls.size());
+        assertEquals("set_volume", r.toolCalls.get(0).name);
+        assertEquals(40, r.toolCalls.get(0).args.getInt("level"));
+        assertEquals(Arrays.asList("set_volume", "open_app"), mock.lastToolNames());
+
+        // The results come back: the model answers with them.
+        JSONArray msgs = userOnly("Set the volume to 40");
+        msgs.put(new JSONObject().put("role", "assistant").put("content", "")
+                .put("tool_calls", new JSONArray().put(r.toolCalls.get(0).toRequest())));
+        msgs.put(new JSONObject().put("role", "tool").put("content", "Volume set to 40%").put("tool_name", "set_volume"));
+        Recorder r2 = new Recorder();
+        client.chat(OllamaClient.chatBody("llama3.2:3b", msgs, null, -1, null, tools), new Cancellable(), r2);
+        assertTrue(r2.toolCalls.isEmpty());
+        assertEquals("Done: Volume set to 40%.", r2.content.toString());
+    }
+
+    @Test
+    public void toolCallsArriveWithTheFinalLine() throws Exception {
+        mock.script = new MockOllama.Script() {
+            @Override
+            public MockOllama.Turn next(JSONObject request) {
+                return new MockOllama.Turn().say("Checking. ").call("call_1", "get_volume", null).inFinalLine();
+            }
+        };
+        Recorder r = new Recorder();
+        client.chat(OllamaClient.chatBody("llama3.2:3b", userOnly("volume?"), null, -1, null), new Cancellable(), r);
+        assertNull(r.error.get());
+        assertEquals("Checking. ", r.content.toString());
+        assertEquals(1, r.toolCalls.size());
+        assertEquals("call_1", r.toolCalls.get(0).id);
+        assertEquals("get_volume", r.toolCalls.get(0).name);
+        assertNotNull(r.stats.get());
+    }
+
+    @Test
+    public void toolCallsInASingleUnstreamedReply() throws Exception {
+        // Some servers answer a request with tools in one JSON object, whatever "stream" says.
+        HttpServer one = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 4);
+        one.createContext("/", new HttpHandler() {
+            @Override
+            public void handle(HttpExchange ex) throws IOException {
+                byte[] b = ("{\"model\":\"m\",\"message\":{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":"
+                        + "[{\"function\":{\"name\":\"lock_screen\",\"arguments\":{}}}]},\"done\":true,"
+                        + "\"eval_count\":7,\"eval_duration\":70000000}").getBytes("UTF-8");
+                ex.getResponseHeaders().set("Content-Type", "application/json");
+                ex.sendResponseHeaders(200, b.length);
+                OutputStream os = ex.getResponseBody();
+                os.write(b);
+                os.close();
+            }
+        });
+        one.start();
+        try {
+            OllamaClient c = new OllamaClient("127.0.0.1", one.getAddress().getPort());
+            Recorder r = new Recorder();
+            c.chat(OllamaClient.chatBody("m", userOnly("lock it"), null, -1, null), new Cancellable(), r);
+            assertNull(r.error.get());
+            assertEquals(1, r.toolCalls.size());
+            assertEquals("lock_screen", r.toolCalls.get(0).name);
+            assertEquals(7, r.stats.get().evalTokens);
+        } finally {
+            one.stop(0);
+        }
     }
 
     @Test

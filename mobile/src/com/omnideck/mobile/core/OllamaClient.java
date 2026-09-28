@@ -309,6 +309,13 @@ public final class OllamaClient {
 
         void onContent(String delta);
 
+        /**
+         * The model asked to call tools ("message": {"tool_calls": […]}). May
+         * come in any chunk, including the final one, and more than once;
+         * always before onDone.
+         */
+        void onToolCalls(List<ToolCall> calls);
+
         void onDone(ChatStats stats);
 
         /** Called once when the reply fails or is cancelled (never after onDone). */
@@ -322,6 +329,12 @@ public final class OllamaClient {
      */
     public static JSONObject chatBody(String model, JSONArray messages, Object think, Object keepAlive,
                                       JSONObject options) {
+        return chatBody(model, messages, think, keepAlive, options, null);
+    }
+
+    /** As above, offering the model {@code tools} (a "tools" array; null or empty = none). */
+    public static JSONObject chatBody(String model, JSONArray messages, Object think, Object keepAlive,
+                                      JSONObject options, JSONArray tools) {
         JSONObject b = new JSONObject();
         try {
             b.put("model", model);
@@ -330,6 +343,7 @@ public final class OllamaClient {
             if (keepAlive != null) b.put("keep_alive", keepAlive);
             if (think != null) b.put("think", think);
             if (options != null && options.length() > 0) b.put("options", options);
+            if (tools != null && tools.length() > 0) b.put("tools", tools);
         } catch (JSONException e) {
             throw new IllegalArgumentException(e);
         }
@@ -392,6 +406,9 @@ public final class OllamaClient {
                     if (th.length() > 0) l.onThinking(th);
                     String ct = str(msg, "content");
                     if (ct.length() > 0) splitter.feed(ct, sink);
+                    // Streamed (done: false) or with the final line, as older servers send them.
+                    List<ToolCall> calls = ToolCall.parseAll(msg.optJSONArray("tool_calls"));
+                    if (!calls.isEmpty()) l.onToolCalls(calls);
                 }
                 if (o.optBoolean("done", false)) {
                     splitter.flush(sink);

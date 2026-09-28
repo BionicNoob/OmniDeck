@@ -86,6 +86,121 @@ public final class MockOllama {
         List<String> reply(JSONObject request, String lastUserText);
     }
 
+    /** One scripted model response for tool-calling tests: text tokens and/or tool calls. */
+    public static final class Turn {
+        public final List<String> tokens = new ArrayList<String>();
+        public final JSONArray toolCalls = new JSONArray();
+        /** Send the tool calls with the final ("done": true) line, as older Ollama versions did. */
+        public boolean callsInFinalLine;
+
+        public static Turn text(String s) {
+            Turn t = new Turn();
+            t.tokens.addAll(words(s));
+            return t;
+        }
+
+        /** Adds some text before the calls. */
+        public Turn say(String s) {
+            tokens.addAll(words(s));
+            return this;
+        }
+
+        /** Asks for a tool call ({"function": {"name", "arguments"}}, like Ollama). */
+        public Turn call(String name, JSONObject args) {
+            return call(null, name, args);
+        }
+
+        /** Asks for a tool call with a call id (newer Ollama versions send one). */
+        public Turn call(String id, String name, JSONObject args) {
+            try {
+                JSONObject fn = new JSONObject().put("name", name).put("arguments", args == null ? new JSONObject() : args);
+                JSONObject c = new JSONObject();
+                if (id != null) c.put("id", id);
+                toolCalls.put(c.put("function", fn));
+            } catch (JSONException e) {
+                throw new IllegalStateException(e);
+            }
+            return this;
+        }
+
+        public Turn inFinalLine() {
+            callsInFinalLine = true;
+            return this;
+        }
+    }
+
+    /** Scripts the model's side of a tool-calling exchange (takes precedence over {@link #replier}). */
+    public interface Script {
+        Turn next(JSONObject request);
+    }
+
+    /**
+     * A model that acts on the PC: when the last user message contains a
+     * trigger and the request offers that tool, it calls the tool; once tool
+     * results come back it answers with them ("Done: …"). Without a matching
+     * tool it answers in plain text.
+     */
+    public static final class ToolScript implements Script {
+        private final List<Object[]> rules = Collections.synchronizedList(new ArrayList<Object[]>());
+
+        /** When the user's message contains {@code trigger} (any case), call {@code tool} with {@code args}. */
+        public ToolScript on(String trigger, String tool, JSONObject args) {
+            rules.add(new Object[]{trigger.toLowerCase(java.util.Locale.US), tool, args});
+            return this;
+        }
+
+        @Override
+        public Turn next(JSONObject req) {
+            JSONArray msgs = req.optJSONArray("messages");
+            int n = msgs == null ? 0 : msgs.length();
+            JSONObject last = n > 0 ? msgs.optJSONObject(n - 1) : null;
+            if (last != null && "tool".equals(last.optString("role"))) {
+                List<String> results = new ArrayList<String>();
+                boolean sawImage = false;
+                for (int i = n - 1; i >= 0; i--) {
+                    JSONObject m = msgs.optJSONObject(i);
+                    if (m == null || !"tool".equals(m.optString("role"))) break;
+                    results.add(0, m.optString("content"));
+                    sawImage |= m.optJSONArray("images") != null && m.optJSONArray("images").length() > 0;
+                }
+                StringBuilder sb = new StringBuilder();
+                for (String r : results) {
+                    if (sb.length() > 0) sb.append("; ");
+                    sb.append(r);
+                }
+                return Turn.text((sawImage ? "I can see your screen. " : "") + "Done: " + sb + ".");
+            }
+            String user = "";
+            for (int i = n - 1; i >= 0; i--) {
+                JSONObject m = msgs.optJSONObject(i);
+                if (m != null && "user".equals(m.optString("role"))) {
+                    user = m.optString("content");
+                    break;
+                }
+            }
+            JSONArray tools = req.optJSONArray("tools");
+            String lower = user.toLowerCase(java.util.Locale.US);
+            synchronized (rules) {
+                for (Object[] r : rules) {
+                    if (lower.contains((String) r[0]) && offers(tools, (String) r[1])) {
+                        return new Turn().call((String) r[1], (JSONObject) r[2]);
+                    }
+                }
+            }
+            return Turn.text("I can't do that from here. You said: " + user);
+        }
+
+        static boolean offers(JSONArray tools, String name) {
+            if (tools == null) return false;
+            for (int i = 0; i < tools.length(); i++) {
+                JSONObject t = tools.optJSONObject(i);
+                JSONObject fn = t == null ? null : t.optJSONObject("function");
+                if (fn != null && name.equals(fn.optString("name"))) return true;
+            }
+            return false;
+        }
+    }
+
     private final HttpServer server;
     private final Map<String, Model> models = new LinkedHashMap<String, Model>();
     private final Set<String> loaded = Collections.synchronizedSet(new LinkedHashSet<String>());
@@ -97,6 +212,10 @@ public final class MockOllama {
     public volatile String midStreamError = null;
     public volatile List<String> rawContentChunks = null;
     public volatile Replier replier = null;
+    /** Tool-calling script (takes precedence over the replier). */
+    public volatile Script script = null;
+    /** The "tools" array of every chat request with messages, in order (null where a request had none). */
+    public final List<JSONArray> toolsSeen = Collections.synchronizedList(new ArrayList<JSONArray>());
     public volatile String version = "0.12.6";
     /** Delay between /api/pull progress lines (negative = use tokenDelayMs). */
     public volatile long pullDelayMs = -1;
@@ -167,6 +286,25 @@ public final class MockOllama {
         synchronized (chatRequests) {
             return chatRequests.isEmpty() ? null : chatRequests.get(chatRequests.size() - 1);
         }
+    }
+
+    /** The "tools" array of the last chat request with messages (null when it had none). */
+    public JSONArray lastTools() {
+        synchronized (toolsSeen) {
+            return toolsSeen.isEmpty() ? null : toolsSeen.get(toolsSeen.size() - 1);
+        }
+    }
+
+    /** Names of the tools the last chat request offered, in order (empty when none). */
+    public List<String> lastToolNames() {
+        List<String> out = new ArrayList<String>();
+        JSONArray t = lastTools();
+        if (t == null) return out;
+        for (int i = 0; i < t.length(); i++) {
+            JSONObject fn = t.optJSONObject(i) == null ? null : t.optJSONObject(i).optJSONObject("function");
+            if (fn != null) out.add(fn.optString("name"));
+        }
+        return out;
     }
 
     private void route(HttpExchange ex) throws IOException, JSONException {
@@ -338,6 +476,7 @@ public final class MockOllama {
         }
         boolean wasLoaded = loaded.contains(m.name);
         loaded.add(m.name);
+        toolsSeen.add(req.optJSONArray("tools"));
         String lastUser = "";
         for (int i = msgs.length() - 1; i >= 0; i--) {
             JSONObject o = msgs.optJSONObject(i);
@@ -347,7 +486,18 @@ public final class MockOllama {
             }
         }
         boolean stream = req.optBoolean("stream", true);
-        List<String> tokens = replier != null ? replier.reply(req, lastUser) : defaultReply(lastUser);
+        List<String> tokens;
+        JSONArray calls = null;
+        boolean callsInFinal = false;
+        Script s = script;
+        if (s != null) {
+            Turn turn = s.next(req);
+            tokens = turn.tokens;
+            if (turn.toolCalls.length() > 0) calls = turn.toolCalls;
+            callsInFinal = turn.callsInFinalLine;
+        } else {
+            tokens = replier != null ? replier.reply(req, lastUser) : defaultReply(lastUser);
+        }
         boolean think = m.thinking && !(req.has("think") && Boolean.FALSE.equals(req.opt("think")));
         List<String> thinkTokens = think ? words("Let me think about \"" + lastUser + "\" carefully.")
                 : Collections.<String>emptyList();
@@ -356,6 +506,7 @@ public final class MockOllama {
             StringBuilder all = new StringBuilder();
             for (String t : tokens) all.append(t);
             JSONObject msg = new JSONObject().put("role", "assistant").put("content", all.toString());
+            if (calls != null) msg.put("tool_calls", calls);
             JSONObject fin = finalLine(m, tokens.size(), wasLoaded).put("message", msg);
             sendJson(ex, 200, fin.toString());
             return;
@@ -385,8 +536,17 @@ public final class MockOllama {
                 sleep(tokenDelayMs);
                 i++;
             }
-            JSONObject fin = finalLine(m, chunks.size(), wasLoaded)
-                    .put("message", new JSONObject().put("role", "assistant").put("content", ""));
+            if (calls != null && !callsInFinal) {
+                // Like Ollama: the whole call arrives in one chunk, before the final line.
+                writeLine(os, new JSONObject().put("model", m.name).put("created_at", now())
+                        .put("message", new JSONObject().put("role", "assistant").put("content", "")
+                                .put("tool_calls", calls))
+                        .put("done", false));
+                sleep(tokenDelayMs);
+            }
+            JSONObject last = new JSONObject().put("role", "assistant").put("content", "");
+            if (calls != null && callsInFinal) last.put("tool_calls", calls);
+            JSONObject fin = finalLine(m, chunks.size(), wasLoaded).put("message", last);
             writeLine(os, fin);
         } catch (IOException e) {
             clientDisconnects.incrementAndGet();

@@ -89,6 +89,8 @@ public final class Commands {
         l.add(new Cmd("/lock", "/lock", "Lock the PC's screen.", GROUP_PC, "/lockpc"));
         l.add(new Cmd("/pair", "/pair", "Pair with the PC bridge (LaunchBridge).", GROUP_PC));
         l.add(new Cmd("/desk", "/desk", "PC bridge / desktop control status.", GROUP_PC));
+        l.add(new Cmd("/tools", "/tools [on|off]", "Let OMNI act on the PC: status and the tools it can use.",
+                GROUP_PC, "/aitools"));
         // App
         l.add(new Cmd("/server", "/server <ip[:port] | auto>", "Show or set the AI's address.", GROUP_APP,
                 "/host"));
