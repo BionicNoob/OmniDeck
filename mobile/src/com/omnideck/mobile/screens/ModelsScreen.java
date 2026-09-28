@@ -373,7 +373,8 @@ public final class ModelsScreen extends Screen {
         TextView lab = ui.label(label);
         top.addView(lab, Ui.weight(1));
         TextView tag = ui.text("", 9.5f, t.dim, t.mono);
-        tag.setPadding(ui.dp(4), 0, ui.dp(2), 0);
+        // Cyber's wide caps need every dp of the label's room on a 360dp phone.
+        tag.setPadding(ui.dp(t.hud ? 4 : 8), 0, ui.dp(2), 0);
         top.addView(tag);
         ImageView chev = new ImageView(a);
         chev.setImageDrawable(new IconDrawable(IconDrawable.CHEVRON, t.faint, 0, ui.dp(14)));
@@ -534,9 +535,8 @@ public final class ModelsScreen extends Screen {
         body.addView(sl, Ui.fillW());
         suggestFlow = new ModelsFlow(a, ui.dp(7), ui.dp(7));
         body.addView(suggestFlow, Ui.fillW());
-        SpannableStringBuilder hint = new SpannableStringBuilder("Add a tag for a specific size, like ");
-        hint.append(ui.mono("qwen3:14b")).append(". Downloads run on your PC, so you can leave this screen.");
-        TextView hintView = ui.dim(hint, 12.5f);
+        TextView hintView = ui.dim(kit.withIdents("Add a tag for a specific size, like qwen3:14b. Downloads run on "
+                + "your PC, so you can leave this screen.", "qwen3:14b"), 12.5f);
         hintView.setPadding(0, ui.dp(14), 0, 0);
         body.addView(hintView, Ui.fillW());
         card.addView(body, Ui.fillW());
@@ -1120,12 +1120,9 @@ public final class ModelsScreen extends Screen {
         emptyAction.removeAllViews();
         if ("none".equals(key)) {
             emptyTitle.setText(t.hud ? "NO MODELS INSTALLED" : "No models installed");
-            SpannableStringBuilder body = new SpannableStringBuilder("Your AI needs at least one model to think "
-                    + "with. ");
-            body.append(ui.mono("llama3.2")).append(" is a quick 2 GB all-rounder; ").append(ui.mono("qwen3"))
-                    .append(" reasons step by step; ").append(ui.mono("llava")).append(" can see images. Pull one "
-                    + "below.");
-            emptyBody.setText(body);
+            emptyBody.setText(kit.withIdents("Your AI needs at least one model to think with. llama3.2 is a quick "
+                    + "2 GB all-rounder; qwen3 reasons step by step; llava can see images. Pull one below.",
+                    "llama3.2", "qwen3", "llava"));
             TextView b = ui.button("Pull llama3.2", IconDrawable.DOWNLOAD, Ui.PRIMARY, true,
                     new View.OnClickListener() {
                         @Override
@@ -1322,7 +1319,7 @@ public final class ModelsScreen extends Screen {
             } else {
                 // The plain-language reason first; Ollama's own words below it, for the curious.
                 String reason = ps.reason != null ? ps.reason : ReplyError.plain(why.message);
-                status(reason, true, t.ink);
+                status(kit.withIdents(reason, ps.name, "ollama.com/library"), true, t.ink);
                 tRaw.setText(ps.error);
                 tRaw.setVisibility(ps.error.length() > 0 && !ps.error.equals(reason) ? View.VISIBLE : View.GONE);
             }
@@ -1414,7 +1411,7 @@ public final class ModelsScreen extends Screen {
     }
 
     /** The transfer card's status line: telemetry in mono, sentences in the reading face. */
-    private void status(String s, boolean prose, int color) {
+    private void status(CharSequence s, boolean prose, int color) {
         tStatus.setText(s);
         tStatus.setTypeface(prose ? t.body : t.mono);
         tStatus.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, prose ? 13 : 12);

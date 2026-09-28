@@ -74,6 +74,33 @@ public final class ModelsKit {
         return sb;
     }
 
+    /**
+     * {@code text} with every occurrence of each identifier (model tags,
+     * addresses) set as a {@link Ui#mono} span, in its own case — for
+     * sentences like "There's no model called qwen9 in the Ollama library".
+     */
+    public CharSequence withIdents(String text, String... idents) {
+        SpannableStringBuilder sb = new SpannableStringBuilder();
+        int from = 0;
+        while (true) {
+            int best = -1;
+            String hit = null;
+            for (String id : idents) {
+                if (id == null || id.length() == 0) continue;
+                int at = text.indexOf(id, from);
+                if (at >= 0 && (best < 0 || at < best || (at == best && id.length() > hit.length()))) {
+                    best = at;
+                    hit = id;
+                }
+            }
+            if (hit == null) break;
+            sb.append(text, from, best).append(ui.mono(hit));
+            from = best + hit.length();
+        }
+        sb.append(text, from, text.length());
+        return sb;
+    }
+
     /** {@code before}, the model name as an identifier, then {@code after}: "Delete " llava:7b "?". */
     public CharSequence withName(String before, String name, String after) {
         SpannableStringBuilder sb = new SpannableStringBuilder(before == null ? "" : before);
