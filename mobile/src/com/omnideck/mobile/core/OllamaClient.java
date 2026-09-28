@@ -383,6 +383,26 @@ public final class OllamaClient {
         return (System.nanoTime() - t0) / 1000000L;
     }
 
+    /**
+     * Loads or unloads an embedding-only model (they refuse /api/chat): an
+     * /api/embed call with no input and a keep_alive. Returns elapsed ms.
+     */
+    public long loadEmbedModel(String model, Object keepAlive) throws IOException {
+        JSONObject b = new JSONObject();
+        try {
+            b.put("model", model);
+            b.put("input", new JSONArray());
+            b.put("keep_alive", keepAlive);
+        } catch (JSONException e) {
+            throw new IOException(e.getMessage());
+        }
+        long t0 = System.nanoTime();
+        Http.Response r = Http.postJson(base + "/api/embed", b.toString(), CONNECT_TIMEOUT_MS, LOAD_READ_TIMEOUT_MS,
+                null);
+        if (!r.ok()) throw new IOException(errorMessage(r.body, r.code));
+        return (System.nanoTime() - t0) / 1000000L;
+    }
+
     // ------------------------------------------------------------------
     // Pull
     // ------------------------------------------------------------------

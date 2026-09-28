@@ -990,11 +990,7 @@ public final class ModelsScreen extends Screen {
      * point "qwen3" at an older "qwen3:8b" before the new model is listed.)
      */
     private String exactInstalled(String ref) {
-        String n = ref.trim();
-        for (ModelInfo m : e.models()) {
-            if (m.name.equalsIgnoreCase(n) || m.name.equalsIgnoreCase(n + ":latest")) return m.name;
-        }
-        return null;
+        return e.resolveExact(ref);
     }
 
     private void bindSummary(List<ModelInfo> all, String cur, String deep) {
@@ -1496,26 +1492,10 @@ public final class ModelsScreen extends Screen {
         ModelsOps.setLoaded(e, name, unload, new ModelsOps.Done() {
             @Override
             public void done(long ms, String error) {
-                if (error != null) {
-                    busy.remove(name);
-                    render();
-                    ui.toast((unload ? "Couldn't unload " : "Couldn't load ") + name + ": " + error);
-                    e.log("error", (unload ? "Unload failed · " : "Load failed · ") + name);
-                    return;
-                }
-                if (unload) {
-                    e.log("info", "Model offline · " + name + " (memory released)");
-                } else {
-                    e.telemetry.lastLoadMs = ms;
-                    e.log("ok", "Model online · " + name + " (" + Fmt.seconds(ms) + ")");
-                }
-                e.refreshModels(new Runnable() {
-                    @Override
-                    public void run() {
-                        busy.remove(name);
-                        render();
-                    }
-                });
+                // Engine.setLoaded already logged it and refreshed the model list.
+                busy.remove(name);
+                render();
+                if (error != null) ui.toast((unload ? "Couldn't unload " : "Couldn't load ") + name + ": " + error);
             }
         });
     }

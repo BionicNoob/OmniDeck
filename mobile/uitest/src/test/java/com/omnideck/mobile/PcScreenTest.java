@@ -62,9 +62,12 @@ public class PcScreenTest extends Harness {
         bridge.rich = true;
     }
 
-    /** Launches on Command, waits for the AI link, then opens the PC tab. */
+    /**
+     * Launches on Models (a tab that doesn't read PC vitals, unlike Command),
+     * waits for the AI link, then opens the PC tab.
+     */
     private void openPc(String theme) {
-        launch(theme, MainActivity.TAB_COMMAND);
+        launch(theme, MainActivity.TAB_MODELS);
         waitOnline();
         tab(MainActivity.TAB_PC);
     }
@@ -320,7 +323,8 @@ public class PcScreenTest extends Harness {
         richBridge(true);
         openPc("cyber");
         waitPaired();
-        tab(MainActivity.TAB_COMMAND);
+        // Models doesn't read vitals (Command does, while it's shown).
+        tab(MainActivity.TAB_MODELS);
         advance(200);
         int before = systemInfoCalls();
         for (int i = 0; i < 20; i++) advance(1000);

@@ -293,17 +293,58 @@ public final class Engine {
         return pullCancel != null;
     }
 
-    /** The model replies go to: the saved choice if installed, else a loaded one, else the first. */
+    /**
+     * The model replies go to: the saved choice if installed, else a loaded
+     * chat model, else the first chat model. Embedding-only models are never
+     * picked. When nothing was ever chosen, the pick is saved so the active
+     * model doesn't jump around as other models load and unload.
+     */
     public String currentModel() {
         String m = settings.model();
         if (models.isEmpty()) return m;
         String installed = resolveInstalled(m);
         if (installed != null) return installed;
+        String pick = null;
         for (String r : running.keySet()) {
             String i = resolveInstalled(r);
-            if (i != null) return i;
+            if (i != null && !isEmbeddingOnly(i)) {
+                pick = i;
+                break;
+            }
         }
-        return models.get(0).name;
+        if (pick == null) {
+            for (ModelInfo mi : models) {
+                if (!isEmbeddingOnly(mi.name)) {
+                    pick = mi.name;
+                    break;
+                }
+            }
+        }
+        if (pick == null) pick = models.get(0).name;
+        if (m.length() == 0) settings.setModel(pick);
+        return pick;
+    }
+
+    /**
+     * True for models that can only embed (no chat), e.g. nomic-embed-text:
+     * from /api/show capabilities when known, else by name.
+     */
+    public boolean isEmbeddingOnly(String model) {
+        if (model == null) return false;
+        OllamaClient.ModelDetails d = details.get(model);
+        if (d != null && !d.capabilities.isEmpty()) return d.supports("embedding") && !d.supports("completion");
+        return model.toLowerCase(Locale.US).contains("embed");
+    }
+
+    /** Exact name or name + ":latest" (no partial matches); null if not installed. */
+    public String resolveExact(String name) {
+        if (name == null) return null;
+        String n = name.trim();
+        if (n.length() == 0) return null;
+        for (ModelInfo mi : models) {
+            if (mi.name.equalsIgnoreCase(n) || mi.name.equalsIgnoreCase(n + ":latest")) return mi.name;
+        }
+        return null;
     }
 
     /** Exact name, name + ":latest", or a unique partial match; null if none. */
@@ -664,7 +705,11 @@ public final class Engine {
                 main.post(new Runnable() {
                     @Override
                     public void run() {
-                        if (c != client) return;
+                        if (c != client) {
+                            // The server changed meanwhile; still let the caller finish.
+                            if (after != null) after.run();
+                            return;
+                        }
                         if (fTags != null) {
                             models.clear();
                             models.addAll(fTags);
@@ -1427,12 +1472,14 @@ public final class Engine {
         final String model = name == null || name.trim().length() == 0 ? currentModel() : resolveOrSelf(name);
         final ChatMessage n = notice("Unloading **" + model + "**…", "info");
         final OllamaClient c = client;
+        final boolean embed = isEmbeddingOnly(model);
         io.execute(new Runnable() {
             @Override
             public void run() {
                 String err = null;
                 try {
-                    c.loadModel(model, 0, null);
+                    if (embed) c.loadEmbedModel(model, 0);
+                    else c.loadModel(model, 0, null);
                 } catch (IOException e) {
                     err = e.getMessage();
                 }
@@ -1447,6 +1494,61 @@ public final class Engine {
                             log("info", "Model offline · " + model + " (memory released)");
                         }
                         refreshModels(null);
+                    }
+                });
+            }
+        });
+    }
+
+    /**
+     * Loads ({@code load} true) or releases one specific model without
+     * switching to it and without chat notices — the model bay reports in
+     * place. Uses the same runner options chat will send, so the first reply
+     * doesn't reload it. Logs, records the load time, refreshes the model
+     * list, then calls back (value = elapsed ms) on the main thread.
+     */
+    public void setLoaded(final String model, final boolean load, final Callback<Long> cb) {
+        if (state != State.ONLINE || client == null) {
+            cb.done(null, "Not connected to your AI.");
+            return;
+        }
+        final OllamaClient c = client;
+        final boolean embed = isEmbeddingOnly(model);
+        final Object ka = load ? keepAlive() : Integer.valueOf(0);
+        final JSONObject opts = load && !embed ? runnerOptions(model) : null;
+        io.execute(new Runnable() {
+            @Override
+            public void run() {
+                String err = null;
+                long ms = 0;
+                try {
+                    ms = embed ? c.loadEmbedModel(model, ka) : c.loadModel(model, ka, opts);
+                } catch (IOException e) {
+                    err = e.getMessage() == null ? "request failed" : e.getMessage();
+                }
+                final String fErr = err;
+                final long fMs = ms;
+                main.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (fErr != null) {
+                            log("error", (load ? "Load failed · " : "Unload failed · ") + model);
+                            cb.done(null, fErr);
+                            return;
+                        }
+                        if (load) {
+                            telemetry.lastLoadMs = fMs;
+                            log("ok", "Model online · " + model + " (" + Fmt.seconds(fMs) + ")");
+                        } else {
+                            log("info", "Model offline · " + model + " (memory released)");
+                        }
+                        notifyTelemetry();
+                        refreshModels(new Runnable() {
+                            @Override
+                            public void run() {
+                                cb.done(fMs, null);
+                            }
+                        });
                     }
                 });
             }
