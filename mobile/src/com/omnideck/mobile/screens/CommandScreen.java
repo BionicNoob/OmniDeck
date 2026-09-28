@@ -225,7 +225,6 @@ public final class CommandScreen extends Screen {
         final boolean needsAi;
         final String name;
         final Spoken spoken;
-        final boolean wide;
         int iconKind;
         boolean engaged;
         boolean enabled = true;
@@ -238,7 +237,6 @@ public final class CommandScreen extends Screen {
             this.iconKind = iconKind;
             this.needsAi = needsAi;
             this.name = description;
-            this.wide = wide;
             root = ui.vbox();
             root.setContentDescription(description);
             root.setClickable(true);
@@ -317,12 +315,6 @@ public final class CommandScreen extends Screen {
         void setToggle() {
             spoken.role = "android.widget.ToggleButton";
             speak();
-        }
-
-        void setEngaged(boolean on) {
-            if (engaged == on) return;
-            engaged = on;
-            render();
         }
 
         void setEnabled(boolean on, String why) {
@@ -693,9 +685,9 @@ public final class CommandScreen extends Screen {
             b.grid(ui.dp(22), t.gridColor).bloom(t.bloomColor)
                     .brackets(ui.dp(10), ui.dp(1.2f), t.bracketColor).bracketInset(ui.dp(5));
         }
-        // In Cyber the rail stays clear of the corner brackets.
+        // In Cyber the rail starts below the top-left corner bracket.
         offlineCard.setBackground(new CommandKit.RailDrawable(b.build(), c, ui.dp(3), ui.dp(t.radius),
-                t.hud ? ui.dp(22) : 0));
+                t.hud ? ui.dp(22) : 0, 0));
         int icon = searching ? IconDrawable.SCAN : IconDrawable.WIFI;
         offlineIcon.setImageDrawable(new IconDrawable(icon, c, c, ui.dp(22)));
     }
@@ -1547,10 +1539,12 @@ public final class CommandScreen extends Screen {
         refreshReadouts();
     }
 
-    /** The headline while online: what the AI is doing, in words. */
+    /** The headline while online: what the AI is doing, in words (and whether the deep model answers). */
     private String onlineHeadline(int mode, boolean loaded) {
         ChatMessage m = e.streamingMessage();
-        boolean deep = m != null && m.model.length() > 0 && !m.model.equals(e.currentModel());
+        String deepModel = e.resolveInstalled(e.settings.deepModel());
+        boolean deep = m != null && deepModel != null && deepModel.equals(m.model)
+                && !deepModel.equals(e.currentModel());
         switch (mode) {
             case CoreView.THINKING:
                 return deep ? "Thinking · deep model" : "Thinking";

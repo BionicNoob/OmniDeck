@@ -138,14 +138,15 @@ public final class CommandKit {
         private final Paint rail = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Path clip = new Path();
         private final RectF rf = new RectF();
-        private final float width, radius, insetV;
+        private final float width, radius, insetTop, insetBottom;
 
-        /** {@code insetV}: how far the rail stays clear of the top and bottom edges. */
-        public RailDrawable(Drawable base, int color, float widthPx, float radiusPx, float insetV) {
+        /** {@code insetTop} / {@code insetBottom}: how far the rail stays clear of those edges (e.g. a corner bracket). */
+        public RailDrawable(Drawable base, int color, float widthPx, float radiusPx, float insetTop, float insetBottom) {
             this.base = base;
             this.width = widthPx;
             this.radius = radiusPx;
-            this.insetV = insetV;
+            this.insetTop = insetTop;
+            this.insetBottom = insetBottom;
             rail.setColor(color);
         }
 
@@ -168,7 +169,7 @@ public final class CommandKit {
             Rect b = getBounds();
             int save = c.save();
             c.clipPath(clip);
-            c.drawRect(b.left, b.top + insetV, b.left + width, b.bottom - insetV, rail);
+            c.drawRect(b.left, b.top + insetTop, b.left + width, b.bottom - insetBottom, rail);
             c.restoreToCount(save);
         }
 

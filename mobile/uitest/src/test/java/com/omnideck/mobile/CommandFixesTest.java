@@ -615,6 +615,31 @@ public class CommandFixesTest extends Harness {
     }
 
     // ------------------------------------------------------------------
+    // Headline (V51)
+    // ------------------------------------------------------------------
+
+    @Test
+    public void headlineSaysWhatTheAiIsDoing() throws Exception {
+        launch("dark", MainActivity.TAB_COMMAND);
+        waitOnline();
+        advance(300);
+        assertNotNull(commandText("Standing by"));
+        assertEquals("the server, not the address again", "Ollama 0.12.6", commandText("Ollama 0.12").getText().toString());
+
+        // Deep mode routes to the deep model: the headline says so while it works.
+        engine().setDeepModel("qwen3:8b");
+        engine().setMode(Settings.MODE_DEEP);
+        ollama.firstTokenDelayMs = 1500;
+        engine().send("Prove that there are infinitely many primes.");
+        waitFor("busy", () -> engine().isBusy());
+        advance(200);
+        assertEquals("qwen3:8b", engine().streamingMessage().model);
+        assertNotNull(commandText("Thinking · deep model"));
+        engine().stop();
+        waitFor("stopped", () -> !engine().isBusy());
+    }
+
+    // ------------------------------------------------------------------
     // Quick actions: the PC power strip
     // ------------------------------------------------------------------
 
