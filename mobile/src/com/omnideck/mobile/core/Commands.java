@@ -85,6 +85,8 @@ public final class Commands {
         l.add(new Cmd("/sys", "/sys", "Show the PC's CPU, RAM, disk and battery.", GROUP_PC));
         l.add(new Cmd("/shot", "/shot [save]", "Screenshot the PC into the chat.", GROUP_PC, "/screenshot"));
         l.add(new Cmd("/pcclip", "/pcclip", "Paste the PC's clipboard into the composer.", GROUP_PC));
+        l.add(new Cmd("/wol", "/wol", "Wake the sleeping PC over the network (Wake-on-LAN).", GROUP_PC, "/wakepc"));
+        l.add(new Cmd("/lock", "/lock", "Lock the PC's screen.", GROUP_PC, "/lockpc"));
         l.add(new Cmd("/pair", "/pair", "Pair with the PC bridge (LaunchBridge).", GROUP_PC));
         l.add(new Cmd("/desk", "/desk", "PC bridge / desktop control status.", GROUP_PC));
         // App

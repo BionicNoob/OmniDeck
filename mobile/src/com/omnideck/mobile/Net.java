@@ -11,6 +11,7 @@ import com.omnideck.mobile.core.Http;
 import com.omnideck.mobile.core.LanScanner;
 
 import java.io.IOException;
+import java.net.DatagramSocket;
 import java.net.HttpURLConnection;
 import java.net.Inet4Address;
 import java.net.InetAddress;
@@ -80,6 +81,22 @@ final class Net {
                 }
             }
         };
+    }
+
+    /**
+     * Pins a UDP socket (Wake-on-LAN broadcasts) to the phone's Wi-Fi /
+     * Ethernet network, so the broadcast leaves on the LAN even while Android
+     * prefers mobile data. No-op when no LAN network is known.
+     */
+    static void bindToLan(DatagramSocket socket) {
+        List<Route> r = routes;
+        if (r.isEmpty()) return;
+        try {
+            r.get(0).network.bindSocket(socket);
+        } catch (IOException ignored) {
+            // The network went away: default routing.
+        } catch (RuntimeException ignored) {
+        }
     }
 
     static Network networkFor(String host) {

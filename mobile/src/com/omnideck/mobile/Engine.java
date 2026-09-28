@@ -12,6 +12,7 @@ import android.os.Handler;
 import android.os.Looper;
 
 import com.omnideck.mobile.core.BridgeClient;
+import com.omnideck.mobile.core.BridgeTool;
 import com.omnideck.mobile.core.Cancellable;
 import com.omnideck.mobile.core.ChatMessage;
 import com.omnideck.mobile.core.ChatStats;
@@ -26,6 +27,7 @@ import com.omnideck.mobile.core.ReplyError;
 import com.omnideck.mobile.core.ServerInfo;
 import com.omnideck.mobile.core.Telemetry;
 import com.omnideck.mobile.core.Vitals;
+import com.omnideck.mobile.core.WakeOnLan;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -33,6 +35,9 @@ import org.json.JSONObject;
 
 import java.io.File;
 import java.io.IOException;
+import java.net.DatagramPacket;
+import java.net.DatagramSocket;
+import java.net.InetAddress;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Iterator;
@@ -103,6 +108,8 @@ public final class Engine {
 
     /** Tests: scan these subnets instead of the device's real ones. */
     static volatile List<LanScanner.Subnet> testSubnets;
+    /** Tests: send Wake-on-LAN packets to this UDP port instead of 9. */
+    static volatile int testWolPort;
 
     public static synchronized Engine get(Context c) {
         if (instance == null) instance = new Engine(c.getApplicationContext());
@@ -2140,23 +2147,38 @@ public final class Engine {
 
     /** Reads CPU / RAM / disk / battery from the PC (get_system_info). */
     public void bridgeVitals(final Callback<Vitals> cb) {
-        bridgeAsync(new BridgeCall<Vitals>() {
+        bridgeAsync(new BridgeCall<Object>() {
             @Override
-            public Vitals run(BridgeClient b) throws BridgeClient.BridgeException {
-                return Vitals.parse(b.deskRun("get_system_info", null));
+            public Object run(BridgeClient b) throws BridgeClient.BridgeException {
+                Object r = b.deskRun("get_system_info", null);
+                return r == null ? "" : r;
             }
-        }, new Callback<Vitals>() {
+        }, new Callback<Object>() {
             @Override
-            public void done(Vitals v, String error) {
+            public void done(Object raw, String error) {
+                Vitals v = raw == null ? null : Vitals.parse(raw);
                 if (v != null) {
                     lastVitals = v;
                     lastVitalsAt = System.currentTimeMillis();
                     bridgeOnline = Boolean.TRUE;
+                    learnMac(raw);
                     notifyTelemetry();
                 }
                 cb.done(v, error);
             }
         });
+    }
+
+    /**
+     * Remembers the PC's MAC address for Wake-on-LAN when its system info
+     * names one and none is set yet (a MAC typed by the user always wins).
+     */
+    private void learnMac(Object systemInfo) {
+        if (settings.pcMac().length() > 0) return;
+        String mac = WakeOnLan.findMac(systemInfo);
+        if (mac == null) return;
+        settings.setPcMac(mac);
+        log("ok", "Wake-on-LAN ready · learned the PC's MAC " + mac);
     }
 
     /** Searches the PC's installed apps (LaunchBridge index). */
@@ -2169,22 +2191,31 @@ public final class Engine {
         }, cb);
     }
 
-    /** Desktop tools the bridge offers. */
-    public void bridgeCapabilities(Callback<List<String>> cb) {
-        bridgeAsync(new BridgeCall<List<String>>() {
+    /** Names of the desktop tools the bridge offers. */
+    public void bridgeCapabilities(final Callback<List<String>> cb) {
+        bridgeTools(new Callback<List<BridgeTool>>() {
             @Override
-            public List<String> run(BridgeClient b) throws BridgeClient.BridgeException {
-                JSONObject caps = b.deskCapabilities();
-                List<String> out = new ArrayList<String>();
-                JSONArray tools = caps.optJSONArray("tools");
-                if (tools != null) {
-                    for (int i = 0; i < tools.length(); i++) {
-                        Object t = tools.opt(i);
-                        String name = t instanceof JSONObject ? OllamaClient.str((JSONObject) t, "name") : String.valueOf(t);
-                        if (name.length() > 0) out.add(name);
-                    }
+            public void done(List<BridgeTool> tools, String error) {
+                if (tools == null) {
+                    cb.done(null, error);
+                    return;
                 }
-                return out;
+                List<String> names = new ArrayList<String>();
+                for (BridgeTool t : tools) names.add(t.name);
+                cb.done(names, null);
+            }
+        });
+    }
+
+    /**
+     * The desktop tools the bridge offers, each with its description and
+     * arguments (types, required, choices, defaults) for building forms.
+     */
+    public void bridgeTools(Callback<List<BridgeTool>> cb) {
+        bridgeAsync(new BridgeCall<List<BridgeTool>>() {
+            @Override
+            public List<BridgeTool> run(BridgeClient b) throws BridgeClient.BridgeException {
+                return BridgeTool.parseAll(b.deskCapabilities());
             }
         }, cb);
     }
@@ -2200,8 +2231,109 @@ public final class Engine {
         }, new Callback<Object>() {
             @Override
             public void done(Object v, String error) {
-                if (error == null) log("info", "PC · " + tool);
+                if (error == null) {
+                    log("info", "PC · " + tool);
+                    if ("get_system_info".equals(tool)) learnMac(v);
+                }
                 cb.done(v, error);
+            }
+        });
+    }
+
+    /** Locks the PC's screen with the bridge's lock tool (lock_screen or similar); value = what the PC said. */
+    public void lockPc(final Callback<String> cb) {
+        bridgeAsync(new BridgeCall<String>() {
+            @Override
+            public String run(BridgeClient b) throws BridgeClient.BridgeException {
+                BridgeTool lock = BridgeTool.lockTool(BridgeTool.parseAll(b.deskCapabilities()));
+                if (lock == null) {
+                    throw new BridgeClient.BridgeException("The PC bridge has no tool to lock the screen — update "
+                            + "LaunchBridge on the PC.", 404);
+                }
+                String said = formatResult(b.deskRun(lock.name, null)).trim();
+                return said.length() > 0 ? said : "PC locked.";
+            }
+        }, new Callback<String>() {
+            @Override
+            public void done(String said, String error) {
+                if (error == null) log("ok", "PC locked");
+                cb.done(said, error);
+            }
+        });
+    }
+
+    /**
+     * Wakes the sleeping PC with a Wake-on-LAN magic packet: a UDP broadcast
+     * on port 9 to 255.255.255.255 and to each Wi-Fi subnet's broadcast
+     * address, for the MAC in Settings › PC bridge (learned automatically
+     * from the PC's system info once paired). The value is a line for the
+     * user; the PC must have Wake-on-LAN enabled.
+     */
+    public void wakePc(final Callback<String> cb) {
+        final String typed = settings.pcMac();
+        final byte[] mac = WakeOnLan.parseMac(typed);
+        if (mac == null) {
+            cb.done(null, typed.length() == 0
+                    ? "Wake-on-LAN needs the PC's MAC address — enter it in Settings › PC bridge. Once the bridge is "
+                    + "paired, the phone also picks it up from the PC's system info."
+                    : "“" + typed + "” isn't a MAC address (it looks like AA:BB:CC:DD:EE:FF).");
+            return;
+        }
+        final List<LanScanner.Subnet> nets = testSubnets != null ? testSubnets : Net.refresh(app);
+        final int port = testWolPort > 0 ? testWolPort : WakeOnLan.PORT;
+        io.execute(new Runnable() {
+            @Override
+            public void run() {
+                List<String> targets = new ArrayList<String>();
+                targets.add("255.255.255.255");
+                for (LanScanner.Subnet s : nets) {
+                    String b = WakeOnLan.broadcast(s.address, s.prefix);
+                    if (!targets.contains(b)) targets.add(b);
+                }
+                byte[] packet = WakeOnLan.packet(mac);
+                int sent = 0;
+                String err = null;
+                DatagramSocket socket = null;
+                try {
+                    socket = new DatagramSocket();
+                    socket.setBroadcast(true);
+                    Net.bindToLan(socket);
+                    for (String t : targets) {
+                        // Three copies each: a single UDP packet is easily lost on Wi-Fi.
+                        for (int i = 0; i < 3; i++) {
+                            try {
+                                socket.send(new DatagramPacket(packet, packet.length, InetAddress.getByName(t), port));
+                                sent++;
+                            } catch (IOException e) {
+                                err = e.getMessage();
+                                break;
+                            }
+                        }
+                    }
+                } catch (IOException e) {
+                    err = e.getMessage();
+                } catch (RuntimeException e) {
+                    err = String.valueOf(e);
+                } finally {
+                    if (socket != null) socket.close();
+                }
+                final int fSent = sent;
+                final String fErr = err;
+                main.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        String m = WakeOnLan.format(mac);
+                        if (fSent == 0) {
+                            log("error", "Wake-on-LAN failed · " + m);
+                            cb.done(null, "Couldn't send the wake-up packet" + (fErr != null ? ": " + fErr : "")
+                                    + ". Is the phone on the PC's Wi-Fi?");
+                            return;
+                        }
+                        log("ok", "Wake-on-LAN sent · " + m);
+                        cb.done("Wake-up packet sent to " + m + ". If Wake-on-LAN is on in the PC's BIOS and network "
+                                + "adapter, it will be up in a few seconds.", null);
+                    }
+                });
             }
         });
     }
@@ -2553,13 +2685,12 @@ public final class Engine {
                 sb.append("\nPaired: ").append(b.paired() ? "yes" : "no — run `/pair`");
                 if (b.paired()) {
                     try {
-                        JSONObject caps = b.deskCapabilities();
-                        JSONArray tools = caps.optJSONArray("tools");
-                        if (tools != null && tools.length() > 0) {
+                        List<BridgeTool> tools = BridgeTool.parseAll(b.deskCapabilities());
+                        if (!tools.isEmpty()) {
                             sb.append("\nDesktop tools: ");
-                            for (int i = 0; i < tools.length(); i++) {
+                            for (int i = 0; i < tools.size(); i++) {
                                 if (i > 0) sb.append(", ");
-                                sb.append(tools.optString(i));
+                                sb.append('`').append(tools.get(i).name).append('`');
                             }
                         }
                     } catch (BridgeClient.BridgeException e) {
@@ -2592,6 +2723,7 @@ public final class Engine {
                     notice(title + " failed: " + error, "error");
                     return;
                 }
+                if ("get_system_info".equals(tool)) learnMac(r);
                 if ("get_clipboard".equals(tool)) {
                     String text = r instanceof String ? (String) r : formatResult(r);
                     if (listener != null) listener.onInsertText(text);
