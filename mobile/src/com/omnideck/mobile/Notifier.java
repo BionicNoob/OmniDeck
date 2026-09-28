@@ -151,19 +151,27 @@ final class Notifier {
         return b;
     }
 
-    /** The app's own line icon as a status-bar glyph (only its alpha counts; the system tints it). */
+    /** The app's own line icon as a status-bar glyph. */
     private Icon smallIcon(int kind) {
         try {
-            int px = Math.max(24, Math.round(24 * app.getResources().getDisplayMetrics().density));
-            Bitmap bmp = Bitmap.createBitmap(px, px, Bitmap.Config.ARGB_8888);
-            IconDrawable d = new IconDrawable(kind, Color.WHITE, Color.WHITE, px);
-            d.stroke(2.2f);
-            d.setBounds(0, 0, px, px);
-            d.draw(new Canvas(bmp));
-            return Icon.createWithBitmap(bmp);
+            return Icon.createWithBitmap(glyph(app, kind));
         } catch (RuntimeException e) {
             return null;
         }
+    }
+
+    /**
+     * An IconDrawable glyph at status-bar size (24dp), drawn opaque on
+     * transparent: only its alpha counts, the system tints it.
+     */
+    static Bitmap glyph(Context c, int kind) {
+        int px = Math.max(24, Math.round(24 * c.getResources().getDisplayMetrics().density));
+        Bitmap bmp = Bitmap.createBitmap(px, px, Bitmap.Config.ARGB_8888);
+        IconDrawable d = new IconDrawable(kind, Color.WHITE, Color.WHITE, px);
+        d.stroke(2.2f);
+        d.setBounds(0, 0, px, px);
+        d.draw(new Canvas(bmp));
+        return bmp;
     }
 
     /** Opens (or brings back) the app on {@code tab}. */
