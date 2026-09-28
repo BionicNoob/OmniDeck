@@ -49,6 +49,7 @@ import com.omnideck.mobile.ui.MarkdownRenderer;
 import com.omnideck.mobile.ui.Panel;
 import com.omnideck.mobile.ui.Theme;
 import com.omnideck.mobile.ui.Ui;
+import com.omnideck.mobile.ui.Widgets;
 
 import java.util.ArrayList;
 import java.util.Date;
@@ -198,7 +199,7 @@ public final class CommsScreen extends Screen {
             thinkBody.setVisibility(View.GONE);
             bubble.addView(thinkBody, Ui.wrap());
 
-            dots = new Dots(a, m.isAssistant() ? t.accent : t.dim);
+            dots = new Dots(a, m.isAssistant() ? t.accent : t.dim, e.settings.reduceMotion());
             dots.setVisibility(View.GONE);
             LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(ui.dp(34), ui.dp(16));
             dlp.topMargin = ui.dp(8);
@@ -274,27 +275,29 @@ public final class CommsScreen extends Screen {
         }
     }
 
-    /** Three pulsing dots while the AI hasn't produced text yet. */
-    private static final class Dots extends View {
+    /**
+     * Three pulsing dots while the AI hasn't produced text yet. They animate
+     * only while on screen, and hold still with Reduce motion.
+     */
+    private static final class Dots extends Widgets.Animated {
         private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private ValueAnimator anim;
-        private float phase;
+        private final boolean still;
+        private float phase = 0.3f;
 
-        Dots(Context c, int color) {
+        Dots(Context c, int color, boolean still) {
             super(c);
+            this.still = still;
             p.setColor(color);
         }
 
         @Override
-        public void setVisibility(int v) {
-            super.setVisibility(v);
-            if (v == VISIBLE) start();
-            else stop();
+        protected boolean wantsLoop() {
+            return !still;
         }
 
-        private void start() {
-            if (anim != null) return;
-            anim = ValueAnimator.ofFloat(0, 1);
+        @Override
+        protected ValueAnimator makeLoop() {
+            ValueAnimator anim = ValueAnimator.ofFloat(0, 1);
             anim.setDuration(1100);
             anim.setRepeatCount(ValueAnimator.INFINITE);
             anim.addUpdateListener(new ValueAnimator.AnimatorUpdateListener() {
@@ -304,18 +307,7 @@ public final class CommsScreen extends Screen {
                     invalidate();
                 }
             });
-            anim.start();
-        }
-
-        private void stop() {
-            if (anim != null) anim.cancel();
-            anim = null;
-        }
-
-        @Override
-        protected void onDetachedFromWindow() {
-            super.onDetachedFromWindow();
-            stop();
+            return anim;
         }
 
         @Override

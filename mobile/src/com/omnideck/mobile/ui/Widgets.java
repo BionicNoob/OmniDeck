@@ -282,24 +282,25 @@ public final class Widgets {
      * Base for instruments with a looping animation: the loop only runs while
      * the view is really on screen (attached, its window visible, every
      * ancestor shown), so a hidden tab or a backgrounded app costs no frames.
+     * Subclasses call {@link #syncLoop()} whenever their own wish changes.
      */
-    abstract static class Animated extends View {
+    public abstract static class Animated extends View {
         private ValueAnimator loop;
 
-        Animated(Context c) {
+        protected Animated(Context c) {
             super(c);
         }
 
         /** Whether the loop is wanted right now (the subclass's own state). */
-        abstract boolean wantsLoop();
+        protected abstract boolean wantsLoop();
 
         /** A fresh loop animator (INFINITE repeat), not started. */
-        abstract ValueAnimator makeLoop();
+        protected abstract ValueAnimator makeLoop();
 
         /** Called when the loop stops (reset the frame to a static look). */
-        void onLoopStopped() {}
+        protected void onLoopStopped() {}
 
-        final void syncLoop() {
+        protected final void syncLoop() {
             boolean run = wantsLoop() && isAttachedToWindow() && getWindowVisibility() == VISIBLE && isShown();
             if (run && loop == null) {
                 loop = makeLoop();
@@ -376,12 +377,12 @@ public final class Widgets {
         }
 
         @Override
-        boolean wantsLoop() {
+        protected boolean wantsLoop() {
             return indeterminate;
         }
 
         @Override
-        ValueAnimator makeLoop() {
+        protected ValueAnimator makeLoop() {
             ValueAnimator anim = ValueAnimator.ofFloat(0, 1);
             anim.setDuration(1200);
             anim.setRepeatCount(ValueAnimator.INFINITE);
@@ -621,12 +622,12 @@ public final class Widgets {
         }
 
         @Override
-        boolean wantsLoop() {
+        protected boolean wantsLoop() {
             return pulsing;
         }
 
         @Override
-        ValueAnimator makeLoop() {
+        protected ValueAnimator makeLoop() {
             ValueAnimator anim = ValueAnimator.ofFloat(0, 1);
             anim.setDuration(fade ? 2600 : 1600);
             anim.setRepeatCount(ValueAnimator.INFINITE);
@@ -642,7 +643,7 @@ public final class Widgets {
         }
 
         @Override
-        void onLoopStopped() {
+        protected void onLoopStopped() {
             t = 1;
         }
 
