@@ -35,6 +35,7 @@ import com.omnideck.mobile.core.ModelInfo;
 import com.omnideck.mobile.core.OllamaClient;
 import com.omnideck.mobile.core.ServerInfo;
 import com.omnideck.mobile.core.Telemetry;
+import com.omnideck.mobile.core.ToolApproval;
 import com.omnideck.mobile.screens.CommandScreen;
 import com.omnideck.mobile.screens.CommsScreen;
 import com.omnideck.mobile.screens.ModelsScreen;
@@ -288,6 +289,9 @@ public final class MainActivity extends Activity implements Engine.Listener, The
         updateDot();
         handler.removeCallbacks(speechPoll);
         handler.post(speechPoll);
+        // A PC action still waiting for approval (the activity was recreated meanwhile): ask again.
+        ToolApproval pending = engine.pendingApproval();
+        if (pending != null && !comms().showToolApproval(pending)) pending.unavailable();
     }
 
     @Override
@@ -759,6 +763,13 @@ public final class MainActivity extends Activity implements Engine.Listener, The
     @Override
     public void onToast(String text) {
         ui.toast(text);
+    }
+
+    /** The AI wants to change something on the PC: the chat shows the approval sheet (whatever tab is open). */
+    @Override
+    public boolean onToolApproval(ToolApproval request) {
+        if (!started || isFinishing() || isDestroyed()) return false;
+        return comms().showToolApproval(request);
     }
 
     // ------------------------------------------------------------------

@@ -42,6 +42,10 @@ import com.omnideck.mobile.core.ConversationStore;
 import com.omnideck.mobile.core.Fmt;
 import com.omnideck.mobile.core.Markdown;
 import com.omnideck.mobile.core.ModelInfo;
+import com.omnideck.mobile.core.ReplyError;
+import com.omnideck.mobile.core.ToolApproval;
+import com.omnideck.mobile.core.ToolCall;
+import com.omnideck.mobile.ui.Sheet;
 import com.omnideck.mobile.ui.BubbleLayout;
 import com.omnideck.mobile.ui.ChatScrollView;
 import com.omnideck.mobile.ui.IconDrawable;
@@ -138,14 +142,21 @@ public final class CommsScreen extends Screen {
         final TextView header;
         final TextView thinkToggle;
         final TextView thinkBody;
+        /** Replies that used PC tools: the action log (null for other messages). */
+        final ToolLog toolLog;
         final Dots dots;
         final TextView body;
         final LinearLayout images;
         final TextView footer;
-        /** A failed reply: the reason in plain words, and Retry. */
+        /** A failed reply: the reason in plain words, the raw error, Retry and a fix for the kind of failure. */
         final LinearLayout retryRow;
         final TextView retryReason;
+        final TextView retryDetail;
+        final LinearLayout retryActions;
         final View retryBtn;
+        /** The fix for this kind of failure (Pull the model, pick a vision model, Settings); null when none. */
+        View fixBtn;
+        String shownFix = "";
         /** A PC screenshot: "Ask about this" attaches it to the composer. */
         final View askRow;
         String shownContent;
@@ -199,6 +210,17 @@ public final class CommsScreen extends Screen {
             thinkBody.setVisibility(View.GONE);
             bubble.addView(thinkBody, Ui.wrap());
 
+            if (m.isAssistant()) {
+                toolLog = new ToolLog(a, ui, t, e.settings.reduceMotion());
+                toolLog.setVisibility(View.GONE);
+                LinearLayout.LayoutParams glp = Ui.fillW();
+                glp.topMargin = ui.dp(8);
+                glp.bottomMargin = ui.dp(2);
+                bubble.addView(toolLog, glp);
+            } else {
+                toolLog = null;
+            }
+
             dots = new Dots(a, m.isAssistant() ? t.accent : t.dim, e.settings.reduceMotion());
             dots.setVisibility(View.GONE);
             LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(ui.dp(34), ui.dp(16));
@@ -222,13 +244,20 @@ public final class CommsScreen extends Screen {
             bubble.addView(footer, Ui.wrap());
 
             if (m.isAssistant()) {
-                // Reason above, Retry below: a weighted side-by-side row would clip the text
+                // Reason above, the buttons below: a weighted side-by-side row would clip the text
                 // inside the wrap-content bubble.
                 retryRow = ui.vbox();
                 retryRow.setVisibility(View.GONE);
                 retryReason = ui.text("", 14, t.ink, t.body);
                 retryReason.setLineSpacing(0, 1.25f);
                 retryRow.addView(retryReason, Ui.wrap());
+                retryDetail = ui.text("", 11.5f, t.dim, t.mono);
+                retryDetail.setLineSpacing(0, 1.15f);
+                retryDetail.setMaxLines(3);
+                retryDetail.setEllipsize(TextUtils.TruncateAt.END);
+                retryDetail.setPadding(0, ui.dp(5), 0, 0);
+                retryRow.addView(retryDetail, Ui.wrap());
+                retryActions = ui.hbox();
                 retryBtn = ui.button("Retry", IconDrawable.REFRESH, Ui.SECONDARY, new View.OnClickListener() {
                     @Override
                     public void onClick(View v) {
@@ -236,15 +265,18 @@ public final class CommsScreen extends Screen {
                     }
                 });
                 retryBtn.setContentDescription("Retry this reply");
+                retryActions.addView(retryBtn, Ui.wrap());
                 LinearLayout.LayoutParams blp = Ui.wrap();
                 blp.topMargin = ui.dp(10);
-                retryRow.addView(retryBtn, blp);
+                retryRow.addView(retryActions, blp);
                 LinearLayout.LayoutParams rrl = Ui.wrap();
                 rrl.topMargin = ui.dp(10);
                 bubble.addView(retryRow, rrl);
             } else {
                 retryRow = null;
                 retryReason = null;
+                retryDetail = null;
+                retryActions = null;
                 retryBtn = null;
             }
             if (m.isNotice()) {
@@ -682,7 +714,8 @@ public final class CommsScreen extends Screen {
             @Override
             public void onClick(View v) {
                 v.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
-                if (e.isBusy()) {
+                if (e.isWorking()) {
+                    // A reply (and its PC actions), or a compact / benchmark.
                     e.stop();
                 } else if (input.getText().toString().trim().length() == 0 && pendingImages.isEmpty()) {
                     voice();
@@ -827,7 +860,15 @@ public final class CommsScreen extends Screen {
         s.append(" · ").append(time);
         if (m.streaming) {
             long secs = (System.currentTimeMillis() - m.startedAt) / 1000;
-            if (m.content.length() == 0) {
+            String tools = m.activeToolState();
+            if (ToolCall.ASKING.equals(tools)) {
+                s.append(" · awaiting approval");
+            } else if (tools != null) {
+                s.append(" · acting on PC");
+            } else if (!m.tools.isEmpty() && m.content.length() == 0) {
+                // The PC's answers are in: the model is reading them.
+                s.append(" · processing results");
+            } else if (m.content.length() == 0) {
                 s.append(m.thinking.length() > 0 ? " · thinking " + secs + "s"
                         : secs >= 2 ? " · loading model " + secs + "s" : " · connecting");
             } else {
@@ -912,7 +953,19 @@ public final class CommsScreen extends Screen {
             h.thinkBody.setVisibility(View.GONE);
         }
 
-        boolean waiting = m.streaming && m.content.length() == 0 && m.thinking.length() == 0;
+        if (h.toolLog != null) {
+            if (m.tools.isEmpty()) {
+                if (h.toolLog.getVisibility() != View.GONE) h.toolLog.setVisibility(View.GONE);
+            } else {
+                h.toolLog.bind(m, e.pcName());
+                if (h.toolLog.getVisibility() != View.VISIBLE) h.toolLog.setVisibility(View.VISIBLE);
+            }
+        }
+
+        // The typing dots while the AI hasn't written anything yet (not while a PC tool runs or asks:
+        // the action log shows that).
+        boolean waiting = m.streaming && m.content.length() == 0 && m.thinking.length() == 0
+                && m.activeToolState() == null;
         if ((h.dots.getVisibility() == View.VISIBLE) != waiting) {
             h.dots.setVisibility(waiting ? View.VISIBLE : View.GONE);
         }
@@ -934,14 +987,20 @@ public final class CommsScreen extends Screen {
         }
         h.body.setVisibility(m.content.length() > 0 ? View.VISIBLE : View.GONE);
 
-        int imgCount = m.images.size() + (m.image.length() > 0 ? 1 : 0);
+        // A PC screenshot a tool returned shows in the reply, like one taken with /shot.
+        List<String> toolImages = new ArrayList<String>();
+        for (ToolCall c : m.tools) {
+            if (c.image.length() > 0) toolImages.add(c.image);
+        }
+        int imgCount = m.images.size() + (m.image.length() > 0 ? 1 : 0) + toolImages.size();
         if (imgCount != h.shownImages) {
             h.shownImages = imgCount;
             h.images.removeAllViews();
             List<String> all = new ArrayList<String>(m.images);
             if (m.image.length() > 0) all.add(m.image);
+            all.addAll(toolImages);
             for (final String b64 : all) {
-                boolean single = all.size() == 1 && m.image.length() > 0;
+                boolean single = all.size() == 1 && (m.image.length() > 0 || !toolImages.isEmpty());
                 int side = single ? ui.dp(260) : ui.dp(96);
                 Bitmap bmp = decode(b64, side * 2);
                 if (bmp == null) continue;
@@ -979,14 +1038,103 @@ public final class CommsScreen extends Screen {
         if (h.retryRow != null) {
             boolean failed = m.error && !m.streaming;
             if (failed) {
-                h.retryReason.setText(failureReason(m.stats));
+                // The footer ("stats") of a failed reply is "plain words · raw error".
+                String[] parts = splitFailure(m.stats);
+                h.retryReason.setText(parts[0]);
+                h.retryDetail.setText(parts[1]);
+                h.retryDetail.setVisibility(parts[1].length() > 0 ? View.VISIBLE : View.GONE);
                 // Retry answers the last question again, so it's offered on the latest reply only.
                 boolean latest = m == e.conversation().lastOfRole(ChatMessage.ASSISTANT)
                         && !e.isWorking();
                 h.retryBtn.setVisibility(latest ? View.VISIBLE : View.GONE);
+                bindFix(h, latest);
+                h.retryActions.setVisibility(latest ? View.VISIBLE : View.GONE);
+                // The words and the raw error show above; the footer would repeat them.
+                h.footer.setVisibility(View.GONE);
             }
             h.retryRow.setVisibility(failed ? View.VISIBLE : View.GONE);
         }
+    }
+
+    /**
+     * A failed reply's footer is "plain words · raw error" ({@code ReplyError.stats()});
+     * older chats saved only the raw error, which is explained here instead.
+     */
+    static String[] splitFailure(String stats) {
+        String s = stats == null ? "" : stats.trim();
+        int dot = s.indexOf(" · ");
+        if (dot > 0) return new String[]{s.substring(0, dot).trim(), s.substring(dot + 3).trim()};
+        String plain = failureReason(s);
+        return new String[]{plain, plain.equals(s) ? "" : s};
+    }
+
+    /** The one-tap fix for this kind of failure, next to Retry. */
+    private void bindFix(final Holder h, boolean latest) {
+        final ChatMessage m = h.m;
+        String kind = latest ? m.errorKind : "";
+        if (kind.equals(h.shownFix)) return;
+        h.shownFix = kind;
+        if (h.fixBtn != null) h.retryActions.removeView(h.fixBtn);
+        h.fixBtn = null;
+        View b = null;
+        if (ReplyError.MODEL_MISSING.equals(kind) && m.model.length() > 0) {
+            b = ui.button("/pull " + m.model, IconDrawable.DOWNLOAD, Ui.SECONDARY, true, new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    a.commander().run("/pull " + m.model);
+                }
+            });
+            b.setContentDescription("Download " + m.model + " onto the PC");
+        } else if (ReplyError.NO_VISION.equals(kind)) {
+            b = ui.button("Vision model", IconDrawable.IMAGE, Ui.SECONDARY, new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    pickVisionModel();
+                }
+            });
+            b.setContentDescription("Switch to a model that can see images");
+        } else if (ReplyError.OUT_OF_MEMORY.equals(kind) || ReplyError.UNAUTHORIZED.equals(kind)) {
+            final boolean memory = ReplyError.OUT_OF_MEMORY.equals(kind);
+            b = ui.button("Settings", IconDrawable.SETTINGS, Ui.SECONDARY, new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    a.openSettings();
+                    ui.toast(memory ? "Lower Context size in Performance, or pick a smaller model."
+                            : "Check the API key in Connection.");
+                }
+            });
+            b.setContentDescription(memory ? "Open Settings to lower the context size" : "Open Settings to check the API key");
+        }
+        if (b != null) {
+            LinearLayout.LayoutParams lp = Ui.wrap();
+            lp.leftMargin = ui.dp(8);
+            h.retryActions.addView(b, lp);
+            h.fixBtn = b;
+        }
+    }
+
+    /** Installed models known to see images; one tap switches (the retry then keeps the images). */
+    private void pickVisionModel() {
+        List<Ui.Row> rows = new ArrayList<Ui.Row>();
+        String cur = e.currentModel();
+        for (final ModelInfo mi : e.models()) {
+            if (!Boolean.TRUE.equals(e.supportsVision(mi.name))) continue;
+            rows.add(new Ui.Row(ui.mono(mi.name), (e.isLoaded(mi.name) ? "loaded · " : "") + mi.describe(),
+                    mi.name.equals(cur), new Runnable() {
+                        @Override
+                        public void run() {
+                            e.setModel(mi.name);
+                            ui.toast("Model: " + mi.name + " — tap Retry to send the image again.");
+                        }
+                    }, null).icon(IconDrawable.IMAGE));
+        }
+        if (rows.isEmpty()) {
+            // Not known yet (or none installed): the model bay shows each model's abilities.
+            ui.toast("No model that can see images is known yet — pick or download one (llava, gemma3, qwen2.5vl…).");
+            a.select(MainActivity.TAB_MODELS, true);
+            return;
+        }
+        ui.pick("Vision", "Switch to a model that can see images", rows, null, null);
     }
 
     private static Bitmap decode(String b64, int maxSide) {
@@ -1089,6 +1237,14 @@ public final class CommsScreen extends Screen {
         if (model.length() > 0) sub.append(ui.mono(model));
         else sub.append(t.label("No model"));
         sub.append(t.label(" · " + modeLabel + (e.settings.incognito() ? " · incognito" : "")));
+        if (model.length() > 0 && e.toolsReady(model)) {
+            // OMNI can act on the PC in this chat: the "engaged" ink, like switched-on modes.
+            sub.append(t.label(" · "));
+            int at = sub.length();
+            sub.append(t.label("PC tools"));
+            sub.setSpan(new android.text.style.ForegroundColorSpan(t.engagedInk), at, sub.length(),
+                    android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        }
         chatSub.setText(sub);
         if (speakingNow) {
             speakerBtn.setImageDrawable(new IconDrawable(IconDrawable.STOP_CIRCLE, t.accent, t.accent, ui.dp(20)));
@@ -1117,8 +1273,13 @@ public final class CommsScreen extends Screen {
     private void showContextWarning(double fill) {
         if (ctxWarn == null) return;
         int pct = (int) Math.round(fill * 100);
-        ctxWarnText.setText("Context " + pct + "% full — the start of this chat will soon drop out.");
-        ctxWarn.setContentDescription("Context " + pct + " percent full");
+        if (pct >= 100) {
+            ctxWarnText.setText("Context full — the start of this chat no longer reaches the model.");
+            ctxWarn.setContentDescription("Context full");
+        } else {
+            ctxWarnText.setText("Context " + pct + "% full — the start of this chat will soon drop out.");
+            ctxWarn.setContentDescription("Context " + pct + " percent full");
+        }
         ctxWarn.setVisibility(View.VISIBLE);
     }
 
@@ -1199,8 +1360,10 @@ public final class CommsScreen extends Screen {
             }
         }
         if (!m.error && !m.stopped && m == e.conversation().lastOfRole(ChatMessage.ASSISTANT)) {
-            double fill = e.telemetry.contextFill.last();
-            if (!Double.isNaN(fill) && fill >= CONTEXT_WARN) showContextWarning(fill);
+            // The Engine's estimate for this chat and model (a telemetry sample may belong to
+            // another chat, and a cached prompt makes Ollama count only its new part).
+            double fill = e.contextFill();
+            if (fill >= CONTEXT_WARN) showContextWarning(fill);
             else hideContextWarning();
         }
     }
@@ -1287,7 +1450,7 @@ public final class CommsScreen extends Screen {
 
     private void updateSendButton() {
         if (sendBtn == null) return;
-        boolean busy = e.isBusy();
+        boolean busy = e.isWorking();
         boolean has = input.getText().toString().trim().length() > 0 || !pendingImages.isEmpty();
         int kind = busy ? IconDrawable.STOP : has ? IconDrawable.SEND : IconDrawable.MIC;
         IconDrawable d = new IconDrawable(kind, t.onAccent, t.onAccent, ui.dp(22));
@@ -1724,6 +1887,132 @@ public final class CommsScreen extends Screen {
     }
 
     // ------------------------------------------------------------------
+    // PC actions: the approval sheet
+    // ------------------------------------------------------------------
+
+    private Sheet approvalSheet;
+    private ToolApproval approvalShown;
+
+    /**
+     * Asks before the AI changes something on the PC: "OMNI wants to set
+     * volume to 40% on ATLAS-PC", what exactly runs (tool id and arguments in
+     * mono, the PC), Deny / Allow, and "Allow for this chat" for tools that
+     * aren't destructive. Closing the sheet without answering denies. Returns
+     * false when it can't be shown (the activity is going away).
+     */
+    public boolean showToolApproval(final ToolApproval req) {
+        if (!req.isPending()) return true;
+        if (approvalShown == req && approvalSheet != null && approvalSheet.isShowing()) return true;
+        if (!ui.canShowDialogs()) return false;
+        if (approvalSheet != null && approvalSheet.isShowing()) approvalSheet.dismiss();
+        final Sheet s = ui.sheet(req.destructive ? "Destructive PC action" : "PC action · approval", req.sentence());
+        s.eyebrowColor(req.destructive ? t.danger : t.warn);
+
+        LinearLayout spec = ui.vbox();
+        spec.setPadding(ui.dp(12), ui.dp(6), ui.dp(12), ui.dp(10));
+        spec.setBackground(ui.rounded(t.input, t.hud ? t.edge : t.hair, 8));
+        spec.addView(specRow("Tool", req.tool), Ui.fillW());
+        if (req.detail.length() > 0 && !"none".equals(req.detail)) {
+            boolean app = com.omnideck.mobile.core.ToolKit.OPEN_APP.equals(req.tool);
+            String key = !app ? "Arguments" : req.detail.indexOf('\\') >= 0 || req.detail.indexOf('/') >= 0 ? "Path" : "App id";
+            spec.addView(specRow(key, req.detail), Ui.fillW());
+        }
+        String where = req.where.length() > 0 && !req.where.startsWith(req.pc + ":") && req.pc.length() > 0
+                ? req.pc + " · " + req.where : req.where.length() > 0 ? req.where : req.pc;
+        if (where.length() > 0) spec.addView(specRow("PC", where), Ui.fillW());
+        s.body.addView(spec, Ui.fillW());
+
+        Widgets.Toggle always = null;
+        if (req.destructive) {
+            LinearLayout warn = ui.hbox();
+            warn.setGravity(Gravity.TOP);
+            ImageView icon = new ImageView(a);
+            icon.setImageDrawable(new IconDrawable(IconDrawable.WARN, t.danger, t.danger, ui.dp(16)));
+            icon.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+            warn.addView(icon, new LinearLayout.LayoutParams(ui.dp(16), ui.dp(16)));
+            TextView tx = ui.text("This can shut down, restart, sign out or delete things on the PC, so OMNI asks "
+                    + "every time.", 13.5f, t.danger, t.body);
+            tx.setLineSpacing(0, 1.25f);
+            tx.setPadding(ui.dp(10), 0, 0, 0);
+            warn.addView(tx, Ui.weight(1));
+            LinearLayout.LayoutParams wl = Ui.fillW();
+            wl.topMargin = ui.dp(14);
+            s.body.addView(warn, wl);
+        } else {
+            always = ui.toggle(false, null);
+            always.setContentDescription("Allow for this chat");
+            String generic = com.omnideck.mobile.core.ToolKit.label(null, req.tool, null);
+            LinearLayout row = ui.settingRow("Allow for this chat", "Don't ask again for “" + generic
+                    + "” in this conversation.", always);
+            LinearLayout.LayoutParams rl = Ui.fillW();
+            rl.topMargin = ui.dp(4);
+            s.body.addView(row, rl);
+        }
+
+        final Widgets.Toggle forChat = always;
+        s.negative("Deny", new Runnable() {
+            @Override
+            public void run() {
+                req.deny();
+            }
+        });
+        s.positive("Allow", req.destructive ? Ui.DANGER : Ui.PRIMARY, new Runnable() {
+            @Override
+            public void run() {
+                if (forChat != null && forChat.isChecked()) req.allowForChat();
+                else req.allow();
+            }
+        });
+        s.onDismiss(new Runnable() {
+            @Override
+            public void run() {
+                if (approvalSheet == s) {
+                    approvalSheet = null;
+                    approvalShown = null;
+                }
+                // Closed without an answer (back, a tap outside) means no — unless the activity itself
+                // is going away: the recreated one asks again.
+                if (req.isPending() && !a.isFinishing() && !a.isDestroyed()) req.deny();
+            }
+        });
+        req.setOnSettled(new Runnable() {
+            @Override
+            public void run() {
+                s.dismiss();
+            }
+        });
+        approvalSheet = s;
+        approvalShown = req;
+        s.show();
+        ui.tick(a.getWindow().getDecorView());
+        // A spoken conversation: the question is spoken too.
+        ChatMessage reply = e.streamingMessage();
+        if (reply != null && reply.id.equals(voiceReplyId)) e.speakNow(req.sentence() + ". Allow?");
+        return true;
+    }
+
+    /** One line of the approval sheet's spec block: micro-caps key, mono value. */
+    private View specRow(String key, String value) {
+        LinearLayout r = ui.hbox();
+        r.setGravity(Gravity.TOP);
+        r.setPadding(0, ui.dp(5), 0, 0);
+        TextView k = ui.label(key);
+        k.setPadding(0, ui.dp(2), ui.dp(8), 0);
+        r.addView(k, new LinearLayout.LayoutParams(ui.dp(82), ViewGroup.LayoutParams.WRAP_CONTENT));
+        TextView v = ui.text(value, 13, t.ink, t.mono);
+        v.setLineSpacing(0, 1.15f);
+        v.setMaxLines(8);
+        v.setEllipsize(TextUtils.TruncateAt.END);
+        r.addView(v, Ui.weight(1));
+        return r;
+    }
+
+    /** The approval sheet on screen, if any (tests). */
+    public android.app.AlertDialog approvalDialog() {
+        return approvalSheet != null && approvalSheet.isShowing() ? approvalSheet.dialog : null;
+    }
+
+    // ------------------------------------------------------------------
     // History (the archive)
     // ------------------------------------------------------------------
 
@@ -1818,8 +2107,14 @@ public final class CommsScreen extends Screen {
             tt.setSingleLine(true);
             tt.setEllipsize(TextUtils.TruncateAt.END);
             text.addView(tt);
-            TextView st = ui.readout(en.count + " messages · " + day.format(new Date(en.updated)) + " · "
-                    + ui.clock(en.updated, false), 11.5f, t.dim);
+            // The model the chat was last used with (reopening it switches back), in its own case.
+            SpannableStringBuilder meta = new SpannableStringBuilder();
+            if (en.model.length() > 0) meta.append(en.model).append(" · ");
+            meta.append(en.count + " messages · " + day.format(new Date(en.updated)) + " · "
+                    + ui.clock(en.updated, false));
+            TextView st = ui.readout("", 11.5f, t.dim);
+            st.setText(meta);
+            st.setEllipsize(TextUtils.TruncateAt.END);
             st.setPadding(0, ui.dp(5), 0, 0);
             text.addView(st);
             row.addView(text, Ui.weight(1));

@@ -10,6 +10,7 @@ import com.omnideck.mobile.core.ConversationStore;
 import com.omnideck.mobile.core.HostPort;
 import com.omnideck.mobile.core.ModelInfo;
 import com.omnideck.mobile.core.OllamaClient;
+import com.omnideck.mobile.core.ToolKit;
 import com.omnideck.mobile.ui.IconDrawable;
 import com.omnideck.mobile.ui.Sheet;
 import com.omnideck.mobile.ui.Ui;
@@ -212,6 +213,8 @@ public final class Commander {
             e.bridgePair();
         } else if ("/desk".equals(name)) {
             e.bridgeStatus();
+        } else if ("/tools".equals(name)) {
+            tools(a);
         } else if ("/server".equals(name)) {
             if (a.length() == 0) {
                 act.showConnection();
@@ -278,6 +281,33 @@ public final class Commander {
         } else {
             e.notice("`" + name + "` isn't available here.", "warn");
         }
+    }
+
+    /**
+     * /tools: whether OMNI can act on the PC right now (and if not, why:
+     * switched off, bridge not paired, a model without the tools
+     * capability), and the tools it has. /tools on|off flips the switch.
+     */
+    private void tools(String a) {
+        Boolean on = parseOnOff(a);
+        if (a.length() > 0 && on == null) {
+            e.notice("Usage: `/tools` shows what OMNI can do on the PC; `/tools on` or `/tools off` switches it.",
+                    "info");
+            return;
+        }
+        if (on != null) {
+            e.setAiTools(on);
+            if (!on) {
+                e.notice("AI tool calling is **off** — OMNI won't act on the PC. `/tools on` turns it back on.", "ok");
+                return;
+            }
+        }
+        e.toolsStatus(new Engine.Callback<ToolKit.Status>() {
+            @Override
+            public void done(ToolKit.Status s, String error) {
+                e.notice(ToolKit.report(s), s.active() ? "ok" : "warn");
+            }
+        });
     }
 
     private static Boolean parseOnOff(String a) {

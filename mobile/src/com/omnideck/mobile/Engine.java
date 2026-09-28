@@ -31,6 +31,9 @@ import com.omnideck.mobile.core.ServerInfo;
 import com.omnideck.mobile.core.SpeechText;
 import com.omnideck.mobile.core.Telemetry;
 import com.omnideck.mobile.core.Timers;
+import com.omnideck.mobile.core.ToolApproval;
+import com.omnideck.mobile.core.ToolCall;
+import com.omnideck.mobile.core.ToolKit;
 import com.omnideck.mobile.core.Vitals;
 import com.omnideck.mobile.core.WakeOnLan;
 
@@ -93,6 +96,15 @@ public final class Engine {
 
         /** Model download progress changed (see {@link #pullState()}). */
         void onPull();
+
+        /**
+         * The AI wants to run a PC tool that needs the user's OK. Show it and
+         * answer through {@code request} (allow / allow for this chat / deny);
+         * the Engine may withdraw it (see {@link ToolApproval#setOnSettled}).
+         * Return false when it can't be shown right now: it is then declined
+         * and the model is told the user wasn't available.
+         */
+        boolean onToolApproval(ToolApproval request);
     }
 
     public interface Callback<T> {
@@ -103,6 +115,12 @@ public final class Engine {
     static final int FLUSH_MS = 40;
     static final int HEALTH_MS = 10000;
     static final int DEFAULT_CTX = 8192;
+    /** How long a PC action may wait for approval while the app is in the background. */
+    static final long APPROVAL_BACKGROUND_MS = 60000;
+    /** A cached tool list older than this is re-read in the background (it's used meanwhile). */
+    static final long TOOL_CATALOG_TTL_MS = 10 * 60 * 1000;
+    /** Screenshots a tool returns are kept (and sent to vision models) at most this many pixels wide or tall. */
+    static final int TOOL_IMAGE_MAX_SIDE = 1280;
     static final String COMPACT_PROMPT = "Summarize our conversation so far into a compact briefing that keeps every "
             + "fact, decision, name, number and open question needed to continue it. Write it as notes, not as a reply.";
     static final String SUMMARIZE_PROMPT = "Summarize our conversation so far in a few short bullet points.";
@@ -217,6 +235,17 @@ public final class Engine {
     /** Running /timer timers, persisted so they ring even after the app was closed. */
     private final Timers timers;
     private Notifier notifier;
+
+    // AI tool calling (the model acts on the PC through LaunchBridge)
+    /** The bridge's tools, cached for {@link #toolCatalogKey}; null until read. */
+    private List<BridgeTool> toolCatalog;
+    private String toolCatalogKey = "";
+    private long toolCatalogAt;
+    private boolean toolCatalogLoading;
+    /** Why the tool list couldn't be read last time ("" when it could). */
+    private String toolCatalogError = "";
+    /** Tools the user allowed "for this chat": chat id → tool names. */
+    private final Map<String, java.util.Set<String>> chatGrants = new java.util.HashMap<String, java.util.Set<String>>();
 
     private Engine(Context app) {
         this.app = app;
@@ -473,6 +502,8 @@ public final class Engine {
         String t = token == null ? "" : token.trim();
         settings.setBridgeToken(t);
         settings.setBridgeTokenHost(t.length() > 0 ? bridgeHost() : "");
+        toolCatalog = null;
+        if (t.length() > 0 && settings.aiTools()) refreshToolCatalog(null);
         notifyState();
     }
 
@@ -572,13 +603,25 @@ public final class Engine {
             checkTimers();
             main.removeCallbacks(timerTick);
             if (!timers.isEmpty()) main.postDelayed(timerTick, 1000);
+            main.removeCallbacks(approvalTimeout);
         } else {
             unregisterNetworkCallback();
             main.removeCallbacks(healthTick);
             main.removeCallbacks(offlineRetry);
             main.removeCallbacks(timerTick);
+            // A PC action waiting for the user's OK: they may come right back; if not, it's declined.
+            if (pendingApproval() != null) main.postDelayed(approvalTimeout, APPROVAL_BACKGROUND_MS);
         }
     }
+
+    /** The app stayed in the background while a PC action waited for approval. */
+    private final Runnable approvalTimeout = new Runnable() {
+        @Override
+        public void run() {
+            ToolApproval a = pendingApproval();
+            if (a != null && !visible) a.unavailable();
+        }
+    };
 
     private final Runnable healthTick = new Runnable() {
         @Override
@@ -1143,6 +1186,7 @@ public final class Engine {
         j.cancel.cancel();
         main.removeCallbacks(j);
         j.copy();
+        endTools(j);
         ChatMessage t = j.target;
         t.thinking = t.thinking.trim();
         t.streaming = false;
@@ -1272,7 +1316,13 @@ public final class Engine {
     // Chat
     // ------------------------------------------------------------------
 
-    /** A reply being streamed. Tokens accumulate off the main thread and are flushed to the UI per frame. */
+    /**
+     * A reply being written. Tokens accumulate off the main thread and are
+     * flushed to the UI per frame. With PC tools the reply takes several
+     * requests ("rounds"): each response that asks for tools has them run
+     * (after the user's OK where needed), and the conversation continues
+     * with their results — all into the same message.
+     */
     private final class Job implements Runnable {
         final ChatMessage target;
         /** The chat the reply belongs to (saved when it ends, even after a chat switch). */
@@ -1288,6 +1338,31 @@ public final class Engine {
         /** Whether the request that went out carried images (explains a rejected request). */
         volatile boolean sentImages;
 
+        // The same for every round of this reply.
+        String model = "";
+        boolean deep;
+        Object think;
+        Object keepAlive;
+        JSONObject opts;
+        boolean wasLoaded;
+        OllamaClient client;
+        boolean withImages;
+
+        // PC tools (toolsJson == null: this reply has none).
+        List<BridgeTool> catalog;
+        JSONArray toolsJson;
+        String pc = "";
+        /** Tool rounds run so far. */
+        int round;
+        /** A request is on the wire: stop() cancels it and its end finishes the reply. */
+        boolean inRequest;
+        /** Tool calls in the response streaming now (collected off the main thread). */
+        final List<ToolCall> incoming = new ArrayList<ToolCall>();
+        /** Text already came before this round's tool calls: the next text starts a new paragraph. */
+        boolean newParagraph;
+        /** The PC action waiting for the user's OK, if any. */
+        ToolApproval approval;
+
         Job(ChatMessage target, Conversation conv) {
             this.target = target;
             this.conv = conv;
@@ -1295,6 +1370,21 @@ public final class Engine {
 
         void firstToken() {
             if (ttft.get() < 0) ttft.compareAndSet(-1, (System.nanoTime() - startNanos) / 1000000L);
+        }
+
+        /** Appends streamed text (worker thread); a new round's text starts a new paragraph. */
+        void addContent(String delta) {
+            synchronized (this) {
+                if (newParagraph) {
+                    int i = 0;
+                    while (i < delta.length() && Character.isWhitespace(delta.charAt(i))) i++;
+                    if (i == delta.length()) return;
+                    content.append("\n\n");
+                    newParagraph = false;
+                    delta = delta.substring(i);
+                }
+                content.append(delta);
+            }
         }
 
         void schedule() {
@@ -1370,93 +1460,89 @@ public final class Engine {
         ensureCapabilities(model);
         conv.model = currentModel();
 
-        // A model that can't see images rejects the whole request when any message carries one,
-        // so text-only models get a marker instead. When that isn't known yet, the request asks
-        // /api/show first (off the main thread) and picks the right variant.
-        final Boolean vision = supportsVision(model);
-        final boolean chatHasImages = conv.hasImages();
-        final boolean withImages = chatHasImages && !Boolean.FALSE.equals(vision);
-        JSONArray msgs = conv.toRequestMessages(systemPrompt(), null, withImages);
-        JSONArray textOnly = withImages && vision == null ? conv.toRequestMessages(systemPrompt(), null, false) : null;
         final ChatMessage target = new ChatMessage(ChatMessage.ASSISTANT, "");
         target.model = model;
         target.streaming = true;
         target.startedAt = System.currentTimeMillis();
         add(target);
         final Job j = job = new Job(target, conv);
+        j.model = model;
+        j.deep = deep;
         JSONObject opts = runnerOptions(model);
         addGenerationOptions(opts);
+        j.opts = opts;
         j.numCtx = opts.optInt("num_ctx", 0);
-        final Object think = thinkFor(model, deep);
-        final JSONObject body = OllamaClient.chatBody(model, msgs, think, keepAlive(), opts);
-        final JSONObject textBody = textOnly == null ? null
-                : OllamaClient.chatBody(model, textOnly, think, keepAlive(), opts);
-        final boolean wasLoaded = running.containsKey(model);
+        j.keepAlive = keepAlive();
+        j.wasLoaded = running.containsKey(model);
+        j.client = client;
         if (settings.readAloud()) speech().stop();
-        final OllamaClient c = client;
         notifyBusy();
         save();
-        if (c == null) {
+        if (j.client == null) {
             // The link dropped between the caller's check and now: fail the reply cleanly.
             finish(j, null, "Not connected to your AI.", false, false);
             return;
         }
+        prepare(j);
+    }
+
+    /**
+     * Before the first request, learns off the main thread what isn't known
+     * yet: whether the model can see images (a text-only model rejects a
+     * request that carries any, so it gets a marker instead), whether it can
+     * call tools, and which tools the PC offers. Then streams.
+     */
+    private void prepare(final Job j) {
+        final String model = j.model;
+        final Boolean vision = supportsVision(model);
+        final boolean images = j.conv.hasImages();
+        final boolean wantTools = toolsWanted();
+        final Boolean toolCap = wantTools ? supportsTools(model) : Boolean.FALSE;
+        final List<BridgeTool> cached = wantTools ? toolCatalog() : null;
+        final boolean needShow = (images && vision == null) || (wantTools && toolCap == null);
+        final boolean needCatalog = wantTools && !Boolean.FALSE.equals(toolCap) && cached == null;
+        if (!needShow && !needCatalog) {
+            // An old tool list is used now and re-read for next time.
+            if (cached != null && Boolean.TRUE.equals(toolCap) && staleCatalog()) refreshToolCatalog(null);
+            begin(j, cached);
+            return;
+        }
+        final OllamaClient c = j.client;
+        final BridgeClient b = needCatalog ? bridge() : null;
+        final String key = toolKey();
         io.execute(new Runnable() {
             @Override
             public void run() {
-                JSONObject send = body;
-                if (textBody != null) {
-                    final OllamaClient.ModelDetails d = showQuietly(c, model);
-                    if (d != null) {
-                        if (!d.supports("vision")) send = textBody;
-                        main.post(new Runnable() {
-                            @Override
-                            public void run() {
-                                if (c != client) return;
-                                details.put(model, d);
-                                thinkSupport.put(model, d.supports("thinking"));
-                            }
-                        });
+                final OllamaClient.ModelDetails d = needShow ? showQuietly(c, model) : null;
+                boolean canCall = toolCap != null ? toolCap : d != null && d.supports("tools");
+                List<BridgeTool> cat = null;
+                String err = null;
+                if (needCatalog && canCall && b != null) {
+                    try {
+                        cat = BridgeTool.parseAll(b.deskCapabilities());
+                    } catch (BridgeClient.BridgeException e) {
+                        err = e.getMessage();
+                    } catch (RuntimeException e) {
+                        err = "Bridge error: " + e;
                     }
                 }
-                j.sentImages = send == body && withImages;
-                c.chat(send, j.cancel, new OllamaClient.ChatListener() {
+                final List<BridgeTool> fCat = cat;
+                final String fErr = err;
+                main.post(new Runnable() {
                     @Override
-                    public void onThinking(String delta) {
-                        j.firstToken();
-                        synchronized (j) {
-                            j.thinking.append(delta);
+                    public void run() {
+                        if (d != null && c == client) {
+                            details.put(model, d);
+                            thinkSupport.put(model, d.supports("thinking"));
                         }
-                        j.schedule();
-                    }
-
-                    @Override
-                    public void onContent(String delta) {
-                        j.firstToken();
-                        synchronized (j) {
-                            j.content.append(delta);
+                        if (fCat != null) cacheCatalog(key, fCat);
+                        else if (fErr != null) catalogFailed(fErr);
+                        if (job != j) return;
+                        if (j.cancel.isCancelled()) {
+                            finish(j, null, "Stopped.", true, j.wasLoaded);
+                            return;
                         }
-                        j.schedule();
-                    }
-
-                    @Override
-                    public void onDone(final ChatStats stats) {
-                        main.post(new Runnable() {
-                            @Override
-                            public void run() {
-                                finish(j, stats, null, false, wasLoaded);
-                            }
-                        });
-                    }
-
-                    @Override
-                    public void onError(final String message, final boolean cancelled) {
-                        main.post(new Runnable() {
-                            @Override
-                            public void run() {
-                                finish(j, null, message, cancelled, wasLoaded);
-                            }
-                        });
+                        begin(j, fCat != null ? fCat : cached);
                     }
                 });
             }
@@ -1472,10 +1558,477 @@ public final class Engine {
         }
     }
 
+    /** Settles what the whole reply sends — images or not, thinking, the PC's tools — then asks. */
+    private void begin(Job j, List<BridgeTool> catalog) {
+        String model = j.model;
+        j.withImages = j.conv.hasImages() && !Boolean.FALSE.equals(supportsVision(model));
+        j.think = thinkFor(model, j.deep);
+        if (catalog != null && toolsWanted() && Boolean.TRUE.equals(supportsTools(model))) {
+            j.catalog = catalog;
+            j.toolsJson = ToolKit.toolsArray(catalog, true);
+            j.pc = pcName();
+        }
+        streamRound(j);
+    }
+
+    /**
+     * Sends the conversation so far — this reply's finished tool rounds
+     * included — and streams the answer. Tools are offered for up to
+     * {@link ToolKit#MAX_ROUNDS} rounds; after that the model has to answer.
+     */
+    private void streamRound(final Job j) {
+        boolean offer = j.toolsJson != null && j.round < ToolKit.MAX_ROUNDS;
+        String sys = systemPrompt();
+        if (j.toolsJson != null) {
+            String add = ToolKit.systemPrompt(j.pc) + (offer ? "" : "\n\n" + ToolKit.LIMIT_PROMPT);
+            sys = sys.length() > 0 ? sys + "\n\n" + add : add;
+        }
+        JSONArray msgs = j.conv.toRequestMessages(sys, null, j.withImages,
+                Boolean.TRUE.equals(supportsTools(j.model)));
+        final JSONObject body = OllamaClient.chatBody(j.model, msgs, j.think, j.keepAlive, j.opts,
+                offer ? j.toolsJson : null);
+        j.sentImages = j.withImages;
+        j.inRequest = true;
+        synchronized (j) {
+            j.newParagraph = j.content.toString().trim().length() > 0;
+            if (j.thinking.length() > 0) j.thinking.append("\n\n");
+        }
+        final OllamaClient c = j.client;
+        io.execute(new Runnable() {
+            @Override
+            public void run() {
+                c.chat(body, j.cancel, new OllamaClient.ChatListener() {
+                    @Override
+                    public void onThinking(String delta) {
+                        j.firstToken();
+                        synchronized (j) {
+                            j.thinking.append(delta);
+                        }
+                        j.schedule();
+                    }
+
+                    @Override
+                    public void onContent(String delta) {
+                        j.firstToken();
+                        j.addContent(delta);
+                        j.schedule();
+                    }
+
+                    @Override
+                    public void onToolCalls(List<ToolCall> calls) {
+                        j.firstToken();
+                        synchronized (j) {
+                            j.incoming.addAll(calls);
+                        }
+                    }
+
+                    @Override
+                    public void onDone(final ChatStats stats) {
+                        main.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                roundDone(j, stats);
+                            }
+                        });
+                    }
+
+                    @Override
+                    public void onError(final String message, final boolean cancelled) {
+                        main.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                finish(j, null, message, cancelled, j.wasLoaded);
+                            }
+                        });
+                    }
+                });
+            }
+        });
+    }
+
+    /** A response ended: run the PC tools it asked for (then ask again), or finish the reply. */
+    private void roundDone(Job j, ChatStats stats) {
+        if (job != j) return;
+        j.inRequest = false;
+        List<ToolCall> calls;
+        synchronized (j) {
+            calls = new ArrayList<ToolCall>(j.incoming);
+            j.incoming.clear();
+        }
+        // No tools asked for — or none offered (the round limit): this is the answer.
+        if (calls.isEmpty() || j.toolsJson == null || j.round >= ToolKit.MAX_ROUNDS) {
+            finish(j, stats, null, false, j.wasLoaded);
+            return;
+        }
+        if (j.cancel.isCancelled()) {
+            finish(j, null, "Stopped.", true, j.wasLoaded);
+            return;
+        }
+        j.copy();
+        telemetry.tokensIn += stats.promptTokens;
+        telemetry.tokensOut += stats.evalTokens;
+        j.round++;
+        int at = j.target.content.length();
+        StringBuilder names = new StringBuilder();
+        for (ToolCall tc : calls) {
+            tc.round = j.round;
+            tc.at = at;
+            tc.state = ToolCall.QUEUED;
+            tc.label = ToolKit.label(ToolKit.find(j.catalog, tc.name), tc.name, tc.args);
+            j.target.tools.add(tc);
+            if (names.length() > 0) names.append(", ");
+            names.append(tc.name);
+        }
+        log("info", "AI → PC · " + names);
+        changed(j);
+        nextCall(j);
+    }
+
+    /** Runs this round's next waiting call; once none is left, the model gets the results. */
+    private void nextCall(Job j) {
+        if (job != j) return;
+        if (j.cancel.isCancelled()) {
+            finish(j, null, "Stopped.", true, j.wasLoaded);
+            return;
+        }
+        for (ToolCall tc : j.target.tools) {
+            if (tc.round == j.round && ToolCall.QUEUED.equals(tc.state)) {
+                runCall(j, tc);
+                return;
+            }
+        }
+        streamRound(j);
+    }
+
+    /** Checks a call against the PC's tools, gets the user's OK when it needs one, then runs it. */
+    private void runCall(final Job j, final ToolCall tc) {
+        if (tc.argsError.length() > 0) {
+            settleCall(j, tc, ToolCall.FAILED, "The arguments weren't a JSON object: " + tc.argsError);
+            nextCall(j);
+            return;
+        }
+        final BridgeTool bt = ToolKit.find(j.catalog, tc.name);
+        if (bt == null && ToolKit.OPEN_APP.equalsIgnoreCase(tc.name)) {
+            openApp(j, tc);
+            return;
+        }
+        if (bt == null) {
+            settleCall(j, tc, ToolCall.FAILED, "There is no tool called \"" + tc.name + "\". The tools are: "
+                    + toolNames(j.catalog) + ".");
+            nextCall(j);
+            return;
+        }
+        String missing = ToolKit.missingArgs(bt, tc.args);
+        if (missing != null) {
+            settleCall(j, tc, ToolCall.FAILED, "Missing required argument(s): " + missing + ". Call " + bt.name
+                    + " again with them.");
+            nextCall(j);
+            return;
+        }
+        approve(j, tc, ToolKit.risk(bt, tc.name, tc.args), ToolKit.phrase(bt, tc.name, tc.args, tc.label),
+                ToolKit.prettyArgs(tc.args), new Runnable() {
+                    @Override
+                    public void run() {
+                        execute(j, tc, bt);
+                    }
+                });
+    }
+
+    private static String toolNames(List<BridgeTool> catalog) {
+        StringBuilder sb = new StringBuilder();
+        if (catalog != null) {
+            for (BridgeTool t : catalog) {
+                if (sb.length() > 0) sb.append(", ");
+                sb.append(t.name);
+            }
+        }
+        if (ToolKit.find(catalog, ToolKit.OPEN_APP) == null) sb.append(sb.length() > 0 ? ", " : "").append(ToolKit.OPEN_APP);
+        return sb.toString();
+    }
+
+    /**
+     * Runs {@code onAllow} right away, or once the user allows it: always for
+     * destructive tools, for other changes while "Ask before PC actions" is on
+     * (unless allowed for this chat). When nobody can answer — the app is in
+     * the background — the call is declined and the model is told why.
+     */
+    private void approve(final Job j, final ToolCall tc, int risk, String phrase, String detail,
+                         final Runnable onAllow) {
+        boolean destructive = risk == ToolKit.DESTRUCTIVE;
+        boolean ask = destructive || (risk == ToolKit.CHANGE && settings.confirmPcActions()
+                && !granted(j.conv.id, tc.name));
+        if (!ask) {
+            onAllow.run();
+            return;
+        }
+        if (!visible || listener == null) {
+            settleCall(j, tc, ToolCall.DECLINED, ToolKit.UNAVAILABLE_RESULT);
+            log("warn", "PC action not approved · " + tc.label + " (app in the background)");
+            nextCall(j);
+            return;
+        }
+        tc.state = ToolCall.ASKING;
+        changed(j);
+        BridgeClient b = bridge();
+        final ToolApproval a = new ToolApproval(tc.name, tc.label, phrase, j.pc, b == null ? "" : b.where(), detail,
+                destructive);
+        j.approval = a;
+        a.setDecision(new ToolApproval.Decision() {
+            @Override
+            public void decided(int answer) {
+                if (j.approval == a) j.approval = null;
+                main.removeCallbacks(approvalTimeout);
+                if (job != j || answer == ToolApproval.WITHDRAWN) return;
+                if (answer == ToolApproval.ALLOW || answer == ToolApproval.ALLOW_CHAT) {
+                    if (answer == ToolApproval.ALLOW_CHAT) grant(j.conv.id, tc.name);
+                    log("ok", "PC action approved · " + tc.label);
+                    onAllow.run();
+                } else {
+                    boolean away = answer == ToolApproval.UNAVAILABLE;
+                    settleCall(j, tc, ToolCall.DECLINED, away ? ToolKit.UNAVAILABLE_RESULT : ToolKit.DECLINED_RESULT);
+                    log("warn", "PC action declined · " + tc.label + (away ? " (no answer)" : ""));
+                    nextCall(j);
+                }
+            }
+        });
+        boolean shown;
+        try {
+            shown = listener.onToolApproval(a);
+        } catch (RuntimeException e) {
+            shown = false;
+        }
+        if (!shown) a.unavailable();
+    }
+
+    /** Runs one bridge tool and records what it returned (a screenshot is kept, downscaled). */
+    private void execute(final Job j, final ToolCall tc, final BridgeTool bt) {
+        if (job != j) return;
+        tc.state = ToolCall.RUNNING;
+        changed(j);
+        final long t0 = System.currentTimeMillis();
+        final JSONObject args = tc.args;
+        bridgeAsync(new BridgeCall<Object[]>() {
+            @Override
+            public Object[] run(BridgeClient b) throws BridgeClient.BridgeException {
+                Object r = b.deskRun(bt.name, args);
+                String img = extractImage(r);
+                return new Object[]{r, img == null ? null : shrinkImage(img)};
+            }
+        }, new Callback<Object[]>() {
+            @Override
+            public void done(Object[] v, String error) {
+                tc.ms = System.currentTimeMillis() - t0;
+                if (error != null) {
+                    tc.state = ToolCall.FAILED;
+                    tc.result = "Error: " + error;
+                    log("error", "PC action failed · " + tc.label);
+                } else {
+                    tc.state = ToolCall.DONE;
+                    tc.result = ToolKit.resultText(v[0]);
+                    if (v[1] != null) tc.image = (String) v[1];
+                    if ("get_system_info".equals(bt.name)) learnMac(v[0]);
+                    log("ok", "PC · " + tc.label);
+                }
+                afterCall(j);
+            }
+        });
+    }
+
+    /**
+     * The built-in open_app: a dry run finds the app (nothing opens); exactly
+     * one match opens once allowed. Several matches go back to the model as a
+     * list with their app ids, so it can ask which one.
+     */
+    private void openApp(final Job j, final ToolCall tc) {
+        final String query = OllamaClient.str(tc.args, "query").trim();
+        final String appId = OllamaClient.str(tc.args, "app_id").trim();
+        if (appId.length() > 0) {
+            // A choice from an earlier open_app result.
+            String name = query.length() > 0 ? query : appId;
+            approve(j, tc, ToolKit.CHANGE, "open " + name, appId, launchApp(j, tc, appId, name));
+            return;
+        }
+        if (query.length() == 0) {
+            settleCall(j, tc, ToolCall.FAILED, "open_app needs the app's name in \"query\".");
+            nextCall(j);
+            return;
+        }
+        tc.state = ToolCall.RUNNING;
+        changed(j);
+        final long t0 = System.currentTimeMillis();
+        bridgeAsync(new BridgeCall<JSONObject>() {
+            @Override
+            public JSONObject run(BridgeClient b) throws BridgeClient.BridgeException {
+                return b.launchQuery(query, true);
+            }
+        }, new Callback<JSONObject>() {
+            @Override
+            public void done(JSONObject r, String error) {
+                tc.ms = System.currentTimeMillis() - t0;
+                if (job != j) {
+                    // Stopped while the app was looked up: nothing was opened.
+                    if (!tc.isFinal()) {
+                        tc.state = ToolCall.DECLINED;
+                        tc.result = ToolKit.STOPPED_RESULT;
+                    }
+                    afterCall(j);
+                    return;
+                }
+                if (error != null) {
+                    settleCall(j, tc, ToolCall.FAILED, "Error: " + error);
+                    nextCall(j);
+                    return;
+                }
+                if (r.optBoolean("needs_choice", false)) {
+                    JSONArray cands = r.optJSONArray("candidates");
+                    if (cands == null || cands.length() == 0) {
+                        settleCall(j, tc, ToolCall.FAILED, "No app on the PC matches \"" + query + "\".");
+                    } else {
+                        tc.label = "Find “" + Fmt.ellipsize(query, 32) + "” → " + cands.length()
+                                + (cands.length() == 1 ? " match" : " matches");
+                        settleCall(j, tc, ToolCall.DONE, ToolKit.candidatesText(query, cands));
+                    }
+                    nextCall(j);
+                    return;
+                }
+                JSONObject target = r.optJSONObject("would_launch");
+                if (target == null) {
+                    // A bridge without dry runs opens right away.
+                    JSONObject app = r.optJSONObject("app");
+                    if (app != null) {
+                        settleCall(j, tc, ToolCall.DONE, "Opened " + OllamaClient.str(app, "name") + " on the PC.");
+                    } else {
+                        settleCall(j, tc, ToolCall.FAILED, "The PC bridge didn't say which app matches \"" + query
+                                + "\".");
+                    }
+                    nextCall(j);
+                    return;
+                }
+                String name = OllamaClient.str(target, "name");
+                if (name.length() == 0) name = query;
+                tc.label = "Open " + name;
+                tc.state = ToolCall.QUEUED;
+                approve(j, tc, ToolKit.CHANGE, "open " + name, OllamaClient.str(target, "path"),
+                        launchApp(j, tc, OllamaClient.str(target, "id"), name));
+            }
+        });
+    }
+
+    private Runnable launchApp(final Job j, final ToolCall tc, final String appId, final String name) {
+        return new Runnable() {
+            @Override
+            public void run() {
+                if (job != j) return;
+                tc.state = ToolCall.RUNNING;
+                changed(j);
+                final long t0 = System.currentTimeMillis();
+                bridgeAsync(new BridgeCall<JSONObject>() {
+                    @Override
+                    public JSONObject run(BridgeClient b) throws BridgeClient.BridgeException {
+                        return b.launchId(appId);
+                    }
+                }, new Callback<JSONObject>() {
+                    @Override
+                    public void done(JSONObject r, String error) {
+                        tc.ms += System.currentTimeMillis() - t0;
+                        if (error != null) {
+                            tc.state = ToolCall.FAILED;
+                            tc.result = "Error: " + error;
+                            log("error", "PC action failed · " + tc.label);
+                        } else {
+                            JSONObject app = r.optJSONObject("app");
+                            String n = app != null ? OllamaClient.str(app, "name") : "";
+                            tc.state = ToolCall.DONE;
+                            tc.result = "Opened " + (n.length() > 0 ? n : name) + " on the PC.";
+                            log("ok", "PC · opened " + (n.length() > 0 ? n : name));
+                        }
+                        afterCall(j);
+                    }
+                });
+            }
+        };
+    }
+
+    private void settleCall(Job j, ToolCall tc, String state, String result) {
+        tc.state = state;
+        tc.result = result;
+        changed(j);
+    }
+
+    /** A call ended — maybe after the reply was stopped: show it, keep it, and carry on if the reply still runs. */
+    private void afterCall(Job j) {
+        changed(j);
+        if (job == j) nextCall(j);
+        else save(j.conv);
+    }
+
+    /** Redraws the reply (its action log) when its chat is on screen. */
+    private void changed(Job j) {
+        if (listener != null && j.conv == conv && conv.messages.contains(j.target)) listener.onMessageChanged(j.target);
+    }
+
+    /** The reply ends: an open question is withdrawn, and calls that never ran say so. */
+    private void endTools(Job j) {
+        j.inRequest = false;
+        ToolApproval a = j.approval;
+        j.approval = null;
+        main.removeCallbacks(approvalTimeout);
+        for (ToolCall tc : j.target.tools) {
+            if (ToolCall.QUEUED.equals(tc.state) || ToolCall.ASKING.equals(tc.state)) {
+                tc.state = ToolCall.DECLINED;
+                tc.result = ToolKit.STOPPED_RESULT;
+            }
+        }
+        if (a != null) a.withdraw();
+    }
+
+    private boolean granted(String chatId, String tool) {
+        java.util.Set<String> s = chatGrants.get(chatId);
+        return s != null && s.contains(tool.toLowerCase(Locale.US));
+    }
+
+    private void grant(String chatId, String tool) {
+        java.util.Set<String> s = chatGrants.get(chatId);
+        if (s == null) {
+            s = new java.util.HashSet<String>();
+            chatGrants.put(chatId, s);
+        }
+        s.add(tool.toLowerCase(Locale.US));
+    }
+
+    /**
+     * A tool's screenshot as a JPEG of at most {@link #TOOL_IMAGE_MAX_SIDE}
+     * px (worker thread): what the chat keeps and a vision model is sent. A
+     * small image stays as it is; one that can't be decoded too.
+     */
+    static String shrinkImage(String b64) {
+        android.graphics.Bitmap bmp = ImageUtil.decode(b64, TOOL_IMAGE_MAX_SIDE);
+        if (bmp == null) return b64;
+        try {
+            int w = bmp.getWidth(), h = bmp.getHeight();
+            float scale = Math.min(1f, TOOL_IMAGE_MAX_SIDE / (float) Math.max(1, Math.max(w, h)));
+            if (scale >= 1f && b64.length() < 512 * 1024) return b64;
+            if (scale < 1f) {
+                android.graphics.Bitmap s = android.graphics.Bitmap.createScaledBitmap(bmp,
+                        Math.max(1, Math.round(w * scale)), Math.max(1, Math.round(h * scale)), true);
+                if (s != bmp) bmp.recycle();
+                bmp = s;
+            }
+            java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+            bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, bos);
+            return android.util.Base64.encodeToString(bos.toByteArray(), android.util.Base64.NO_WRAP);
+        } catch (RuntimeException e) {
+            return b64;
+        } catch (OutOfMemoryError e) {
+            return b64;
+        }
+    }
+
     private void finish(Job j, ChatStats stats, String error, boolean cancelled, boolean wasLoaded) {
         if (job != j) return;
         main.removeCallbacks(j);
         j.copy();
+        endTools(j);
         ChatMessage t = j.target;
         String failure = null;
         t.thinking = t.thinking.trim();
@@ -1484,7 +2037,9 @@ public final class Engine {
         if (stats != null) {
             t.stats = stats.summary() + (t.ttftMs >= 0 ? " · first token " + Fmt.seconds(t.ttftMs) : "");
             if (stats.evalMs > 0) lastSpeed = Fmt.oneDecimal(stats.tokensPerSecond()) + " tok/s";
-            if (t.content.length() == 0 && t.thinking.length() == 0) t.stats = "empty reply · " + t.stats;
+            if (t.content.length() == 0 && t.thinking.length() == 0 && t.tools.isEmpty()) {
+                t.stats = "empty reply · " + t.stats;
+            }
             telemetry.reply(stats, t.ttftMs, j.numCtx);
             log("ok", "Reply · " + t.model + " · " + stats.evalTokens + " tok"
                     + (stats.evalMs > 0 ? " @ " + Fmt.oneDecimal(stats.tokensPerSecond()) + " tok/s" : "")
@@ -1533,9 +2088,18 @@ public final class Engine {
         return s.substring(i);
     }
 
-    /** Stops the reply that's streaming, and a compaction or benchmark in progress. */
+    /**
+     * Stops the reply — its request, the PC tool loop, a pending approval —
+     * and a compaction or benchmark in progress.
+     */
     public void stop() {
-        if (job != null) job.cancel.cancel();
+        Job j = job;
+        if (j != null) {
+            j.cancel.cancel();
+            // Between requests (getting ready, running a PC tool, waiting for approval) nothing else
+            // would end the reply: end it now. A request on the wire ends it when it's cut.
+            if (!j.inRequest) finish(j, null, "Stopped.", true, j.wasLoaded);
+        }
         stopAux();
     }
 
@@ -1633,7 +2197,13 @@ public final class Engine {
         String model = currentModel();
         int ctx = runnerOptions(model).optInt("num_ctx", DEFAULT_CTX);
         if (ctx <= 0) return 0;
-        return conv.estimateTokens(systemPrompt(), !Boolean.FALSE.equals(supportsVision(model))) / (double) ctx;
+        long tokens = conv.estimateTokens(systemPrompt(), !Boolean.FALSE.equals(supportsVision(model)));
+        List<BridgeTool> cat = toolsReady(model) ? toolCatalog() : null;
+        if (cat != null) {
+            // The tools' descriptions and their system-prompt note go with every request.
+            tokens += (ToolKit.toolsArray(cat, true).toString().length() + ToolKit.systemPrompt(pcName()).length()) / 4;
+        }
+        return tokens / (double) ctx;
     }
 
     public String systemPrompt() {
@@ -2246,13 +2816,21 @@ public final class Engine {
      * The desktop tools the bridge offers, each with its description and
      * arguments (types, required, choices, defaults) for building forms.
      */
-    public void bridgeTools(Callback<List<BridgeTool>> cb) {
+    public void bridgeTools(final Callback<List<BridgeTool>> cb) {
+        final String key = toolKey();
         bridgeAsync(new BridgeCall<List<BridgeTool>>() {
             @Override
             public List<BridgeTool> run(BridgeClient b) throws BridgeClient.BridgeException {
                 return BridgeTool.parseAll(b.deskCapabilities());
             }
-        }, cb);
+        }, new Callback<List<BridgeTool>>() {
+            @Override
+            public void done(List<BridgeTool> tools, String error) {
+                // The same list the AI's tools come from: keep it.
+                if (tools != null && bridgePaired()) cacheCatalog(key, tools);
+                cb.done(tools, error);
+            }
+        });
     }
 
     /** Runs any desktop tool and returns its raw result. */
@@ -2390,6 +2968,8 @@ public final class Engine {
                     bridgeOnline = Boolean.TRUE;
                     log("ok", "PC bridge paired");
                     notifyState();
+                    // What the AI can do on this PC.
+                    if (settings.aiTools()) refreshToolCatalog(null);
                 }
                 cb.done(token, error);
             }
@@ -2432,6 +3012,10 @@ public final class Engine {
 
                     @Override
                     public void onContent(String delta) {
+                    }
+
+                    @Override
+                    public void onToolCalls(List<ToolCall> calls) {
                     }
 
                     @Override
@@ -2496,7 +3080,8 @@ public final class Engine {
         }
         final Conversation target = conv;
         final String model = currentModel();
-        JSONArray msgs = conv.toRequestMessages(systemPrompt(), null, Boolean.TRUE.equals(supportsVision(model)));
+        JSONArray msgs = conv.toRequestMessages(systemPrompt(), null, Boolean.TRUE.equals(supportsVision(model)),
+                Boolean.TRUE.equals(supportsTools(model)));
         try {
             msgs.put(new JSONObject().put("role", "user").put("content", COMPACT_PROMPT));
         } catch (JSONException ignored) {
@@ -2521,6 +3106,11 @@ public final class Engine {
                     @Override
                     public void onContent(String delta) {
                         out.append(delta);
+                    }
+
+                    @Override
+                    public void onToolCalls(List<ToolCall> calls) {
+                        // Compaction offers no tools.
                     }
 
                     @Override
@@ -2862,6 +3452,147 @@ public final class Engine {
         if (t.startsWith("data:image") && i > 0) return t.substring(i + 7);
         if (t.length() > 64 && t.matches("[A-Za-z0-9+/=\\r\\n]+")) return t;
         return null;
+    }
+
+    // ------------------------------------------------------------------
+    // AI tool calling: the switch, the PC's tool list, /tools
+    // ------------------------------------------------------------------
+
+    private boolean toolsWanted() {
+        return settings.aiTools() && bridgePaired();
+    }
+
+    /** Turns AI tool calling on or off (/tools on|off, Settings). */
+    public void setAiTools(boolean on) {
+        settings.setAiTools(on);
+        if (on && bridgePaired() && toolCatalog() == null) refreshToolCatalog(null);
+        notifyState();
+    }
+
+    /** Whether the model can call tools ("tools" in /api/show capabilities); null until known. */
+    public Boolean supportsTools(String model) {
+        OllamaClient.ModelDetails d = model == null ? null : details.get(model);
+        return d == null ? null : d.supports("tools");
+    }
+
+    /**
+     * True when a message to {@code model} lets the AI act on the PC: tool
+     * calling is on, the bridge is paired and the model can call tools (the
+     * PC's tool list is read, if need be, when the message goes out).
+     */
+    public boolean toolsReady(String model) {
+        return toolsWanted() && Boolean.TRUE.equals(supportsTools(model));
+    }
+
+    /** The PC action waiting for the user's OK, if any (e.g. to show it again after a recreate). */
+    public ToolApproval pendingApproval() {
+        return job == null ? null : job.approval;
+    }
+
+    /** The PC's name for "OMNI wants to … on {pc}": its hostname when known, else the bridge address. */
+    public String pcName() {
+        if (lastVitals != null && lastVitals.host.length() > 0) return lastVitals.host;
+        return bridgeHost();
+    }
+
+    /** Which bridge (and token) a tool list belongs to. */
+    private String toolKey() {
+        String host = bridgeHost();
+        return host + ":" + settings.bridgePort() + "#" + bridgeTokenFor(host);
+    }
+
+    /** The PC's tools as last read from the bridge in use; null until read (or once the bridge changed). */
+    public List<BridgeTool> toolCatalog() {
+        return toolCatalog != null && toolCatalogKey.equals(toolKey()) ? toolCatalog : null;
+    }
+
+    private boolean staleCatalog() {
+        return System.currentTimeMillis() - toolCatalogAt > TOOL_CATALOG_TTL_MS;
+    }
+
+    private void cacheCatalog(String key, List<BridgeTool> tools) {
+        toolCatalog = Collections.unmodifiableList(new ArrayList<BridgeTool>(tools));
+        toolCatalogKey = key;
+        toolCatalogAt = System.currentTimeMillis();
+        toolCatalogError = "";
+    }
+
+    private void catalogFailed(String error) {
+        if (!error.equals(toolCatalogError)) log("warn", "PC tools unavailable · " + Fmt.ellipsize(error, 80));
+        toolCatalogError = error;
+    }
+
+    /** Reads the PC's tool list again (after pairing, or when it's old). {@code cb} may be null. */
+    public void refreshToolCatalog(final Callback<List<BridgeTool>> cb) {
+        if (!bridgePaired()) {
+            if (cb != null) cb.done(null, "Not paired with the PC bridge — run /pair.");
+            return;
+        }
+        if (toolCatalogLoading && cb == null) return;
+        toolCatalogLoading = true;
+        final String key = toolKey();
+        bridgeAsync(new BridgeCall<List<BridgeTool>>() {
+            @Override
+            public List<BridgeTool> run(BridgeClient b) throws BridgeClient.BridgeException {
+                return BridgeTool.parseAll(b.deskCapabilities());
+            }
+        }, new Callback<List<BridgeTool>>() {
+            @Override
+            public void done(List<BridgeTool> tools, String error) {
+                toolCatalogLoading = false;
+                if (tools != null) cacheCatalog(key, tools);
+                else if (error != null) catalogFailed(error);
+                if (cb != null) cb.done(tools, error);
+            }
+        });
+    }
+
+    /**
+     * What /tools reports: whether the AI can act on the PC right now (and
+     * why not), and the PC's tools. Reads the tool list and the model's
+     * capabilities fresh when it can.
+     */
+    public void toolsStatus(final Callback<ToolKit.Status> cb) {
+        final ToolKit.Status s = new ToolKit.Status();
+        s.enabled = settings.aiTools();
+        s.paired = bridgePaired();
+        s.confirm = settings.confirmPcActions();
+        s.model = currentModel();
+        final Runnable compose = new Runnable() {
+            @Override
+            public void run() {
+                s.modelTools = s.model.length() > 0 ? supportsTools(s.model) : null;
+                s.catalog = s.paired ? toolCatalog() : null;
+                s.catalogError = toolCatalogError;
+                s.pc = pcName();
+                cb.done(s, null);
+            }
+        };
+        final Runnable withModel = new Runnable() {
+            @Override
+            public void run() {
+                if (s.model.length() > 0 && supportsTools(s.model) == null && client != null) {
+                    fetchDetails(s.model, new Callback<OllamaClient.ModelDetails>() {
+                        @Override
+                        public void done(OllamaClient.ModelDetails d, String error) {
+                            compose.run();
+                        }
+                    });
+                } else {
+                    compose.run();
+                }
+            }
+        };
+        if (s.paired) {
+            refreshToolCatalog(new Callback<List<BridgeTool>>() {
+                @Override
+                public void done(List<BridgeTool> tools, String error) {
+                    withModel.run();
+                }
+            });
+        } else {
+            withModel.run();
+        }
     }
 
     // ------------------------------------------------------------------
