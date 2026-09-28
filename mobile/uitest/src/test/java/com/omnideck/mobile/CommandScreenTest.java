@@ -101,8 +101,10 @@ public class CommandScreenTest extends Harness {
     @Test
     public void cyberOnlineDashboard() throws Exception {
         online("cyber");
-        assertTrue(shows("LINK ESTABLISHED"));
-        assertTrue(shows("OLLAMA 0.12.6 · 127.0.0.1:" + ollama.port()));
+        // The headline says what the AI is doing; the top bar already says ONLINE and names the address.
+        assertTrue(shows("STANDING BY"));
+        assertNotNull(textView("OLLAMA 0.12.6"));
+        assertEquals("OLLAMA 0.12.6", textView("OLLAMA 0.12.6").getText().toString());
         assertTrue(shows("llama3.2:3b"));
         assertTrue(shows("AUTO"));
         assertTrue(shows("IDLE"));
@@ -128,7 +130,7 @@ public class CommandScreenTest extends Harness {
     @Test
     public void lightOnlineDashboard() throws Exception {
         online("light");
-        assertTrue(shows("Connected to your AI"));
+        assertTrue(shows("Standing by"));
         assertTrue(shows("Ollama 0.12.6"));
         assertTrue(shows("llama3.2:3b"));
         shots("light");
@@ -137,7 +139,7 @@ public class CommandScreenTest extends Harness {
     @Test
     public void darkOnlineDashboard() throws Exception {
         online("dark");
-        assertTrue(shows("Connected to your AI"));
+        assertTrue(shows("Standing by"));
         assertTrue(shows("llama3.2:3b"));
         shots("dark");
     }
@@ -164,7 +166,7 @@ public class CommandScreenTest extends Harness {
         assertFalse(shows("Time until the reply starts"));
         assertTrue(shows("%"));
         assertTrue(shows("best " + Fmt.oneDecimal(engine().telemetry.tokensPerSec.max())));
-        assertTrue(shows("Ready · last reply"));
+        assertTrue(shows("Last reply ·"));
         // The reply was logged.
         assertTrue(shows("Reply · llama3.2:3b"));
         scrollToY(560);
@@ -249,7 +251,7 @@ public class CommandScreenTest extends Harness {
         assertEquals(CoreView.OFFLINE, core().mode());
         assertTrue(shows("AI NOT FOUND ON THIS NETWORK"));
         assertTrue(shows("OLLAMA_HOST=0.0.0.0"));
-        assertTrue(shows("11434"));
+        assertTrue("step 03 names the port that was scanned", shows("Allow port " + port + " through"));
         assertNotNull(button("Scan again"));
         assertNotNull(button("Enter address"));
         shoot("command-cyber-offline");
@@ -281,7 +283,7 @@ public class CommandScreenTest extends Harness {
         waitOnline();
         advance(400);
         assertFalse(shows("OLLAMA_HOST=0.0.0.0"));
-        assertTrue(shows("LINK ESTABLISHED"));
+        assertTrue(shows("STANDING BY"));
         assertEquals(CoreView.IDLE, core().mode());
     }
 
@@ -404,7 +406,7 @@ public class CommandScreenTest extends Harness {
         launch("cyber", MainActivity.TAB_COMMAND);
         waitOnline();
         advance(400);
-        assertTrue(shows("LINK ESTABLISHED"));
+        assertTrue(shows("STANDING BY"));
         assertTrue(shows("QUICK ACTIONS"));
         assertTrue(shows("llama3.2:3b"));
         click("Warm model");

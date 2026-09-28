@@ -1,15 +1,16 @@
 package com.omnideck.mobile.screens;
 
-import android.content.Context;
+import android.content.res.ColorStateList;
 import android.graphics.Paint;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.RippleDrawable;
-import android.content.res.ColorStateList;
+import android.text.SpannableStringBuilder;
 import android.text.TextUtils;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
@@ -22,13 +23,13 @@ import com.omnideck.mobile.MainActivity;
 import com.omnideck.mobile.Settings;
 import com.omnideck.mobile.core.ChatMessage;
 import com.omnideck.mobile.core.Fmt;
-import com.omnideck.mobile.core.HostPort;
 import com.omnideck.mobile.core.LanScanner;
 import com.omnideck.mobile.core.ModelInfo;
-import com.omnideck.mobile.core.OllamaClient;
 import com.omnideck.mobile.core.ServerInfo;
 import com.omnideck.mobile.core.Telemetry;
 import com.omnideck.mobile.core.Vitals;
+import com.omnideck.mobile.core.WakeOnLan;
+import com.omnideck.mobile.ui.CommandKit;
 import com.omnideck.mobile.ui.CoreView;
 import com.omnideck.mobile.ui.IconDrawable;
 import com.omnideck.mobile.ui.Panel;
@@ -36,60 +37,82 @@ import com.omnideck.mobile.ui.Theme;
 import com.omnideck.mobile.ui.Ui;
 import com.omnideck.mobile.ui.Widgets;
 
-import java.text.SimpleDateFormat;
 import java.util.ArrayList;
-import java.util.Date;
+import java.util.Calendar;
 import java.util.List;
 import java.util.Locale;
 
 /**
  * COMMAND — the home "mission control" tab. At a glance: the AI core (an
  * animated instrument that mirrors what the AI is doing), link status, the
- * active model and mode, one-tap quick actions, live telemetry, loaded
- * models, PC vitals from LaunchBridge and the system log. When the AI can't
- * be found it turns into a guided "get connected" panel.
+ * active model and mode, one-tap quick actions (AI and PC), live telemetry,
+ * loaded models, PC vitals from LaunchBridge and the system log. When the AI
+ * can't be found, a troubleshooting card becomes the page's focal point.
+ * <p>
+ * Nothing here animates or polls unless the page is live (selected and the
+ * app in the foreground): see {@link #startLive()} / {@link #stopLive()}.
  */
 public final class CommandScreen extends Screen {
     static final int LOG_COLLAPSED = 12;
     static final int LOG_MAX = 40;
     static final long VITALS_MS = 10000;
     static final long PENDING_TIMEOUT_MS = 120000;
-
-    private final SimpleDateFormat clock = new SimpleDateFormat("HH:mm:ss", Locale.US);
-    private final SimpleDateFormat shortClock = new SimpleDateFormat("HH:mm", Locale.US);
+    /** PC vitals older than this read as paused, not live (a poll is every {@link #VITALS_MS}). */
+    static final long VITALS_STALE_MS = 25000;
+    /** A quick-action tile's horizontal padding (each side). */
+    private static final float TILE_PAD_DP = 6;
+    private static final float TILE_GAP_DP = 8;
 
     private ScrollView scroll;
+    /**
+     * True between {@link #startLive()} and {@link #stopLive()}: the page is on
+     * screen. Every animation and poll is gated on this, never on engine
+     * events, which keep arriving while the app is in the background.
+     */
+    private boolean live;
 
     // Hero
     private CoreView core;
+    private Spoken coreSpoken;
     private Widgets.StatusDot coreDot;
     private TextView coreState;
     private TextView headline;
     private TextView detail;
     private LinearLayout modelChip;
+    private Spoken modelSpoken;
     private TextView modelChipText;
     private ImageView modelChipDot;
     private LinearLayout modeChip;
+    private Spoken modeSpoken;
     private TextView modeChipText;
     private ImageView modeChipIcon;
     private TextView liveLine;
+    private TextView stopSpeakingChip;
     private String modelChipKey = "";
     private String modeChipKey = "";
     private TextView rdLink, rdLoaded, rdSpeed, rdUptime;
+    /** When the last search ended without finding the AI (0 = not seen from this page). */
+    private long offlineAt;
+    private Engine.State seenState;
 
     // Offline guidance
     private LinearLayout offlineCard;
     private ImageView offlineIcon;
-    private boolean offlineStyledSearching;
+    private Boolean offlineStyledSearching;
     private TextView offlineTitle;
     private TextView offlineDetail;
     private Widgets.Meter offlineMeter;
+    private LinearLayout offlineSteps;
+    private TextView firewallStep;
+    private int firewallPort = -1;
     private TextView scanAgainBtn;
     private boolean everOffline;
 
     // Quick actions
     private final List<Tile> tiles = new ArrayList<Tile>();
-    private Tile readAloudTile;
+    private CommandKit.TileGrid tileGrid;
+    private Tile readAloudTile, warmTile, wakeTile, lockTile;
+    private LinearLayout pcPowerRow;
     /** The action waiting for its chat notice to finish (warm, unload, bench, scan). */
     private Tile watchTile;
     private String watchId;
@@ -102,11 +125,13 @@ public final class CommandScreen extends Screen {
     private LinearLayout loadedBody;
     private TextView loadedSide;
     private String loadedSig = "";
-    private TextView sesUptime, sesReplies, sesTokens, sesErrors, sesSide;
+    private TextView sesElapsed, sesReplies, sesTokens, sesErrors, sesSide;
 
     // PC vitals
+    private LinearLayout pcCard;
+    private Spoken pcSpoken;
     private LinearLayout pcBody;
-    private Widgets.StatusDot pcDot;
+    private Ui.LiveTag pcLive;
     private TextView pcSide;
     private Boolean pcShownPaired;
     private VitalRow cpuRow, ramRow, diskRow, batRow;
@@ -115,10 +140,13 @@ public final class CommandScreen extends Screen {
     private String vitalsError;
 
     // System log
+    private LinearLayout logCard;
     private LinearLayout logList;
     private TextView logMore;
     private TextView logEmpty;
     private boolean logExpanded;
+    private int logTimeWidth;
+    private String logTimePattern = "";
 
     // Live reply tracking (for the tok/s estimate and core pulses)
     private String liveId = "";
@@ -133,94 +161,159 @@ public final class CommandScreen extends Screen {
     // Small view types
     // ------------------------------------------------------------------
 
-    /** A single-line label that shrinks its text (down to a floor) to fit instead of clipping. */
-    private static final class FitText extends TextView {
-        private final float maxPx;
-        private final float minPx;
-        private final Paint probe = new Paint(Paint.ANTI_ALIAS_FLAG);
+    /**
+     * What TalkBack says for a control whose meaning follows live state. The
+     * view keeps its stable name as content description (tests and automation
+     * address it by that); the accessibility node speaks the current state
+     * and what a double-tap does, and TalkBack is told when the words change.
+     */
+    private static final class Spoken extends View.AccessibilityDelegate {
+        private final String action;
+        private final String longAction;
+        String role = "android.widget.Button";
+        String text = "";
+        /** Non-null for a toggle: its on/off state. */
+        Boolean checked;
 
-        FitText(Context c, float maxPx, float minPx) {
-            super(c);
-            this.maxPx = maxPx;
-            this.minPx = minPx;
-            setSingleLine(true);
-            setIncludeFontPadding(false);
-            setTextSize(TypedValue.COMPLEX_UNIT_PX, maxPx);
+        Spoken(String action, String longAction) {
+            this.action = action;
+            this.longAction = longAction;
         }
 
         @Override
-        protected void onMeasure(int w, int h) {
-            int avail = MeasureSpec.getSize(w) - getPaddingLeft() - getPaddingRight();
-            if (MeasureSpec.getMode(w) != MeasureSpec.UNSPECIFIED && avail > 0) {
-                probe.set(getPaint());
-                String s = getText().toString();
-                float size = maxPx;
-                probe.setTextSize(size);
-                while (size > minPx && probe.measureText(s) > avail) {
-                    size = Math.max(minPx, size - 0.5f);
-                    probe.setTextSize(size);
-                }
-                if (Math.abs(getTextSize() - size) > 0.01f) setTextSize(TypedValue.COMPLEX_UNIT_PX, size);
+        public void onInitializeAccessibilityNodeInfo(View host, AccessibilityNodeInfo info) {
+            super.onInitializeAccessibilityNodeInfo(host, info);
+            info.setClassName(role);
+            if (text.length() > 0) info.setContentDescription(text);
+            if (checked != null) {
+                info.setCheckable(true);
+                info.setChecked(checked);
             }
-            super.onMeasure(w, h);
+            if (action != null) {
+                info.addAction(new AccessibilityNodeInfo.AccessibilityAction(AccessibilityNodeInfo.ACTION_CLICK,
+                        action));
+            }
+            if (longAction != null) {
+                info.addAction(new AccessibilityNodeInfo.AccessibilityAction(
+                        AccessibilityNodeInfo.ACTION_LONG_CLICK, longAction));
+            }
+        }
+
+        @Override
+        public void onInitializeAccessibilityEvent(View host, AccessibilityEvent ev) {
+            super.onInitializeAccessibilityEvent(host, ev);
+            ev.setClassName(role);
+            if (checked != null) ev.setChecked(checked);
+        }
+
+        /** New words (and toggle state) for TalkBack; it hears about the change. */
+        void update(View host, String spoken, Boolean on) {
+            boolean same = spoken.equals(text) && (checked == null ? on == null : checked.equals(on));
+            if (same) return;
+            text = spoken;
+            checked = on;
+            host.sendAccessibilityEvent(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED);
         }
     }
 
-    /** One quick-action tile: icon over a micro-caps label, with engaged / pending / disabled looks. */
+    /** One quick-action tile: icon over a micro-caps label (or beside it, when wide), with engaged / pending / unavailable looks. */
     private final class Tile {
         final LinearLayout root;
         final ImageView icon;
-        final FitText label;
+        final TextView label;
         final Widgets.Meter busy;
         final boolean needsAi;
+        final String name;
+        final Spoken spoken;
+        final boolean wide;
         int iconKind;
         boolean engaged;
         boolean enabled = true;
         boolean pending;
         long pendingSince;
+        /** Why an unavailable tile can't run (spoken, and toasted on tap); "" = the AI's link state. */
+        String unavailable = "";
 
-        Tile(int iconKind, String text, String description, boolean needsAi) {
+        Tile(int iconKind, String text, String description, boolean needsAi, boolean wide) {
             this.iconKind = iconKind;
             this.needsAi = needsAi;
+            this.name = description;
+            this.wide = wide;
             root = ui.vbox();
-            root.setGravity(Gravity.CENTER_HORIZONTAL);
-            root.setPadding(ui.dp(4), ui.dp(11), ui.dp(4), 0);
             root.setContentDescription(description);
             root.setClickable(true);
             root.setFocusable(true);
+            spoken = new Spoken(null, null);
+            root.setAccessibilityDelegate(spoken);
             icon = new ImageView(a);
             icon.setScaleType(ImageView.ScaleType.CENTER);
-            root.addView(icon, new LinearLayout.LayoutParams(ui.dp(24), ui.dp(24)));
+            icon.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
             float max = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, t.hud ? 8.5f : 11.5f,
                     a.getResources().getDisplayMetrics());
-            label = new FitText(a, max, max * 0.78f);
-            label.setText(t.hud ? text.toUpperCase(Locale.US) : text);
-            label.setTypeface(t.hud ? t.labelFace : t.bodyMedium);
-            if (t.hud) label.setLetterSpacing(0.08f);
+            label = ui.text(t.hud ? text.toUpperCase(Locale.US) : text, 11, t.ink, t.hud ? t.labelFace : t.bodyMedium);
+            label.setTextSize(TypedValue.COMPLEX_UNIT_PX, max);
+            label.setSingleLine(true);
             label.setGravity(Gravity.CENTER);
             label.setEllipsize(TextUtils.TruncateAt.END);
-            LinearLayout.LayoutParams llp = Ui.fillW();
-            llp.topMargin = ui.dp(t.hud ? 8 : 7);
-            root.addView(label, llp);
+            if (t.hud) label.setLetterSpacing(0.08f);
             busy = new Widgets.Meter(a, 0, t.hud ? t.accent : t.data);
             busy.setVisibility(View.INVISIBLE);
             LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(ui.dp(26), ui.dp(2));
-            blp.topMargin = ui.dp(7);
             blp.bottomMargin = ui.dp(4);
+            if (wide) {
+                // A control-strip tile: icon beside the label, both centred.
+                root.setGravity(Gravity.CENTER_HORIZONTAL);
+                root.setPadding(ui.dp(10), ui.dp(10), ui.dp(10), 0);
+                LinearLayout line = ui.hbox();
+                line.setGravity(Gravity.CENTER);
+                line.addView(icon, new LinearLayout.LayoutParams(ui.dp(22), ui.dp(22)));
+                LinearLayout.LayoutParams llp = Ui.wrap();
+                llp.leftMargin = ui.dp(9);
+                line.addView(label, llp);
+                root.addView(line, Ui.wrap());
+                blp.topMargin = ui.dp(6);
+            } else {
+                root.setGravity(Gravity.CENTER_HORIZONTAL);
+                root.setPadding(ui.dp(TILE_PAD_DP), ui.dp(11), ui.dp(TILE_PAD_DP), 0);
+                root.addView(icon, new LinearLayout.LayoutParams(ui.dp(24), ui.dp(24)));
+                LinearLayout.LayoutParams llp = Ui.fillW();
+                llp.topMargin = ui.dp(t.hud ? 8 : 7);
+                root.addView(label, llp);
+                blp.topMargin = ui.dp(7);
+            }
             root.addView(busy, blp);
             render();
         }
 
         void render() {
-            int fg = engaged ? t.engaged : t.hud ? t.accent : t.isDark ? t.ink : t.accent;
-            icon.setImageDrawable(new IconDrawable(iconKind, fg, fg, ui.dp(22)));
-            label.setTextColor(engaged ? t.engaged : t.ink);
+            // Engaged (amber) tiles: the tint and edge use t.engaged, text and icon t.engagedInk.
+            int fg = engaged ? t.engagedInk : t.hud ? t.accent : t.isDark ? t.ink : t.accent;
+            icon.setImageDrawable(CommandKit.icon(iconKind, fg, ui.dp(22)));
+            label.setTextColor(engaged ? t.engagedInk : t.ink);
             int fill = engaged ? Theme.alpha(t.engaged, t.isDark ? 0x1C : 0x14)
                     : t.hud ? t.chip : t.isDark ? t.chip : t.surface2;
             int edge = engaged ? Theme.alpha(t.engaged, 0x80) : t.hud ? t.hair : t.edge;
             Drawable bg = ui.rounded(fill, edge, t.hud ? 8 : 10);
             root.setBackground(new RippleDrawable(ColorStateList.valueOf(Theme.alpha(t.accent, 0x33)), bg, null));
             root.setAlpha(enabled ? 1f : 0.42f);
+            speak();
+        }
+
+        /** TalkBack: the name, plus "working" or why it's unavailable; toggles say on/off. */
+        void speak() {
+            String state = pending ? "working" : !enabled ? unavailableReason() : "";
+            spoken.update(root, state.length() > 0 ? name + ", " + state : "", spoken.role.endsWith("ToggleButton")
+                    ? Boolean.valueOf(engaged) : null);
+        }
+
+        String unavailableReason() {
+            if (unavailable.length() > 0) return unavailable;
+            return e.state() == Engine.State.SEARCHING ? "waiting for your AI" : "needs your AI online";
+        }
+
+        void setToggle() {
+            spoken.role = "android.widget.ToggleButton";
+            speak();
         }
 
         void setEngaged(boolean on) {
@@ -229,21 +322,27 @@ public final class CommandScreen extends Screen {
             render();
         }
 
-        void setEnabled(boolean on) {
-            if (enabled == on) return;
+        void setEnabled(boolean on, String why) {
+            unavailable = why == null ? "" : why;
+            if (enabled == on) {
+                speak();
+                return;
+            }
             enabled = on;
             root.setAlpha(on ? 1f : 0.42f);
+            speak();
         }
 
         void setPending(boolean on) {
             pending = on;
             pendingSince = on ? System.currentTimeMillis() : 0;
             busy.setVisibility(on ? View.VISIBLE : View.INVISIBLE);
-            if (on) animateBusy(isShown());
+            if (on) animateBusy(live);
             else busy.setIndeterminate(false);
+            speak();
         }
 
-        /** The busy bar sweeps while the screen shows (and motion is allowed); otherwise it's a static line. */
+        /** The busy bar sweeps while the page is live (and motion is allowed); otherwise it's a static line. */
         void animateBusy(boolean run) {
             if (run && !e.settings.reduceMotion()) busy.setIndeterminate(true);
             else busy.setFraction(1f);
@@ -257,10 +356,11 @@ public final class CommandScreen extends Screen {
         Widgets.Sparkline spark;
     }
 
-    /** One PC vitals line: micro-caps name, meter, mono value. */
+    /** One PC vitals line: micro-caps name, meter (or a dashed track when there's no scale), mono value. */
     private static final class VitalRow {
         LinearLayout row;
         Widgets.Meter meter;
+        CommandKit.DashLine dash;
         TextView value;
     }
 
@@ -282,9 +382,9 @@ public final class CommandScreen extends Screen {
         col.addView(buildPc(), gap(Ui.fillW(), 12));
         col.addView(buildLog(), gap(Ui.fillW(), 12));
         TextView foot = ui.label(t.hud ? "OMNI-DECK · Mobile " + a.appVersion() : "OMNI-DECK Mobile " + a.appVersion());
-        foot.setTextColor(t.faint);
         foot.setGravity(Gravity.CENTER);
         col.addView(foot, gap(Ui.fillW(), 18));
+        seenState = e.state();
         refreshAll();
         return scroll;
     }
@@ -301,6 +401,14 @@ public final class CommandScreen extends Screen {
         return l;
     }
 
+    /**
+     * Display words: Cyber sets them in caps (unit symbols stay lower-case:
+     * "12s", "tok/s"); Light and Dark keep them as written.
+     */
+    private String caps(String s) {
+        return t.hud ? t.labelUnits(s) : s;
+    }
+
     // --- Hero: the AI core ---------------------------------------------
 
     private View buildHero() {
@@ -310,6 +418,7 @@ public final class CommandScreen extends Screen {
         LinearLayout top = ui.hbox();
         top.addView(ui.label("AI core"), Ui.weight(1));
         coreDot = new Widgets.StatusDot(a);
+        coreDot.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
         top.addView(coreDot, new LinearLayout.LayoutParams(ui.dp(12), ui.dp(12)));
         coreState = ui.text("", t.hud ? 9.5f : 11, t.ok, t.labelFace);
         coreState.setLetterSpacing(t.hud ? 0.16f : 0.04f);
@@ -321,17 +430,10 @@ public final class CommandScreen extends Screen {
         core = new CoreView(a, t, e.settings.hudEffects());
         core.setReduceMotion(e.settings.reduceMotion());
         core.setContentDescription("AI core");
-        core.setAccessibilityDelegate(new View.AccessibilityDelegate() {
-            @Override
-            public void onInitializeAccessibilityNodeInfo(View host, AccessibilityNodeInfo info) {
-                super.onInitializeAccessibilityNodeInfo(host, info);
-                // Say what tap and hold do (TalkBack reads these as "double-tap to …").
-                info.addAction(new AccessibilityNodeInfo.AccessibilityAction(AccessibilityNodeInfo.ACTION_CLICK,
-                        "Open Comms"));
-                info.addAction(new AccessibilityNodeInfo.AccessibilityAction(
-                        AccessibilityNodeInfo.ACTION_LONG_CLICK, "Talk to OMNI"));
-            }
-        });
+        // Say what tap and hold do (TalkBack reads these as "double-tap to …").
+        coreSpoken = new Spoken("Open Comms", "Talk to OMNI");
+        coreSpoken.role = "android.widget.Button";
+        core.setAccessibilityDelegate(coreSpoken);
         core.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -357,7 +459,7 @@ public final class CommandScreen extends Screen {
         slp.topMargin = ui.dp(6);
         card.addView(stage, slp);
 
-        headline = ui.text("", t.hud ? 11 : 15, t.ok, t.hud ? t.labelFace : t.bodySemi);
+        headline = ui.text("", t.hud ? 11 : 15, t.ink, t.hud ? t.labelFace : t.bodySemi);
         headline.setLetterSpacing(t.hud ? 0.18f : 0f);
         headline.setGravity(Gravity.CENTER);
         headline.setSingleLine(true);
@@ -374,6 +476,8 @@ public final class CommandScreen extends Screen {
         LinearLayout chips = ui.hbox();
         chips.setGravity(Gravity.CENTER);
         modelChip = chip("Switch model");
+        modelSpoken = new Spoken("Switch model", null);
+        modelChip.setAccessibilityDelegate(modelSpoken);
         modelChipDot = new ImageView(a);
         modelChip.addView(modelChipDot, new LinearLayout.LayoutParams(ui.dp(16), ui.dp(16)));
         modelChipText = chipText();
@@ -391,9 +495,16 @@ public final class CommandScreen extends Screen {
         LinearLayout.LayoutParams mlp = Ui.wrap();
         chips.addView(modelChip, mlp);
         modeChip = chip("Change mode");
+        modeSpoken = new Spoken("Change mode", null);
+        modeChip.setAccessibilityDelegate(modeSpoken);
         modeChipIcon = new ImageView(a);
         modeChip.addView(modeChipIcon, new LinearLayout.LayoutParams(ui.dp(16), ui.dp(16)));
         modeChipText = chipText();
+        modeChipText.setTypeface(t.hud ? t.labelFace : t.bodyMedium);
+        if (t.hud) {
+            modeChipText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 9.5f);
+            modeChipText.setLetterSpacing(0.12f);
+        }
         modeChip.addView(modeChipText, chipTextLp());
         modeChip.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -407,11 +518,37 @@ public final class CommandScreen extends Screen {
         chips.addView(modeChip, dlp);
         card.addView(chips, gap(Ui.fillW(), 14));
 
-        liveLine = ui.text("", t.hud ? 11 : 12.5f, t.faint, t.hud ? t.mono : t.body);
+        // The one-line "what's happening now"; while the phone talks, a Stop control joins it.
+        LinearLayout liveRow = ui.hbox();
+        liveRow.setGravity(Gravity.CENTER);
+        liveLine = ui.text("", t.hud ? 11 : 12.5f, t.dim, t.hud ? t.mono : t.body);
         liveLine.setGravity(Gravity.CENTER);
         liveLine.setSingleLine(true);
         liveLine.setEllipsize(TextUtils.TruncateAt.END);
-        card.addView(liveLine, gap(Ui.fillW(), 12));
+        liveRow.addView(liveLine, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        stopSpeakingChip = ui.actionChip(t.hud ? "STOP" : "Stop", false, new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                a.stopSpeaking();
+                refreshHero();
+            }
+        });
+        if (t.hud) {
+            stopSpeakingChip.setTypeface(t.labelFace);
+            stopSpeakingChip.setTextSize(TypedValue.COMPLEX_UNIT_SP, 9.5f);
+            stopSpeakingChip.setLetterSpacing(0.12f);
+        }
+        stopSpeakingChip.setContentDescription("Stop speaking");
+        IconDrawable stopIcon = new IconDrawable(IconDrawable.STOP_CIRCLE, t.hud ? t.accent : t.isDark ? t.ink : t.accent,
+                t.hud ? t.accent : t.isDark ? t.ink : t.accent, ui.dp(16));
+        stopIcon.setBounds(0, 0, ui.dp(16), ui.dp(16));
+        stopSpeakingChip.setCompoundDrawables(stopIcon, null, null, null);
+        stopSpeakingChip.setCompoundDrawablePadding(ui.dp(6));
+        stopSpeakingChip.setVisibility(View.GONE);
+        LinearLayout.LayoutParams sp = Ui.wrap();
+        sp.leftMargin = ui.dp(10);
+        liveRow.addView(stopSpeakingChip, sp);
+        card.addView(liveRow, gap(Ui.fillW(), 12));
         return card;
     }
 
@@ -422,7 +559,6 @@ public final class CommandScreen extends Screen {
         box.setGravity(end ? Gravity.END : Gravity.START);
         TextView l = ui.label(name);
         l.setTextSize(TypedValue.COMPLEX_UNIT_SP, t.hud ? 8 : 10);
-        l.setTextColor(t.faint);
         box.addView(l, Ui.wrap());
         TextView v = ui.readout("—", t.hud ? 14 : 14.5f, t.ink);
         v.setPadding(0, ui.dp(4), 0, 0);
@@ -460,6 +596,7 @@ public final class CommandScreen extends Screen {
         return lp;
     }
 
+    /** Tint and edge from {@code color} (fills only: amber uses t.engaged here, never as text). */
     private void styleChip(LinearLayout c, int color) {
         Drawable bg = ui.rounded(Theme.alpha(color, t.isDark ? 0x17 : 0x10), Theme.alpha(color, t.hud ? 0x59 : 0x4D),
                 t.hud ? 6 : 17);
@@ -472,10 +609,11 @@ public final class CommandScreen extends Screen {
         LinearLayout card = ui.vbox();
         offlineCard = card;
         if (t.cardElevation > 0) card.setElevation(ui.dp(t.cardElevation));
-        card.setPadding(ui.dp(16), ui.dp(14), ui.dp(16), ui.dp(16));
+        card.setPadding(ui.dp(18), ui.dp(14), ui.dp(16), ui.dp(16));
 
         LinearLayout head = ui.hbox();
         offlineIcon = new ImageView(a);
+        offlineIcon.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
         head.addView(offlineIcon, new LinearLayout.LayoutParams(ui.dp(24), ui.dp(24)));
         offlineTitle = ui.text("", t.hud ? 12 : 16, t.inkStrong, t.hud ? t.labelFace : t.bodySemi);
         if (t.hud) offlineTitle.setLetterSpacing(0.1f);
@@ -491,16 +629,21 @@ public final class CommandScreen extends Screen {
         mlp.topMargin = ui.dp(10);
         card.addView(offlineMeter, mlp);
 
+        offlineSteps = ui.vbox();
         View rule = ui.divider();
-        card.addView(rule, gap(Ui.fillW(), 12));
-        card.addView(step(1, "On the PC, start Ollama so it listens on the network, not only on the PC itself:"),
+        offlineSteps.addView(rule, gap(Ui.fillW(), 12));
+        offlineSteps.addView(step(1, "On the PC, start Ollama so it listens on the network, not only on the PC itself:"),
                 gap(Ui.fillW(), 12));
         LinearLayout.LayoutParams clp = gap(Ui.fillW(), 8);
         clp.leftMargin = ui.dp(28);
-        card.addView(codeLine("OLLAMA_HOST=0.0.0.0"), clp);
-        card.addView(step(2, "Join this phone to the same Wi-Fi as the PC (guest networks usually block it)."),
+        offlineSteps.addView(codeLine("OLLAMA_HOST=0.0.0.0"), clp);
+        offlineSteps.addView(step(2, "Join this phone to the same Wi-Fi as the PC (guest networks usually block it)."),
                 gap(Ui.fillW(), 12));
-        card.addView(step(3, "Allow port 11434 through the PC's firewall for private networks."), gap(Ui.fillW(), 10));
+        // Step 03 names the port that was actually scanned (filled in by refreshOffline).
+        LinearLayout s3 = step(3, "");
+        firewallStep = (TextView) s3.getChildAt(1);
+        offlineSteps.addView(s3, gap(Ui.fillW(), 10));
+        card.addView(offlineSteps, Ui.fillW());
 
         // Primary action full width, the manual fallback as a quiet link under it.
         scanAgainBtn = ui.button("Scan again", IconDrawable.SCAN, Ui.PRIMARY, new View.OnClickListener() {
@@ -515,7 +658,6 @@ public final class CommandScreen extends Screen {
         });
         scanAgainBtn.setContentDescription("Scan again");
         scanAgainBtn.setMinHeight(ui.dp(44));
-        centerCompound(scanAgainBtn);
         card.addView(scanAgainBtn, gap(Ui.fillW(), 18));
         TextView addr = ui.button("Enter address", IconDrawable.EDIT, Ui.GHOST, new View.OnClickListener() {
             @Override
@@ -535,42 +677,28 @@ public final class CommandScreen extends Screen {
     }
 
     /**
-     * Keeps a full-width button's leading icon next to its centered label
-     * (a compound drawable otherwise hugs the left edge).
+     * The card keeps a quiet edge; a 3dp rail down its left side carries the
+     * state (danger while the AI is missing, amber while a scan runs), with
+     * the matching glyph. It is the page's focal point, not an alarm frame.
      */
-    private void centerCompound(final TextView b) {
-        b.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
-            @Override
-            public void onLayoutChange(View v, int l, int top, int r, int bottom, int ol, int ot, int or, int ob) {
-                Drawable icon = b.getCompoundDrawables()[0];
-                float content = b.getPaint().measureText(b.getText().toString())
-                        + (icon != null ? icon.getBounds().width() + b.getCompoundDrawablePadding() : 0);
-                int pad = Math.max(ui.dp(12), Math.round((r - l - content) / 2f));
-                if (Math.abs(b.getPaddingLeft() - pad) > 1) {
-                    final int p = pad;
-                    b.post(new Runnable() {
-                        @Override
-                        public void run() {
-                            b.setPadding(p, b.getPaddingTop(), p, b.getPaddingBottom());
-                        }
-                    });
-                }
-            }
-        });
-    }
-
-    /** Red while the AI is missing, amber while a scan runs. */
     private void styleOfflineCard(boolean searching) {
+        offlineStyledSearching = searching;
         int c = searching ? t.warn : t.danger;
-        Panel.Builder b = Panel.builder().fill(t.surface).edge(Theme.alpha(c, t.hud ? 0x73 : 0x66),
-                Math.max(1, ui.dp(1))).radius(ui.dp(t.radius)).highlight(t.panelHi);
-        if (t.hud) b.brackets(ui.dp(10), ui.dp(1.2f), Theme.alpha(c, 0xB3)).bracketInset(ui.dp(5));
-        offlineCard.setBackground(b.build());
+        Panel.Builder b = Panel.builder().fill(t.surface).edge(t.edge, Math.max(1, ui.dp(1)))
+                .radius(ui.dp(t.radius)).highlight(t.panelHi);
+        if (t.hud) {
+            b.grid(ui.dp(22), t.gridColor).bloom(t.bloomColor)
+                    .brackets(ui.dp(10), ui.dp(1.2f), t.bracketColor).bracketInset(ui.dp(5));
+        }
+        // In Cyber the rail stays clear of the corner brackets.
+        offlineCard.setBackground(new CommandKit.RailDrawable(b.build(), c, ui.dp(3), ui.dp(t.radius),
+                t.hud ? ui.dp(22) : 0));
         int icon = searching ? IconDrawable.SCAN : IconDrawable.WIFI;
         offlineIcon.setImageDrawable(new IconDrawable(icon, c, c, ui.dp(22)));
     }
 
-    private View step(int n, String text) {
+    /** A numbered step: a mono "01" and the instruction (its second child). */
+    private LinearLayout step(int n, String text) {
         LinearLayout row = ui.hbox();
         row.setGravity(Gravity.TOP);
         TextView num = ui.text(String.format(Locale.US, "%02d", n), 12, t.hud ? t.accent : t.label, t.mono);
@@ -586,7 +714,7 @@ public final class CommandScreen extends Screen {
     private View codeLine(final String code) {
         LinearLayout row = ui.hbox();
         row.setPadding(ui.dp(12), ui.dp(2), ui.dp(4), ui.dp(2));
-        row.setBackground(ui.rounded(t.codeBg, t.hud ? t.edge : t.edge, 8));
+        row.setBackground(ui.rounded(t.codeBg, t.edge, 8));
         TextView tv = ui.text(code, 13.5f, t.hud ? t.codeText : t.inlineCodeText, t.mono);
         row.addView(tv, Ui.weight(1));
         ImageView copy = ui.iconButton(IconDrawable.COPY, "Copy OLLAMA_HOST setting", t.dim, new View.OnClickListener() {
@@ -603,8 +731,11 @@ public final class CommandScreen extends Screen {
 
     private View buildQuickActions() {
         LinearLayout card = ui.capCard("Quick actions", null);
-        LinearLayout body = ui.cardBody();
-        body.setPadding(ui.dp(12), ui.dp(12), ui.dp(12), ui.dp(12));
+        float maxPx = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, t.hud ? 8.5f : 11.5f,
+                a.getResources().getDisplayMetrics());
+        tileGrid = new CommandKit.TileGrid(a, 4, ui.dp(TILE_GAP_DP), ui.dp(TILE_PAD_DP * 2), maxPx, maxPx * 0.72f);
+        if (t.hud) tileGrid.setTracking(0.08f, 0.05f, ui.dp(84));
+        tileGrid.setPadding(ui.dp(12), ui.dp(12), ui.dp(12), ui.dp(12));
         Tile talk = tile(IconDrawable.MIC, "Talk", "Talk", false, new Runnable() {
             @Override
             public void run() {
@@ -632,8 +763,8 @@ public final class CommandScreen extends Screen {
                 ui.toast(on ? "Reading replies aloud" : "Read-aloud off");
             }
         });
-        final Tile[] warm = new Tile[1];
-        warm[0] = tile(IconDrawable.BOLT, "Warm up", "Warm model", true, new Runnable() {
+        readAloudTile.setToggle();
+        warmTile = tile(IconDrawable.BOLT, "Warm up", "Warm model", true, new Runnable() {
             @Override
             public void run() {
                 String m = e.currentModel();
@@ -641,13 +772,13 @@ public final class CommandScreen extends Screen {
                     ui.toast("No models installed on the PC yet.");
                     return;
                 }
-                watch(warm[0]);
+                watch(warmTile);
                 e.warm();
                 ui.toast("Loading " + m + " into memory…");
             }
         });
         final Tile[] unload = new Tile[1];
-        unload[0] = tile(IconDrawable.POWER, "Unload", "Unload model", true, new Runnable() {
+        unload[0] = tile(CommandKit.Glyph.EJECT, "Unload", "Unload model", true, new Runnable() {
             @Override
             public void run() {
                 unload(unload[0]);
@@ -704,24 +835,75 @@ public final class CommandScreen extends Screen {
                 a.select(MainActivity.TAB_COMMS, true);
             }
         });
-        Tile[][] grid = {{talk, newChat, summarize, readAloudTile}, {warm[0], unload[0], bench[0], models},
+        Tile[][] grid = {{talk, newChat, summarize, readAloudTile}, {warmTile, unload[0], bench[0], models},
                 {scan[0], pc, history, diag}};
         for (int r = 0; r < grid.length; r++) {
             LinearLayout row = ui.hbox();
             row.setBaselineAligned(false);
             for (int c = 0; c < grid[r].length; c++) {
                 LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, ui.dp(t.hud ? 70 : 72), 1);
-                if (c > 0) lp.leftMargin = ui.dp(8);
+                if (c > 0) lp.leftMargin = ui.dp(TILE_GAP_DP);
                 row.addView(grid[r][c].root, lp);
+                tileGrid.addLabel(grid[r][c].label);
             }
-            body.addView(row, gap(Ui.fillW(), r == 0 ? 0 : 8));
+            tileGrid.addView(row, gap(Ui.fillW(), r == 0 ? 0 : TILE_GAP_DP));
         }
-        card.addView(body, Ui.fillW());
+        tileGrid.addView(buildPcPower(), gap(Ui.fillW(), TILE_GAP_DP));
+        card.addView(tileGrid, Ui.fillW());
         return card;
     }
 
-    private Tile tile(int icon, String label, String description, boolean needsAi, final Runnable action) {
-        final Tile tl = new Tile(icon, label, description, needsAi);
+    /**
+     * The PC power strip under the grid: two half-width tiles, shown once a
+     * PC is set up (bridge paired or its MAC known). A control that can't
+     * run yet stays in place, dimmed, and says what it needs.
+     */
+    private View buildPcPower() {
+        pcPowerRow = ui.hbox();
+        pcPowerRow.setBaselineAligned(false);
+        wakeTile = wideTile(IconDrawable.POWER, "Wake PC", "Wake PC", new Runnable() {
+            @Override
+            public void run() {
+                wakePc();
+            }
+        });
+        wakeTile.unavailable = "needs the PC's MAC address";
+        lockTile = wideTile(CommandKit.Glyph.LOCK, "Lock PC", "Lock PC", new Runnable() {
+            @Override
+            public void run() {
+                if (!e.settings.confirmPcActions()) {
+                    lockPc();
+                    return;
+                }
+                ui.confirm("Lock the PC?", "The PC's screen locks right away.", "Lock", new Runnable() {
+                    @Override
+                    public void run() {
+                        lockPc();
+                    }
+                });
+            }
+        });
+        lockTile.unavailable = "needs the PC bridge paired";
+        LinearLayout.LayoutParams wl = new LinearLayout.LayoutParams(0, ui.dp(52), 1);
+        pcPowerRow.addView(wakeTile.root, wl);
+        LinearLayout.LayoutParams ll = new LinearLayout.LayoutParams(0, ui.dp(52), 1);
+        ll.leftMargin = ui.dp(TILE_GAP_DP);
+        pcPowerRow.addView(lockTile.root, ll);
+        tileGrid.addFollower(wakeTile.label);
+        tileGrid.addFollower(lockTile.label);
+        pcPowerRow.setVisibility(View.GONE);
+        return pcPowerRow;
+    }
+
+    private Tile tile(int icon, String label, String description, boolean needsAi, Runnable action) {
+        return addTile(new Tile(icon, label, description, needsAi, false), action);
+    }
+
+    private Tile wideTile(int icon, String label, String description, Runnable action) {
+        return addTile(new Tile(icon, label, description, false, true), action);
+    }
+
+    private Tile addTile(final Tile tl, final Runnable action) {
         tl.root.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -733,6 +915,14 @@ public final class CommandScreen extends Screen {
                 if (tl.needsAi && e.state() != Engine.State.ONLINE) {
                     ui.toast(e.state() == Engine.State.SEARCHING ? "Still looking for your AI…"
                             : "Your AI is offline. Scan again or enter its address first.");
+                    return;
+                }
+                if (tl == wakeTile && !tl.enabled) {
+                    ui.toast("Wake-on-LAN needs the PC's MAC address. Add it in Settings › PC bridge.");
+                    return;
+                }
+                if (tl == lockTile && !tl.enabled) {
+                    ui.toast("Pair the PC bridge first (Settings › PC bridge) to lock the PC from here.");
                     return;
                 }
                 action.run();
@@ -788,6 +978,34 @@ public final class CommandScreen extends Screen {
             }, null));
         }
         ui.pick("Free memory on the PC", rows, null, null);
+    }
+
+    /** Wake-on-LAN straight from the dashboard: the result is a toast (and a line in the system log). */
+    private void wakePc() {
+        final Tile tl = wakeTile;
+        tl.setPending(true);
+        e.wakePc(new Engine.Callback<String>() {
+            @Override
+            public void done(String said, String error) {
+                tl.setPending(false);
+                String s = error != null ? error : said;
+                int end = s.indexOf(". ");
+                ui.toast(error != null || end < 0 ? Fmt.ellipsize(s, 140) : s.substring(0, end + 1));
+            }
+        });
+    }
+
+    /** Locks the PC through the bridge (after the confirmation, when Settings asks for one). */
+    private void lockPc() {
+        final Tile tl = lockTile;
+        tl.setPending(true);
+        e.lockPc(new Engine.Callback<String>() {
+            @Override
+            public void done(String said, String error) {
+                tl.setPending(false);
+                ui.toast(Fmt.ellipsize(error != null ? error : said, 140));
+            }
+        });
     }
 
     /** Marks a tile busy until the next chat notice it produces reaches a final tone. */
@@ -876,8 +1094,9 @@ public final class CommandScreen extends Screen {
         body.addView(valueRow, Ui.fillW());
         m.spark = new Widgets.Sparkline(a, t.data, t.hair);
         m.spark.setFloor(0);
+        m.spark.setEmptyLabel("No samples");
         body.addView(m.spark, gap(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ui.dp(34)), 10));
-        m.caption = ui.text("", 11, t.faint, t.body);
+        m.caption = ui.text("", 11, t.dim, t.body);
         m.caption.setSingleLine(true);
         m.caption.setEllipsize(TextUtils.TruncateAt.END);
         body.addView(m.caption, gap(Ui.fillW(), 7));
@@ -886,13 +1105,14 @@ public final class CommandScreen extends Screen {
     }
 
     private View buildContextTile() {
-        ctxSide = ui.readout("", 10.5f, t.faint);
+        ctxSide = ui.readout("", 10.5f, t.dim);
         LinearLayout card = ui.capCard("Context", ctxSide);
         LinearLayout body = ui.cardBody();
         body.setPadding(ui.dp(12), ui.dp(8), ui.dp(12), ui.dp(12));
         body.setGravity(Gravity.CENTER_HORIZONTAL);
         FrameLayout g = new FrameLayout(a);
         ctxGauge = new Widgets.Gauge(a, t.hud ? Theme.alpha(t.accent, 0x24) : t.isDark ? t.hair : t.edge, t.data);
+        ctxGauge.setEmptyLabel("No samples");
         ctxGauge.setFraction(-1, false);
         g.addView(ctxGauge, new FrameLayout.LayoutParams(ui.dp(82), ui.dp(82), Gravity.CENTER));
         ctxPct = ui.readout("—", 17, t.inkStrong);
@@ -900,7 +1120,7 @@ public final class CommandScreen extends Screen {
         g.addView(ctxPct, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER));
         body.addView(g, new LinearLayout.LayoutParams(ui.dp(82), ui.dp(76)));
-        ctxCaption = ui.text("", 11, t.faint, t.body);
+        ctxCaption = ui.text("", 11, t.dim, t.body);
         ctxCaption.setGravity(Gravity.CENTER);
         ctxCaption.setSingleLine(true);
         ctxCaption.setEllipsize(TextUtils.TruncateAt.END);
@@ -910,7 +1130,7 @@ public final class CommandScreen extends Screen {
     }
 
     private View buildLoaded() {
-        loadedSide = ui.readout("", 10.5f, t.faint);
+        loadedSide = ui.readout("", 10.5f, t.dim);
         LinearLayout card = ui.capCard("Loaded models", loadedSide);
         loadedBody = ui.cardBody();
         card.addView(loadedBody, Ui.fillW());
@@ -918,13 +1138,13 @@ public final class CommandScreen extends Screen {
     }
 
     private View buildSession() {
-        sesSide = ui.readout("", 10.5f, t.faint);
+        sesSide = ui.readout("", 10.5f, t.dim);
         LinearLayout card = ui.capCard("Session", sesSide);
         LinearLayout body = ui.cardBody();
         body.setPadding(ui.dp(6), ui.dp(12), ui.dp(6), ui.dp(12));
         LinearLayout row = ui.hbox();
         row.setBaselineAligned(false);
-        sesUptime = stat(row, "Uptime", false);
+        sesElapsed = stat(row, "Elapsed", false);
         sesReplies = stat(row, "Replies", true);
         sesTokens = stat(row, "Tokens out", true);
         sesErrors = stat(row, "Errors", true);
@@ -955,18 +1175,24 @@ public final class CommandScreen extends Screen {
 
     private View buildPc() {
         LinearLayout side = ui.hbox();
-        pcDot = new Widgets.StatusDot(a);
-        side.addView(pcDot, new LinearLayout.LayoutParams(ui.dp(12), ui.dp(12)));
-        pcSide = ui.readout("", 10.5f, t.faint);
-        pcSide.setPadding(ui.dp(4), 0, ui.dp(2), 0);
-        side.addView(pcSide);
+        side.setGravity(Gravity.CENTER_VERTICAL);
+        pcLive = ui.liveTag();
+        side.addView(pcLive, Ui.wrap());
+        pcSide = ui.readout("", 10.5f, t.dim);
+        side.addView(pcSide, Ui.wrap());
         ImageView chev = new ImageView(a);
         chev.setImageDrawable(new IconDrawable(IconDrawable.CHEVRON, t.dim, t.dim, ui.dp(16)));
         chev.setRotation(-90); // the kit's chevron points down; this one means "open"
-        side.addView(chev, new LinearLayout.LayoutParams(ui.dp(18), ui.dp(18)));
+        chev.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(ui.dp(18), ui.dp(18));
+        clp.leftMargin = ui.dp(4);
+        side.addView(chev, clp);
         LinearLayout card = ui.capCard("PC vitals", side);
+        pcCard = card;
         card.setContentDescription("PC vitals");
         card.setClickable(true);
+        pcSpoken = new Spoken("Open PC", null);
+        card.setAccessibilityDelegate(pcSpoken);
         card.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -1014,7 +1240,7 @@ public final class CommandScreen extends Screen {
         pcBody.addView(diskRow.row, gap(Ui.fillW(), 10));
         pcBody.addView(batRow.row, gap(Ui.fillW(), 10));
         batRow.row.setVisibility(View.GONE);
-        pcFoot = ui.text("", 11, t.faint, t.body);
+        pcFoot = ui.text("", 11, t.dim, t.body);
         pcFoot.setSingleLine(true);
         pcFoot.setEllipsize(TextUtils.TruncateAt.END);
         pcBody.addView(pcFoot, gap(Ui.fillW(), 12));
@@ -1025,8 +1251,15 @@ public final class CommandScreen extends Screen {
         r.row = ui.hbox();
         TextView l = ui.label(name);
         r.row.addView(l, new LinearLayout.LayoutParams(ui.dp(t.hud ? 70 : 64), ViewGroup.LayoutParams.WRAP_CONTENT));
+        FrameLayout track = new FrameLayout(a);
         r.meter = new Widgets.Meter(a, t.hud ? Theme.alpha(t.accent, 0x1F) : t.isDark ? t.hair : t.chip, t.data);
-        r.row.addView(r.meter, new LinearLayout.LayoutParams(0, ui.dp(5), 1));
+        track.addView(r.meter, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ui.dp(5),
+                Gravity.CENTER_VERTICAL));
+        r.dash = new CommandKit.DashLine(a, t.hud ? Theme.alpha(t.accent, 0x4D) : t.isDark ? t.edge : t.edge);
+        r.dash.setVisibility(View.GONE);
+        track.addView(r.dash, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ui.dp(5),
+                Gravity.CENTER_VERTICAL));
+        r.row.addView(track, new LinearLayout.LayoutParams(0, ui.dp(5), 1));
         r.value = ui.readout("—", 12.5f, t.ink);
         r.value.setGravity(Gravity.END);
         r.row.addView(r.value, new LinearLayout.LayoutParams(ui.dp(96), ViewGroup.LayoutParams.WRAP_CONTENT));
@@ -1060,6 +1293,7 @@ public final class CommandScreen extends Screen {
             }
         });
         LinearLayout card = ui.capCard("System log", copy);
+        logCard = card;
         LinearLayout body = ui.cardBody();
         body.setPadding(ui.dp(14), ui.dp(6), ui.dp(14), ui.dp(10));
         logList = ui.vbox();
@@ -1086,8 +1320,10 @@ public final class CommandScreen extends Screen {
         LinearLayout row = ui.hbox();
         row.setGravity(Gravity.TOP);
         row.setPadding(0, ui.dp(5), 0, ui.dp(5));
-        TextView time = ui.text(clock.format(new Date(ev.time)), 11, t.faint, t.mono);
+        TextView time = ui.text(ui.clock(ev.time, true), 11, t.dim, t.mono);
         time.setPadding(0, ui.dp(1), 0, 0);
+        // One column width for every row, whatever the hour ("9:05:00 AM" vs "12:05:00 PM").
+        time.setMinWidth(logTimeWidth(time.getPaint()));
         row.addView(time, Ui.wrap());
         View dot = new View(a);
         dot.setBackground(ui.rounded(levelColor(ev.level), 0, 3));
@@ -1100,6 +1336,20 @@ public final class CommandScreen extends Screen {
         text.setLineSpacing(0, 1.15f);
         row.addView(text, Ui.weight(1));
         return row;
+    }
+
+    /** The widest time of day in the phone's clock format (12:59:59 PM or 23:59:59), in px. */
+    private int logTimeWidth(Paint p) {
+        Calendar cal = Calendar.getInstance();
+        cal.set(Calendar.HOUR_OF_DAY, 12);
+        cal.set(Calendar.MINUTE, 59);
+        cal.set(Calendar.SECOND, 59);
+        String widest = ui.clock(cal.getTimeInMillis(), true);
+        if (!widest.equals(logTimePattern)) {
+            logTimePattern = widest;
+            logTimeWidth = (int) Math.ceil(p.measureText(widest.replaceAll("\\d", "8")));
+        }
+        return logTimeWidth;
     }
 
     private int levelColor(String level) {
@@ -1150,7 +1400,7 @@ public final class CommandScreen extends Screen {
         StringBuilder sb = new StringBuilder("OMNI-DECK system log\n");
         for (int i = evs.size() - 1; i >= 0; i--) {
             Telemetry.Event ev = evs.get(i);
-            sb.append(clock.format(new Date(ev.time))).append("  ").append(ev.level.toUpperCase(Locale.US))
+            sb.append(ui.clock(ev.time, true)).append("  ").append(ev.level.toUpperCase(Locale.US))
                     .append("  ").append(ev.text).append('\n');
         }
         a.copy("System log", sb.toString().trim());
@@ -1169,6 +1419,12 @@ public final class CommandScreen extends Screen {
         refreshSession();
         refreshPc();
         renderLog();
+        refreshLiveCaps();
+    }
+
+    /** True while the phone reads something aloud (the shell polls it; the engine knows at once). */
+    private boolean speaking() {
+        return e.speaking() || a.isSpeaking();
     }
 
     /** The core's mode from the Engine's state. */
@@ -1180,7 +1436,7 @@ public final class CommandScreen extends Screen {
             ChatMessage m = e.streamingMessage();
             return m != null && m.content.length() > 0 ? CoreView.STREAMING : CoreView.THINKING;
         }
-        if (e.speaking()) return CoreView.SPEAKING;
+        if (speaking()) return CoreView.SPEAKING;
         return CoreView.IDLE;
     }
 
@@ -1189,131 +1445,168 @@ public final class CommandScreen extends Screen {
         int mode = coreMode();
         core.setMode(mode);
         String state;
-        int color;
+        int ink;
+        int dotColor;
         switch (mode) {
             case CoreView.OFFLINE:
+                // The instrument is unpowered: the annunciator goes dim too (the fault
+                // shows in the headline, the core's pip and the troubleshooting card).
                 state = "Offline";
-                color = t.danger;
+                ink = t.dim;
+                dotColor = t.dim;
                 break;
             case CoreView.SCANNING:
                 state = "Scanning";
-                color = t.warn;
+                ink = dotColor = t.warn;
                 break;
             case CoreView.THINKING:
                 state = "Thinking";
-                color = t.engaged;
+                ink = t.engagedInk;
+                dotColor = t.engaged;
                 break;
             case CoreView.STREAMING:
                 state = "Generating";
-                color = t.hud ? t.accent : t.data;
+                ink = dotColor = t.hud ? t.accent : t.data;
                 break;
             case CoreView.SPEAKING:
                 state = "Speaking";
-                color = t.hud ? t.accent : t.data;
+                ink = dotColor = t.hud ? t.accent : t.data;
                 break;
             default:
                 state = "Idle";
-                color = t.ok;
+                ink = dotColor = t.ok;
                 break;
         }
         coreState.setText(t.label(state));
-        coreState.setTextColor(color);
-        coreDot.setColor(color);
-        coreDot.setPulsing(mode != CoreView.OFFLINE && mode != CoreView.IDLE && isShown()
-                && !e.settings.reduceMotion());
+        coreState.setTextColor(ink);
+        coreDot.setColor(dotColor);
+        coreDot.setPulsing(mode != CoreView.OFFLINE && mode != CoreView.IDLE && live && !e.settings.reduceMotion());
+        coreSpoken.update(core, "AI core, " + state.toLowerCase(Locale.US), null);
 
         Engine.State s = e.state();
         ServerInfo srv = e.server();
+        String model = e.currentModel();
+        boolean hasModel = model.length() > 0;
+        boolean loaded = hasModel && e.isLoaded(model);
         if (s == Engine.State.ONLINE && srv != null) {
-            headline.setText(t.hud ? "LINK ESTABLISHED" : "Connected to your AI");
-            headline.setTextColor(t.ok);
-            String v = srv.version.length() > 0 ? "Ollama " + srv.version + " · " : "Ollama · ";
-            detail.setText(t.hud ? (v + srv.label()).toUpperCase(Locale.US) : v + srv.label());
+            // The top bar already says ONLINE and names the address: the headline says what
+            // the AI is doing, the line under it which server answers.
+            headline.setText(caps(onlineHeadline(mode, loaded)));
+            headline.setTextColor(t.ink);
+            String v = srv.version.length() > 0 ? "Ollama " + srv.version : "Ollama";
+            detail.setText(caps(v));
         } else if (s == Engine.State.SEARCHING) {
             headline.setText(t.hud ? "SCANNING NETWORK" : "Looking for your AI");
             headline.setTextColor(t.warn);
             // "Lost … reconnecting" is worth repeating; the generic "scanning…" line isn't.
             String sd = e.stateDetail();
-            detail.setText(sd.startsWith("Lost") ? sd : "Port " + scanPort() + " · " + networks());
+            detail.setText(sd.startsWith("Lost") ? sd : caps("Port " + e.scanPort() + " · ") + networks());
         } else {
             headline.setText(t.hud ? "NO LINK · AI OFFLINE" : "AI offline");
             headline.setTextColor(t.danger);
-            detail.setText(e.stateDetail());
+            // What was searched and when; the diagnosis itself lives in the troubleshooting card.
+            StringBuilder sb = new StringBuilder(caps("Port " + e.scanPort() + " · ")).append(networks());
+            if (offlineAt > 0) {
+                long ago = Math.max(0, System.currentTimeMillis() - offlineAt);
+                sb.append(caps(" · probed " + (ago < 1000 ? "just now" : Ui.LiveTag.age(ago) + " ago")));
+            }
+            detail.setText(sb.toString());
         }
 
-        String model = e.currentModel();
-        boolean hasModel = model.length() > 0;
-        boolean loaded = hasModel && e.isLoaded(model);
         modelChipText.setText(hasModel ? model : "No model");
+        modelChipText.setTypeface(hasModel ? t.mono : t.hud ? t.mono : t.bodyMedium);
         int mc = s == Engine.State.ONLINE ? (t.hud ? t.accent : t.isDark ? t.ink : t.accent) : t.dim;
-        int dotColor = loaded ? t.ok : t.dim;
-        String modelKey = mc + "/" + dotColor;
+        int brain = loaded ? t.ok : t.dim;
+        String modelKey = mc + "/" + brain;
         if (!modelKey.equals(modelChipKey)) {
             modelChipKey = modelKey;
             styleChip(modelChip, mc);
-            modelChipDot.setImageDrawable(new IconDrawable(IconDrawable.BRAIN, dotColor, dotColor, ui.dp(16)));
+            modelChipDot.setImageDrawable(new IconDrawable(IconDrawable.BRAIN, brain, brain, ui.dp(16)));
         }
+        modelSpoken.update(modelChip, hasModel ? "Model " + model + (loaded ? ", loaded" : ", not loaded")
+                : "No model", null);
         String mode2 = e.mode();
+        String ml = Settings.MODE_DEEP.equals(mode2) ? "Deep" : Settings.MODE_FAST.equals(mode2) ? "Fast" : "Auto";
         if (!mode2.equals(modeChipKey)) {
             modeChipKey = mode2;
-            String ml = Settings.MODE_DEEP.equals(mode2) ? "Deep" : Settings.MODE_FAST.equals(mode2) ? "Fast" : "Auto";
-            modeChipText.setText(t.hud ? ml.toUpperCase(Locale.US) : ml);
+            modeChipText.setText(caps(ml));
             int modeIcon = Settings.MODE_DEEP.equals(mode2) ? IconDrawable.BRAIN : Settings.MODE_FAST.equals(mode2)
                     ? IconDrawable.BOLT : IconDrawable.ACTIVITY;
-            int modeColor = Settings.MODE_DEEP.equals(mode2) ? t.engaged
-                    : t.hud ? t.accent : t.isDark ? t.ink : t.accent;
-            modeChipIcon.setImageDrawable(new IconDrawable(modeIcon, modeColor, modeColor, ui.dp(16)));
-            styleChip(modeChip, modeColor);
+            boolean deep = Settings.MODE_DEEP.equals(mode2);
+            int modeInk = deep ? t.engagedInk : t.hud ? t.accent : t.isDark ? t.ink : t.accent;
+            modeChipIcon.setImageDrawable(new IconDrawable(modeIcon, modeInk, modeInk, ui.dp(16)));
+            modeChipText.setTextColor(deep ? t.engagedInk : t.ink);
+            styleChip(modeChip, deep ? t.engaged : modeInk);
         }
+        modeSpoken.update(modeChip, "Mode " + ml, null);
 
         refreshLive();
         refreshReadouts();
     }
 
-    /** The one-line "what's happening now" under the chips. */
+    /** The headline while online: what the AI is doing, in words. */
+    private String onlineHeadline(int mode, boolean loaded) {
+        ChatMessage m = e.streamingMessage();
+        boolean deep = m != null && m.model.length() > 0 && !m.model.equals(e.currentModel());
+        switch (mode) {
+            case CoreView.THINKING:
+                return deep ? "Thinking · deep model" : "Thinking";
+            case CoreView.STREAMING:
+                return deep ? "Replying · deep model" : "Replying";
+            case CoreView.SPEAKING:
+                return "Speaking";
+            default:
+                return loaded ? "Standing by · model warm" : "Standing by";
+        }
+    }
+
+    /** The one-line "what's happening now" under the chips (the numbers; the headline has the words). */
     private void refreshLive() {
         if (liveLine == null) return;
         Engine.State s = e.state();
-        String line;
-        int color = t.faint;
+        CharSequence line;
         ChatMessage m = e.streamingMessage();
         long now = System.currentTimeMillis();
+        boolean talking = s == Engine.State.ONLINE && m == null && speaking();
         if (s == Engine.State.OFFLINE) {
-            line = "Commands, history and settings still work offline";
+            line = caps("Commands, history and settings still work offline");
         } else if (s == Engine.State.SEARCHING) {
-            line = "Probing for Ollama · usually a few seconds";
+            line = caps("Probing for Ollama · usually a few seconds");
         } else if (m != null) {
             long secs = Math.max(0, (now - m.startedAt) / 1000);
-            color = t.dim;
             if (m.content.length() == 0) {
-                line = m.thinking.length() > 0 ? "Thinking · " + secs + "s"
-                        : secs >= 2 ? "Loading model · " + secs + "s" : "Waiting for first token";
+                line = caps(m.thinking.length() > 0 ? "Reasoning · " + secs + "s"
+                        : secs >= 2 ? "Loading the model · " + secs + "s" : "Waiting for the first token");
             } else {
                 double tok = m.content.length() / 4.0;
                 double el = liveFirstAt > 0 ? (now - liveFirstAt) / 1000.0 : 0;
                 String rate = el > 0.4 ? "~" + Fmt.oneDecimal(tok / el) + " tok/s · " : "";
-                line = "Generating · " + rate + Math.round(tok) + " tok";
+                line = caps(rate + Math.round(tok) + " tok");
             }
-        } else if (e.speaking()) {
-            line = "Speaking the reply aloud";
-            color = t.dim;
+        } else if (talking) {
+            line = caps("Speaking the reply aloud");
         } else if (e.pulling() && e.pullState() != null) {
             Engine.PullState p = e.pullState();
-            line = "Downloading " + p.name + (p.total > 0 ? " · " + p.percent() + "%" : " · " + p.status);
-            color = t.dim;
+            SpannableStringBuilder sb = new SpannableStringBuilder(caps("Downloading "));
+            sb.append(ui.mono(p.name));
+            sb.append(caps(p.total > 0 ? " · " + p.percent() + "%" : " · " + p.status));
+            line = sb;
+        } else if (e.models().isEmpty()) {
+            line = caps("No models on the PC yet · get one in Models");
         } else if (e.lastSpeed().length() > 0) {
-            line = "Ready · last reply " + e.lastSpeed();
+            line = caps("Last reply · " + e.lastSpeed());
         } else {
-            line = "Ready · tap the core to chat, hold it to talk";
+            line = caps("Tap the core to chat, hold it to talk");
         }
-        liveLine.setText(t.hud ? line.toUpperCase(Locale.US) : line);
-        liveLine.setTextColor(color);
+        liveLine.setText(line);
+        stopSpeakingChip.setVisibility(talking ? View.VISIBLE : View.GONE);
+        liveLine.setGravity(talking ? Gravity.END | Gravity.CENTER_VERTICAL : Gravity.CENTER);
     }
 
     /** The subnets being swept, e.g. "192.168.1.0/24". */
     private String networks() {
         List<LanScanner.Subnet> nets = e.subnets();
-        if (nets.isEmpty()) return "this network";
+        if (nets.isEmpty()) return caps("no Wi-Fi network");
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < nets.size() && i < 2; i++) {
             if (sb.length() > 0) sb.append(", ");
@@ -1322,17 +1615,21 @@ public final class CommandScreen extends Screen {
         return sb.toString();
     }
 
-    private int scanPort() {
-        HostPort hp = HostPort.parse(e.settings.server(), OllamaClient.DEFAULT_PORT);
-        return hp != null ? hp.port : e.settings.lastPort() > 0 ? e.settings.lastPort() : OllamaClient.DEFAULT_PORT;
-    }
-
     private void refreshReadouts() {
         if (rdLink == null) return;
         double lat = e.telemetry.latencyMs.last();
-        boolean on = e.state() == Engine.State.ONLINE;
-        rdLink.setText(on && !Double.isNaN(lat) ? Math.round(lat) + " ms" : on ? "—" : "down");
-        rdLink.setTextColor(on ? t.ink : t.danger);
+        Engine.State s = e.state();
+        if (s == Engine.State.ONLINE) {
+            rdLink.setText(Double.isNaN(lat) ? "—" : Math.round(lat) + " ms");
+            rdLink.setTextColor(t.ink);
+        } else if (s == Engine.State.SEARCHING) {
+            // A transient state: amber like the rest of the instrument, never an alarm.
+            rdLink.setText("probing");
+            rdLink.setTextColor(t.warn);
+        } else {
+            rdLink.setText("down");
+            rdLink.setTextColor(t.dim);
+        }
         int loaded = 0;
         for (ModelInfo m : e.models()) {
             if (e.isLoaded(m.name)) loaded++;
@@ -1348,8 +1645,13 @@ public final class CommandScreen extends Screen {
             speed = Double.isNaN(tps) ? "—" : Fmt.oneDecimal(tps) + " t/s";
         }
         rdSpeed.setText(speed);
-        long up = e.telemetry.uptimeMs(System.currentTimeMillis()) / 1000;
-        rdUptime.setText(String.format(Locale.US, "%02d:%02d:%02d", up / 3600, (up / 60) % 60, up % 60));
+        // How long the link to the AI has been up (the app's session time is in the Session card).
+        long up = e.linkUptimeMs();
+        rdUptime.setText(up < 0 ? "—" : hms(up / 1000));
+    }
+
+    private static String hms(long secs) {
+        return String.format(Locale.US, "%02d:%02d:%02d", secs / 3600, (secs / 60) % 60, secs % 60);
     }
 
     private void refreshOffline() {
@@ -1364,16 +1666,23 @@ public final class CommandScreen extends Screen {
             return;
         }
         boolean searching = s == Engine.State.SEARCHING;
-        if (offlineStyledSearching != searching) {
-            offlineStyledSearching = searching;
-            styleOfflineCard(searching);
-        }
-        offlineTitle.setText(t.hud ? (searching ? "SCANNING FOR YOUR AI" : "AI NOT FOUND ON THIS NETWORK")
-                : searching ? "Scanning for your AI…" : "AI not found on this network");
+        if (offlineStyledSearching == null || offlineStyledSearching != searching) styleOfflineCard(searching);
+        String sd = e.stateDetail();
+        boolean refused = !searching && sd.contains("refused");
+        offlineTitle.setText(caps(searching ? "Scanning for your AI" : refused ? "Your AI refused the connection"
+                : "AI not found on this network"));
+        // The core's line says what was searched; this card says why and what to do.
         offlineDetail.setText(searching ? "Sweeping this network for an Ollama server. This takes up to 15 seconds."
-                : e.stateDetail() + " Check these three things, then scan again:");
+                : sd.startsWith("No AI answered") ? "Check these three things, then scan again:"
+                : refused ? sd : sd + " Then check these three things and scan again:");
+        offlineSteps.setVisibility(refused ? View.GONE : View.VISIBLE);
+        int port = e.scanPort();
+        if (port != firewallPort) {
+            firewallPort = port;
+            firewallStep.setText("Allow port " + port + " through the PC's firewall for private networks.");
+        }
         offlineMeter.setVisibility(searching ? View.VISIBLE : View.GONE);
-        if (searching && isShown() && !e.settings.reduceMotion()) offlineMeter.setIndeterminate(true);
+        if (searching && live && !e.settings.reduceMotion()) offlineMeter.setIndeterminate(true);
         else if (searching) offlineMeter.setFraction(0.5f);
         else offlineMeter.setIndeterminate(false);
         scanAgainBtn.setAlpha(searching ? 0.5f : 1f);
@@ -1390,13 +1699,18 @@ public final class CommandScreen extends Screen {
             readAloudTile.render();
         }
         boolean online = e.state() == Engine.State.ONLINE;
+        boolean paired = e.bridgePaired();
+        boolean mac = WakeOnLan.parseMac(e.settings.pcMac()) != null;
+        pcPowerRow.setVisibility(paired || mac ? View.VISIBLE : View.GONE);
+        wakeTile.setEnabled(mac, "needs the PC's MAC address");
+        lockTile.setEnabled(paired, "needs the PC bridge paired");
         for (Tile tl : tiles) {
-            if (tl.needsAi) tl.setEnabled(online);
+            if (tl.needsAi) tl.setEnabled(online, null);
             if (tl.pending && System.currentTimeMillis() - tl.pendingSince > PENDING_TIMEOUT_MS) {
                 tl.setPending(false);
                 if (tl == watchTile) watchTile = null;
             } else if (tl.pending) {
-                tl.animateBusy(isShown());
+                tl.animateBusy(live);
             }
         }
     }
@@ -1429,23 +1743,35 @@ public final class CommandScreen extends Screen {
         if (Double.isNaN(cf)) {
             ctxGauge.setFraction(-1, false);
             ctxPct.setText("—");
+            ctxPct.setTextColor(t.faint);
             ctxCaption.setText("Filled by the last reply");
         } else {
-            ctxGauge.setFraction((float) cf, !e.settings.reduceMotion());
+            ctxGauge.setFraction((float) cf, live && !e.settings.reduceMotion());
             ctxPct.setText(cf > 0 && cf < 0.01 ? "<1%" : Math.round(cf * 100) + "%");
+            ctxPct.setTextColor(t.inkStrong);
             ctxCaption.setText(ctx > 0 ? "~" + compact(Math.round(cf * ctx)) + " of " + ctxLabel(ctx) + " tokens"
                     : "of the context window");
         }
         ctxGauge.setValueColor(cf > 0.85 ? t.danger : cf > 0.65 ? t.warn : t.data);
     }
 
-    /** Shows a readout (null = no data yet: a faint dash, no unit) and its trace. */
+    /** Shows a readout (null = no data yet: a faint dash, no unit, the chart's empty mark) and its trace. */
     private void setMetric(Metric m, String value, double[] series) {
         m.value.setText(value == null ? "—" : value);
         m.value.setTextColor(value == null ? t.faint : t.inkStrong);
         m.unit.setVisibility(value == null ? View.INVISIBLE : View.VISIBLE);
         // A single sample reads better as a level line than as a lone dot.
         m.spark.setData(series.length == 1 ? new double[]{series[0], series[0]} : series);
+    }
+
+    /** Cyber's cap dots breathe on the cards whose numbers are arriving right now. */
+    private void refreshLiveCaps() {
+        if (latency == null) return;
+        boolean online = e.state() == Engine.State.ONLINE;
+        ui.setCapLive(latency.card, live && online);
+        ui.setCapLive(throughput.card, live && online && e.isBusy());
+        ui.setCapLive(logCard, live);
+        ui.setCapLive(pcCard, live && pcFeedLive());
     }
 
     /** The context window replies use: the setting, else the loaded model's, else Ollama's default. */
@@ -1461,10 +1787,6 @@ public final class CommandScreen extends Screen {
         return n >= 1024 && n % 1024 == 0 ? (n / 1024) + "K" : compact(n);
     }
 
-    private static String plural(int n, String word) {
-        return n + " " + (n == 1 ? word : word.endsWith("y") ? word.substring(0, word.length() - 1) + "ies" : word + "s");
-    }
-
     private static String compact(long n) {
         if (n >= 1000000) return Fmt.oneDecimal(n / 1000000.0) + "M";
         if (n >= 10000) return Math.round(n / 1000.0) + "k";
@@ -1475,8 +1797,10 @@ public final class CommandScreen extends Screen {
     private void refreshLoaded() {
         if (loadedBody == null) return;
         Engine.State s = e.state();
+        String current = e.currentModel();
         List<ModelInfo> loaded = new ArrayList<ModelInfo>();
-        StringBuilder sig = new StringBuilder(s.name()).append('|').append(t.id);
+        // The active model is part of the signature: switching models moves the Active chip.
+        StringBuilder sig = new StringBuilder(s.name()).append('|').append(t.id).append('|').append(current).append('|');
         for (ModelInfo m : e.models()) {
             if (!e.isLoaded(m.name)) continue;
             ModelInfo ri = e.runningInfo(m.name);
@@ -1507,12 +1831,7 @@ public final class CommandScreen extends Screen {
             TextView warm = ui.button("Warm up", IconDrawable.BOLT, Ui.SECONDARY, new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
-                    for (Tile tl : tiles) {
-                        if ("Warm model".contentEquals(tl.root.getContentDescription())) {
-                            tl.root.performClick();
-                            return;
-                        }
-                    }
+                    warmTile.root.performClick();
                 }
             });
             warm.setContentDescription("Warm up model");
@@ -1530,7 +1849,7 @@ public final class CommandScreen extends Screen {
             name.setSingleLine(true);
             name.setEllipsize(TextUtils.TruncateAt.END);
             top.addView(name, Ui.weight(1));
-            if (m.name.equals(e.currentModel())) {
+            if (m.name.equals(current)) {
                 TextView active = ui.chip("Active", t.hud ? t.accent : t.data);
                 LinearLayout.LayoutParams alp = Ui.wrap();
                 alp.leftMargin = ui.dp(8);
@@ -1560,48 +1879,67 @@ public final class CommandScreen extends Screen {
                 if (sub.length() > 0) sub.append(" · ");
                 sub.append("stays loaded");
             }
-            TextView st = ui.text(sub.toString(), 11.5f, t.faint, t.body);
+            TextView st = ui.text(sub.toString(), 11.5f, t.dim, t.body);
             loadedBody.addView(st, gap(Ui.fillW(), 7));
         }
     }
 
     private void refreshSession() {
-        if (sesUptime == null) return;
+        if (sesElapsed == null) return;
         Telemetry tm = e.telemetry;
         long now = System.currentTimeMillis();
-        sesUptime.setText(Fmt.duration(tm.uptimeMs(now) / 1000));
+        sesElapsed.setText(hms(tm.uptimeMs(now) / 1000));
         sesReplies.setText(String.valueOf(tm.replies));
         sesTokens.setText(compact(tm.tokensOut));
         sesErrors.setText(String.valueOf(tm.errors));
         sesErrors.setTextColor(tm.errors > 0 ? t.danger : t.inkStrong);
-        sesSide.setText("since " + shortClock.format(new Date(tm.sessionStart)));
+        sesSide.setText(caps("since ") + ui.clock(tm.sessionStart, false));
+    }
+
+    /** PC vitals are arriving: paired, no error, and the last sample is fresh. */
+    private boolean pcFeedLive() {
+        return e.bridgePaired() && vitalsError == null && e.lastVitals() != null
+                && System.currentTimeMillis() - e.lastVitalsAt() < VITALS_STALE_MS;
     }
 
     private void refreshPc() {
         if (pcBody == null) return;
         boolean paired = e.bridgePaired();
         if (pcShownPaired == null || pcShownPaired != paired) buildPcBody(paired);
+        ui.setCapLive(pcCard, live && pcFeedLive());
         if (!paired) {
-            pcDot.setVisibility(View.GONE);
-            pcSide.setText(t.hud ? "NOT PAIRED" : "Not paired");
+            pcLive.setVisibility(View.GONE);
+            pcSide.setVisibility(View.VISIBLE);
+            pcSide.setText(caps("Not paired"));
+            pcSpoken.update(pcCard, "PC vitals, not paired. Connect your PC to see CPU, RAM and disk", null);
             return;
         }
-        pcDot.setVisibility(View.VISIBLE);
         Vitals v = e.lastVitals();
-        boolean live = vitalsError == null && v != null;
-        pcDot.setColor(vitalsError != null ? t.danger : v != null ? t.ok : t.warn);
-        pcDot.setPulsing(false);
-        pcSide.setText(vitalsError != null ? (t.hud ? "UNREACHABLE" : "Unreachable")
-                : v == null ? (t.hud ? "READING" : "Reading…") : t.hud ? "LIVE" : "Live");
+        if (v == null && vitalsError == null) {
+            // No sample yet: nothing to tag as live or paused.
+            pcLive.setVisibility(View.GONE);
+            pcSide.setVisibility(View.VISIBLE);
+            pcSide.setText(caps("Reading…"));
+        } else {
+            pcSide.setVisibility(View.GONE);
+            pcLive.setVisibility(View.VISIBLE);
+            long age = v == null ? -1 : Math.max(0, System.currentTimeMillis() - e.lastVitalsAt());
+            // The tag's dot only breathes while the page is live.
+            pcLive.update(live && pcFeedLive(), age);
+        }
         if (v == null) {
             for (VitalRow r : new VitalRow[]{cpuRow, ramRow, diskRow}) {
-                if (vitalsError == null && isShown() && !e.settings.reduceMotion()) r.meter.setIndeterminate(true);
+                showScale(r, true);
+                if (vitalsError == null && live && !e.settings.reduceMotion()) r.meter.setIndeterminate(true);
                 else r.meter.setFraction(0);
                 r.value.setText("—");
             }
+            pcFoot.setVisibility(View.VISIBLE);
             pcFoot.setText(vitalsError != null ? "Can't reach LaunchBridge on the PC. Is it running?"
                     : "Reading vitals from the PC…");
-            pcFoot.setTextColor(vitalsError != null ? t.danger : t.faint);
+            pcFoot.setTextColor(vitalsError != null ? t.danger : t.dim);
+            pcSpoken.update(pcCard, vitalsError != null ? "PC vitals, can't reach the PC bridge"
+                    : "PC vitals, reading", null);
             return;
         }
         setVital(cpuRow, v.cpuPercent, v.cpuPercent >= 0 ? Math.round(v.cpuPercent) + "%" : "—");
@@ -1619,17 +1957,34 @@ public final class CommandScreen extends Screen {
         } else {
             batRow.row.setVisibility(View.GONE);
         }
+        // Freshness lives in the cap's live tag; the foot names the machine and its power.
         StringBuilder foot = new StringBuilder();
-        if (v.host.length() > 0) foot.append(v.host);
-        if (v.power.length() > 0) foot.append(foot.length() > 0 ? " · " : "").append(v.power);
-        long ago = Math.max(0, (System.currentTimeMillis() - e.lastVitalsAt()) / 1000);
-        foot.append(foot.length() > 0 ? " · " : "").append(live ? "updated " + (ago < 2 ? "just now" : ago + "s ago")
-                : "last seen " + ago + "s ago");
+        if (vitalsError != null) {
+            foot.append("Can't reach LaunchBridge · showing the last reading");
+        } else {
+            if (v.host.length() > 0) foot.append(v.host);
+            if (v.power.length() > 0) foot.append(foot.length() > 0 ? " · " : "").append(v.power);
+        }
+        pcFoot.setVisibility(foot.length() > 0 ? View.VISIBLE : View.GONE);
         pcFoot.setText(foot.toString());
-        pcFoot.setTextColor(vitalsError != null ? t.danger : t.faint);
+        pcFoot.setTextColor(vitalsError != null ? t.danger : t.dim);
+        StringBuilder said = new StringBuilder("PC vitals");
+        if (v.cpuPercent >= 0) said.append(", CPU ").append(Math.round(v.cpuPercent)).append('%');
+        if (v.ramUsedGb >= 0 && v.ramTotalGb > 0) {
+            said.append(", RAM ").append(Fmt.oneDecimal(v.ramUsedGb)).append(" of ").append(Math.round(v.ramTotalGb))
+                    .append(" GB");
+        } else if (v.ramPercent >= 0) {
+            said.append(", RAM ").append(Math.round(v.ramPercent)).append('%');
+        }
+        if (!"—".equals(disk)) said.append(", disk ").append(disk);
+        if (v.batteryPercent >= 0) said.append(", battery ").append(Math.round(v.batteryPercent)).append('%');
+        if (vitalsError != null) said.append(", last reading, the PC bridge isn't answering");
+        pcSpoken.update(pcCard, said.toString(), null);
     }
 
     private void setVital(VitalRow r, double pct, String text) {
+        // Without a percentage there's no scale: a dashed track, never an empty bar that reads as 0%.
+        showScale(r, pct >= 0);
         if (pct >= 0) {
             r.meter.setFraction((float) (pct / 100.0));
             r.meter.setBarColor(pct >= 90 ? t.danger : pct >= 75 ? t.warn : t.data);
@@ -1639,18 +1994,24 @@ public final class CommandScreen extends Screen {
         r.value.setText(text);
     }
 
+    private static void showScale(VitalRow r, boolean scale) {
+        r.meter.setVisibility(scale ? View.VISIBLE : View.INVISIBLE);
+        r.dash.setVisibility(scale ? View.GONE : View.VISIBLE);
+    }
+
     // ------------------------------------------------------------------
-    // Polling (only while shown)
+    // Polling (only while live)
     // ------------------------------------------------------------------
 
     private final Runnable ticker = new Runnable() {
         @Override
         public void run() {
-            if (!isShown()) return;
+            if (!live) return;
             refreshHero();
             refreshTiles();
             refreshSession();
             if (e.bridgePaired() && e.lastVitals() != null) refreshPc();
+            refreshLiveCaps();
             scroll.postDelayed(this, e.isBusy() ? 500 : 1000);
         }
     };
@@ -1658,7 +2019,7 @@ public final class CommandScreen extends Screen {
     private final Runnable vitalsPoll = new Runnable() {
         @Override
         public void run() {
-            if (!isShown()) return;
+            if (!live) return;
             fetchVitals();
             scroll.postDelayed(this, VITALS_MS);
         }
@@ -1677,24 +2038,28 @@ public final class CommandScreen extends Screen {
         });
     }
 
+    /** The page is on screen: motion, polling and live dots start (and every readout catches up). */
     private void startLive() {
         if (scroll == null) return;
+        live = true;
         core.setReduceMotion(e.settings.reduceMotion());
+        core.setHudEffects(e.settings.hudEffects());
         core.setRunning(true);
+        refreshAll();
         scroll.removeCallbacks(ticker);
         scroll.removeCallbacks(vitalsPoll);
         scroll.post(ticker);
         scroll.post(vitalsPoll);
     }
 
+    /** The page left the screen: park every animator and poll until {@link #startLive()}. */
     private void stopLive() {
         if (scroll == null) return;
+        live = false;
         core.setRunning(false);
         scroll.removeCallbacks(ticker);
         scroll.removeCallbacks(vitalsPoll);
-        // Park every other animator too; refreshAll() restores them on the next show.
         coreDot.setPulsing(false);
-        pcDot.setPulsing(false);
         offlineMeter.setIndeterminate(false);
         for (Tile tl : tiles) {
             if (tl.pending) tl.animateBusy(false);
@@ -1702,11 +2067,19 @@ public final class CommandScreen extends Screen {
         for (VitalRow r : new VitalRow[]{cpuRow, ramRow, diskRow}) {
             if (r != null) r.meter.setIndeterminate(false);
         }
+        refreshLiveCaps();
+        if (pcLive.getVisibility() == View.VISIBLE && e.lastVitals() != null) {
+            pcLive.update(false, Math.max(0, System.currentTimeMillis() - e.lastVitalsAt()));
+        }
+    }
+
+    /** Whether the page is live (tests: nothing may animate while it isn't). */
+    public boolean isLive() {
+        return live;
     }
 
     @Override
     protected void onShow() {
-        refreshAll();
         startLive();
     }
 
@@ -1718,7 +2091,6 @@ public final class CommandScreen extends Screen {
     @Override
     public void onActivityStart() {
         if (!isShown()) return;
-        refreshAll();
         startLive();
     }
 
@@ -1738,12 +2110,17 @@ public final class CommandScreen extends Screen {
 
     @Override
     public void onStateChanged() {
+        Engine.State s = e.state();
+        if (s == Engine.State.OFFLINE && seenState != Engine.State.OFFLINE) offlineAt = System.currentTimeMillis();
+        if (s == Engine.State.ONLINE) offlineAt = 0;
+        seenState = s;
         refreshHero();
         refreshOffline();
         refreshTiles();
         refreshLoaded();
         refreshPc();
         refreshTelemetry();
+        refreshLiveCaps();
     }
 
     @Override
@@ -1775,6 +2152,13 @@ public final class CommandScreen extends Screen {
             liveLen = 0;
         }
         refreshHero();
+        refreshLiveCaps();
+    }
+
+    @Override
+    public void onSpeechChanged(boolean speaking) {
+        // Into and out of SPEAKING at once, not on the next tick.
+        refreshHero();
     }
 
     @Override
@@ -1799,7 +2183,7 @@ public final class CommandScreen extends Screen {
         if (len > liveLen) {
             if (liveFirstAt == 0) liveFirstAt = System.currentTimeMillis();
             liveLen = len;
-            if (core != null) core.pulse();
+            if (core != null && live) core.pulse();
         }
         if (core != null && core.mode() != coreMode()) refreshHero();
     }
@@ -1842,7 +2226,7 @@ public final class CommandScreen extends Screen {
                 }
             }, null));
         }
-        ui.pick("Switch model", rows, "Manage models", new Runnable() {
+        ui.pick("Model", "Switch model", rows, "Manage models", new Runnable() {
             @Override
             public void run() {
                 a.select(MainActivity.TAB_MODELS, true);
