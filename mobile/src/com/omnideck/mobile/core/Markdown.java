@@ -81,6 +81,7 @@ public final class Markdown {
         String[] lines = src.replace("\r\n", "\n").split("\n", -1);
         boolean inFence = false;
         int fenceStart = 0;
+        String fenceLang = "";
         int blankRun = 0;
         for (String line : lines) {
             String trimmed = line.trim();
@@ -88,11 +89,15 @@ public final class Markdown {
                 if (!inFence) {
                     inFence = true;
                     fenceStart = out.length();
+                    fenceLang = trimmed.substring(3).trim();
+                    int sp = fenceLang.indexOf(' ');
+                    if (sp > 0) fenceLang = fenceLang.substring(0, sp);
                 } else {
                     inFence = false;
                     int end = out.length();
                     if (end > fenceStart && out.charAt(end - 1) == '\n') end--;
-                    if (end > fenceStart) spans.add(new Span(CODE_BLOCK, fenceStart, end, null));
+                    // A code block's url holds its fence language ("" when none).
+                    if (end > fenceStart) spans.add(new Span(CODE_BLOCK, fenceStart, end, fenceLang));
                 }
                 blankRun = 0;
                 continue;
@@ -156,7 +161,7 @@ public final class Markdown {
         if (inFence) {
             int end = out.length();
             if (end > fenceStart && out.charAt(end - 1) == '\n') end--;
-            if (end > fenceStart) spans.add(new Span(CODE_BLOCK, fenceStart, end, null));
+            if (end > fenceStart) spans.add(new Span(CODE_BLOCK, fenceStart, end, fenceLang));
         }
         // Trim trailing newlines, clamping spans to the new length.
         int len = out.length();

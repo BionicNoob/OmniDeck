@@ -93,7 +93,13 @@ public final class Http {
 
     public static Response postJson(String url, String json, int connectTimeoutMs, int readTimeoutMs,
                                     Map<String, String> headers) throws IOException {
-        HttpURLConnection c = open(url, "POST", connectTimeoutMs, readTimeoutMs, headers);
+        return sendJson("POST", url, json, connectTimeoutMs, readTimeoutMs, headers);
+    }
+
+    /** Any method with a JSON body (POST, DELETE, PUT). */
+    public static Response sendJson(String method, String url, String json, int connectTimeoutMs, int readTimeoutMs,
+                                    Map<String, String> headers) throws IOException {
+        HttpURLConnection c = open(url, method, connectTimeoutMs, readTimeoutMs, headers);
         try {
             writeJson(c, json);
             int code = c.getResponseCode();

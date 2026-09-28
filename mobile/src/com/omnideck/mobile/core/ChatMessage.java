@@ -1,8 +1,11 @@
 package com.omnideck.mobile.core;
 
+import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -31,6 +34,10 @@ public final class ChatMessage {
     public boolean stopped;
     /** Base64 PNG/JPEG shown under the text (screenshots from the PC). */
     public String image = "";
+    /** Base64 images attached by the user; sent to vision models. */
+    public List<String> images = new ArrayList<String>();
+    /** Time to first token in ms (assistant replies), -1 if unknown. */
+    public long ttftMs = -1;
 
     // Live state while a reply streams in (not persisted).
     public transient boolean streaming;
@@ -93,6 +100,12 @@ public final class ChatMessage {
         if (error) o.put("error", true);
         if (stopped) o.put("stopped", true);
         if (image.length() > 0) o.put("image", image);
+        if (!images.isEmpty()) {
+            JSONArray a = new JSONArray();
+            for (String img : images) a.put(img);
+            o.put("images", a);
+        }
+        if (ttftMs >= 0) o.put("ttft", ttftMs);
         return o;
     }
 
@@ -108,6 +121,14 @@ public final class ChatMessage {
         m.error = o.optBoolean("error", false);
         m.stopped = o.optBoolean("stopped", false);
         m.image = OllamaClient.str(o, "image");
+        JSONArray a = o.optJSONArray("images");
+        if (a != null) {
+            for (int i = 0; i < a.length(); i++) {
+                String img = a.optString(i, "");
+                if (img.length() > 0) m.images.add(img);
+            }
+        }
+        m.ttftMs = o.optLong("ttft", -1);
         return m;
     }
 }

@@ -1,10 +1,16 @@
 title.ttf — converted from Orbitron (weight 700 instance, latin subset), renamed "OmniDeck Title".
 Copyright 2018 The Orbitron Project Authors (https://github.com/theleagueof/orbitron), with Reserved Font Name: "Orbitron".
 
+title-medium.ttf — the same, weight 600 instance, renamed "OmniDeck Title Medium".
+
 mono.ttf — converted from Share Tech Mono (latin subset), renamed "OmniDeck Mono".
 Copyright (c) 2012, Carrois Type Design, Ralph du Carrois (post@carrois.com www.carrois.com), with Reserved Font Name 'Share'.
 
-Both fonts are licensed under the SIL Open Font License, Version 1.1.
+inter-regular.ttf, inter-medium.ttf, inter-semibold.ttf, inter-bold.ttf — converted from Inter
+(weight 400/500/600/700 instances, latin subset), renamed "OmniDeck Sans …".
+Copyright 2016 The Inter Project Authors (https://github.com/rsms/inter).
+
+All of these fonts are licensed under the SIL Open Font License, Version 1.1.
 This license is copied below, and is also available with a FAQ at:
 https://openfontlicense.org
 

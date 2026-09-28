@@ -149,14 +149,29 @@ public final class OllamaClient {
         return out;
     }
 
-    /** Capabilities and trained context length of one model (POST /api/show). */
+    /** What /api/show says about one model. */
     public static final class ModelDetails {
         public final List<String> capabilities;
         public final int contextLength;
+        public final String family;
+        public final String parameterSize;
+        public final String quantization;
+        public final String format;
+        public final String license;
+        public final String parameters;
+        public final String modifiedAt;
 
-        ModelDetails(List<String> capabilities, int contextLength) {
+        ModelDetails(List<String> capabilities, int contextLength, String family, String parameterSize,
+                     String quantization, String format, String license, String parameters, String modifiedAt) {
             this.capabilities = Collections.unmodifiableList(capabilities);
             this.contextLength = contextLength;
+            this.family = family;
+            this.parameterSize = parameterSize;
+            this.quantization = quantization;
+            this.format = format;
+            this.license = license;
+            this.parameters = parameters;
+            this.modifiedAt = modifiedAt;
         }
 
         public boolean supports(String capability) {
@@ -175,30 +190,56 @@ public final class OllamaClient {
                 QUICK_READ_TIMEOUT_MS, null);
         if (!r.ok()) throw new IOException(errorMessage(r.body, r.code));
         try {
-            JSONObject o = new JSONObject(r.body);
-            List<String> caps = new ArrayList<String>();
-            JSONArray arr = o.optJSONArray("capabilities");
-            if (arr != null) {
-                for (int i = 0; i < arr.length(); i++) caps.add(arr.optString(i, ""));
-            }
-            int ctx = 0;
-            JSONObject info = o.optJSONObject("model_info");
-            if (info != null) {
-                JSONArray keys = info.names();
-                if (keys != null) {
-                    for (int i = 0; i < keys.length(); i++) {
-                        String k = keys.optString(i, "");
-                        if (k.endsWith(".context_length")) {
-                            ctx = info.optInt(k, 0);
-                            break;
-                        }
-                    }
-                }
-            }
-            return new ModelDetails(caps, ctx);
+            return parseShow(new JSONObject(r.body));
         } catch (JSONException e) {
             throw new IOException("Bad /api/show reply");
         }
+    }
+
+    static ModelDetails parseShow(JSONObject o) {
+        List<String> caps = new ArrayList<String>();
+        JSONArray arr = o.optJSONArray("capabilities");
+        if (arr != null) {
+            for (int i = 0; i < arr.length(); i++) caps.add(arr.optString(i, ""));
+        }
+        int ctx = 0;
+        JSONObject info = o.optJSONObject("model_info");
+        if (info != null) {
+            JSONArray keys = info.names();
+            if (keys != null) {
+                for (int i = 0; i < keys.length(); i++) {
+                    String k = keys.optString(i, "");
+                    if (k.endsWith(".context_length")) {
+                        ctx = info.optInt(k, 0);
+                        break;
+                    }
+                }
+            }
+        }
+        JSONObject d = o.optJSONObject("details");
+        String license = str(o, "license").trim();
+        int nl = license.indexOf('\n');
+        if (nl > 0) license = license.substring(0, nl).trim();
+        if (license.length() > 80) license = license.substring(0, 80) + "…";
+        return new ModelDetails(caps, ctx,
+                d == null ? "" : str(d, "family"),
+                d == null ? "" : str(d, "parameter_size"),
+                d == null ? "" : str(d, "quantization_level"),
+                d == null ? "" : str(d, "format"),
+                license, str(o, "parameters").trim(), str(o, "modified_at"));
+    }
+
+    /** Deletes a model from the PC (DELETE /api/delete). */
+    public void deleteModel(String model) throws IOException {
+        JSONObject body = new JSONObject();
+        try {
+            body.put("model", model);
+        } catch (JSONException e) {
+            throw new IOException(e.getMessage());
+        }
+        Http.Response r = Http.sendJson("DELETE", base + "/api/delete", body.toString(), CONNECT_TIMEOUT_MS,
+                QUICK_READ_TIMEOUT_MS, null);
+        if (!r.ok()) throw new IOException(errorMessage(r.body, r.code));
     }
 
     // ------------------------------------------------------------------

@@ -18,12 +18,14 @@ from fontTools.ttLib import TTFont
 from fontTools.varLib import instancer
 
 WANTED = {
-    # family -> (output file, weight for variable fonts, new family name)
+    # family -> list of (output file, weight for variable fonts, new family name)
     # Converted/subsetted OFL fonts are "Modified Versions" and may not keep
     # their Reserved Font Names, so the family is renamed; the copyright
     # notice (name ID 0) is kept as the license requires.
-    "Orbitron": ("title.ttf", 700, "OmniDeck Title"),
-    "Share Tech Mono": ("mono.ttf", 400, "OmniDeck Mono"),
+    "Orbitron": [("title.ttf", 700, "OmniDeck Title"), ("title-medium.ttf", 600, "OmniDeck Title Medium")],
+    "Share Tech Mono": [("mono.ttf", 400, "OmniDeck Mono")],
+    "Inter": [("inter-regular.ttf", 400, "OmniDeck Sans"), ("inter-medium.ttf", 500, "OmniDeck Sans Medium"),
+              ("inter-semibold.ttf", 600, "OmniDeck Sans SemiBold"), ("inter-bold.ttf", 700, "OmniDeck Sans Bold")],
 }
 
 
@@ -54,21 +56,23 @@ def main():
         src = re.search(r"url\(data:font/woff2;base64,([A-Za-z0-9+/=]+)\)", face)
         if not fam or not src or fam.group(1) not in WANTED or fam.group(1) in done:
             continue
-        name, weight, family = WANTED[fam.group(1)]
-        font = TTFont(io.BytesIO(base64.b64decode(src.group(1))))
-        if "fvar" in font:
-            axes = {a.axisTag: a for a in font["fvar"].axes}
-            pins = {}
-            if "wght" in axes:
-                w = axes["wght"]
-                pins["wght"] = max(w.minValue, min(w.maxValue, weight))
-            font = instancer.instantiateVariableFont(font, pins)
-        font.flavor = None
-        rename(font, family)
-        path = os.path.join(out_dir, name)
-        font.save(path)
+        for name, weight, family in WANTED[fam.group(1)]:
+            font = TTFont(io.BytesIO(base64.b64decode(src.group(1))))
+            if "fvar" in font:
+                axes = {a.axisTag: a for a in font["fvar"].axes}
+                pins = {}
+                if "wght" in axes:
+                    w = axes["wght"]
+                    pins["wght"] = max(w.minValue, min(w.maxValue, weight))
+                font = instancer.instantiateVariableFont(font, pins)
+            font.flavor = None
+            if "OS/2" in font:
+                font["OS/2"].usWeightClass = weight
+            rename(font, family)
+            path = os.path.join(out_dir, name)
+            font.save(path)
+            print("wrote", path, os.path.getsize(path), "bytes")
         done.add(fam.group(1))
-        print("wrote", path, os.path.getsize(path), "bytes")
     missing = set(WANTED) - done
     if missing:
         sys.exit("fonts not found in the HTML: " + ", ".join(sorted(missing)))

@@ -74,8 +74,55 @@ public final class Settings {
     public String systemPrompt() { return s("system_prompt", ""); }
     public void setSystemPrompt(String v) { put("system_prompt", v); }
 
-    public String theme() { return s("theme", "auto"); }
+    public static final String THEME_SYSTEM = "system";
+    public static final String THEME_CYBER = "cyber";
+    public static final String THEME_LIGHT = "light";
+    public static final String THEME_DARK = "dark";
+
+    /** "system" (default: follows the phone, light or dark), "cyber", "light" or "dark". */
+    public String theme() {
+        String t = s("theme", THEME_SYSTEM);
+        if ("auto".equals(t) || "modern".equals(t)) return "auto".equals(t) ? THEME_SYSTEM : THEME_LIGHT;
+        if ("neon".equals(t)) return THEME_CYBER;
+        if (!THEME_CYBER.equals(t) && !THEME_LIGHT.equals(t) && !THEME_DARK.equals(t)) return THEME_SYSTEM;
+        return t;
+    }
     public void setTheme(String v) { put("theme", v); }
+
+    /** Turns off the core animation, scan line and boot sequence. */
+    public boolean reduceMotion() { return sp.getBoolean("reduce_motion", false); }
+    public void setReduceMotion(boolean v) { put("reduce_motion", v); }
+
+    /** Cyber HUD texture: hairline grid, top bloom, scan line. */
+    public boolean hudEffects() { return sp.getBoolean("hud_effects", true); }
+    public void setHudEffects(boolean v) { put("hud_effects", v); }
+
+    public boolean haptics() { return sp.getBoolean("haptics", true); }
+    public void setHaptics(boolean v) { put("haptics", v); }
+
+    /** Speak replies aloud as they stream (Android text-to-speech). */
+    public boolean readAloud() { return sp.getBoolean("read_aloud", false); }
+    public void setReadAloud(boolean v) { put("read_aloud", v); }
+
+    /** 0.5–2.0, 1 = normal. */
+    public float speechRate() { return sp.getFloat("speech_rate", 1f); }
+    public void setSpeechRate(float v) { sp.edit().putFloat("speech_rate", Math.max(0.5f, Math.min(2f, v))).apply(); }
+
+    /** Sampling temperature; negative = the model's default. */
+    public float temperature() { return sp.getFloat("temperature", -1f); }
+    public void setTemperature(float v) { sp.edit().putFloat("temperature", v).apply(); }
+
+    /** top_p; negative = the model's default. */
+    public float topP() { return sp.getFloat("top_p", -1f); }
+    public void setTopP(float v) { sp.edit().putFloat("top_p", v).apply(); }
+
+    /** num_predict (max reply tokens); 0 = unlimited / the model's default. */
+    public int maxTokens() { return sp.getInt("max_tokens", 0); }
+    public void setMaxTokens(int v) { put("max_tokens", Math.max(0, v)); }
+
+    /** Last bottom-bar tab (0 command, 1 comms, 2 models, 3 pc). */
+    public int lastTab() { return sp.getInt("last_tab", 0); }
+    public void setLastTab(int v) { put("last_tab", v); }
 
     public int bridgePort() { return sp.getInt("bridge_port", BridgeClient.DEFAULT_PORT); }
     public void setBridgePort(int v) { put("bridge_port", v > 0 && v < 65536 ? v : BridgeClient.DEFAULT_PORT); }

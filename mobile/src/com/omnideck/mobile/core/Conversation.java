@@ -25,6 +25,14 @@ public final class Conversation {
         this.updated = created;
     }
 
+    /** True when any message carries images (the model must support vision). */
+    public boolean hasImages() {
+        for (ChatMessage m : messages) {
+            if (!m.images.isEmpty()) return true;
+        }
+        return false;
+    }
+
     /** True when nothing worth saving is in it (only notices, or empty). */
     public boolean isEmpty() {
         for (ChatMessage m : messages) {
@@ -85,6 +93,11 @@ public final class Conversation {
                 JSONObject o = new JSONObject();
                 o.put("role", m.role);
                 o.put("content", m.content);
+                if (!m.images.isEmpty()) {
+                    JSONArray imgs = new JSONArray();
+                    for (String img : m.images) imgs.put(img);
+                    o.put("images", imgs);
+                }
                 arr.put(o);
             }
         } catch (JSONException e) {

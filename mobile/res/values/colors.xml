@@ -1,17 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- OMNI-DECK "cyber" palette (OllamaChat.html :root) -->
-    <color name="cyber_bg">#FF010103</color>
-    <color name="cyber_panel">#FF0B0B12</color>
+    <!-- CYBER — "Mainframe HUD" (OllamaChat.html #cyber-hud-overhaul) -->
+    <color name="cyber_bg">#FF03060B</color>
+    <color name="cyber_panel">#FF09101A</color>
     <color name="cyber_surface">#FF05090F</color>
-    <color name="cyber_red">#FFFF003C</color>
-    <color name="cyber_text">#FFECECFE</color>
-    <color name="cyber_dim">#FF6C8CA6</color>
-    <!-- OMNI-DECK "modern" light palette (body.theme-modern) -->
-    <color name="light_bg">#FFFFFFFF</color>
+    <color name="cyber_accent">#FF38BDF8</color>
+    <color name="cyber_text">#FFE2EFFA</color>
+    <color name="cyber_dim">#FF8FA9C2</color>
+    <!-- LIGHT — body.theme-modern -->
+    <color name="light_bg">#FFF5F5F5</color>
     <color name="light_surface">#FFEDEFF2</color>
     <color name="light_accent">#FF4A6D8C</color>
     <color name="light_text">#FF171717</color>
-    <color name="light_dim">#FF666666</color>
-    <color name="ic_launcher_bg">#FF010103</color>
+    <color name="light_dim">#FF57606A</color>
+    <!-- DARK — theme-modern + theme-dark -->
+    <color name="dark_bg">#FF0F1216</color>
+    <color name="dark_panel">#FF161A20</color>
+    <color name="dark_surface">#FF12161B</color>
+    <color name="dark_accent">#FF7FA6C8</color>
+    <color name="dark_text">#FFE6EDF3</color>
+    <color name="dark_dim">#FF9BA7B4</color>
+    <color name="ic_launcher_bg">#FF05090F</color>
 </resources>

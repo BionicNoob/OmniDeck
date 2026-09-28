@@ -60,6 +60,7 @@ public final class Commands {
         l.add(new Cmd("/history", "/history <name>", "Open a saved chat (no name = list).", GROUP_CHAT,
                 "/chats"));
         l.add(new Cmd("/export", "/export", "Share this chat as text.", GROUP_CHAT));
+        l.add(new Cmd("/rename", "/rename <title>", "Rename this chat.", GROUP_CHAT));
         l.add(new Cmd("/incognito", "/incognito <on|off>", "Pause saving chats on this phone.", GROUP_CHAT));
         l.add(new Cmd("/remember", "/remember <fact>", "Save a fact the AI should always know.", GROUP_CHAT));
         l.add(new Cmd("/facts", "/facts", "List remembered facts.", GROUP_CHAT));
@@ -90,8 +91,10 @@ public final class Commands {
         l.add(new Cmd("/server", "/server <ip[:port] | auto>", "Show or set the AI's address.", GROUP_APP,
                 "/host"));
         l.add(new Cmd("/scan", "/scan", "Search the network for the AI again.", GROUP_APP, "/rescan"));
-        l.add(new Cmd("/appearance", "/appearance <cyber|light|auto>", "Switch the theme.", GROUP_APP,
+        l.add(new Cmd("/appearance", "/appearance <cyber|light|dark|system>", "Switch the theme.", GROUP_APP,
                 "/theme"));
+        l.add(new Cmd("/voice", "/voice", "Speak a message (voice input).", GROUP_APP, "/talk"));
+        l.add(new Cmd("/mute", "/mute", "Toggle reading replies aloud.", GROUP_APP, "/speak"));
         l.add(new Cmd("/timer", "/timer <5m|90s|1h> <message>", "Start a timer (no args = list, cancel).",
                 GROUP_APP));
         l.add(new Cmd("/clip", "/clip", "Paste the phone's clipboard into the composer.", GROUP_APP));
@@ -105,7 +108,6 @@ public final class Commands {
         l.add(new Cmd("/task", "/task <text>", "Task manager (PC app only).", GROUP_PC_APP_ONLY));
         l.add(new Cmd("/backup", "/backup", "Backup and restore (PC app only).", GROUP_PC_APP_ONLY));
         l.add(new Cmd("/nuke", "/nuke", "Wipe PC app data (PC app only).", GROUP_PC_APP_ONLY));
-        l.add(new Cmd("/mute", "/mute", "Read-aloud toggle (PC app only).", GROUP_PC_APP_ONLY));
         l.add(new Cmd("/wake", "/wake [on|off]", "Wake word (PC app only).", GROUP_PC_APP_ONLY));
         ALL = Collections.unmodifiableList(l);
     }

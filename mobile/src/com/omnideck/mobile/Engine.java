@@ -23,6 +23,8 @@ import com.omnideck.mobile.core.LanScanner;
 import com.omnideck.mobile.core.ModelInfo;
 import com.omnideck.mobile.core.OllamaClient;
 import com.omnideck.mobile.core.ServerInfo;
+import com.omnideck.mobile.core.Telemetry;
+import com.omnideck.mobile.core.Vitals;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -71,6 +73,15 @@ public final class Engine {
         void onInsertText(String text);
 
         void onToast(String text);
+
+        /** New telemetry samples (latency, reply speed, …). */
+        void onTelemetry();
+
+        /** A new entry in the system log. */
+        void onLog(Telemetry.Event e);
+
+        /** Model download progress changed (see {@link #pullState()}). */
+        void onPull();
     }
 
     public interface Callback<T> {
@@ -130,6 +141,43 @@ public final class Engine {
     private String lastSpeed = "";
     private ConnectivityManager.NetworkCallback netCallback;
 
+    // Command-center state
+    public final Telemetry telemetry = new Telemetry(System.currentTimeMillis());
+    private final Map<String, OllamaClient.ModelDetails> details = new LinkedHashMap<String, OllamaClient.ModelDetails>();
+    private Speech speech;
+    private PullState pullState;
+    private Boolean bridgeOnline;
+    private Vitals lastVitals;
+    private long lastVitalsAt;
+
+    /** A model download in progress (or just finished). */
+    public static final class PullState {
+        public final String name;
+        public String status = "starting";
+        public long completed;
+        public long total;
+        public double bytesPerSec;
+        public boolean done;
+        public String error;
+        final long startedAt = System.currentTimeMillis();
+        long lastBytes;
+        long lastAt = startedAt;
+
+        PullState(String name) {
+            this.name = name;
+        }
+
+        public int percent() {
+            return total > 0 ? (int) Math.min(100, completed * 100 / total) : 0;
+        }
+
+        /** Seconds left, or -1 when unknown. */
+        public long etaSeconds() {
+            if (bytesPerSec <= 1 || total <= 0) return -1;
+            return (long) ((total - completed) / bytesPerSec);
+        }
+    }
+
     // Chat
     private Conversation conv;
     private Job job;
@@ -167,6 +215,7 @@ public final class Engine {
         if (scanCancel != null) scanCancel.cancel();
         if (pullCancel != null) pullCancel.cancel();
         main.removeCallbacksAndMessages(null);
+        if (speech != null) speech.shutdown();
         unregisterNetworkCallback();
         io.shutdownNow();
         disk.shutdown();
@@ -278,6 +327,57 @@ public final class Engine {
 
     public Boolean supportsThinking(String model) {
         return thinkSupport.get(model);
+    }
+
+    /** /api/show details, or null until fetched. */
+    public OllamaClient.ModelDetails details(String model) {
+        return details.get(model);
+    }
+
+    /** True / false once known, null while unknown. */
+    public Boolean supportsVision(String model) {
+        OllamaClient.ModelDetails d = details.get(model);
+        return d == null ? null : d.supports("vision");
+    }
+
+    public PullState pullState() {
+        return pullState;
+    }
+
+    /** Last known LaunchBridge reachability (null = not checked yet). */
+    public Boolean bridgeOnline() {
+        return bridgeOnline;
+    }
+
+    public boolean bridgePaired() {
+        return settings.bridgeToken().length() > 0;
+    }
+
+    public Vitals lastVitals() {
+        return lastVitals;
+    }
+
+    public long lastVitalsAt() {
+        return lastVitalsAt;
+    }
+
+    /** The model a message would go to right now (after /deep and auto routing). */
+    public String effectiveModel() {
+        return currentModel();
+    }
+
+    // ------------------------------------------------------------------
+    // Log / telemetry
+    // ------------------------------------------------------------------
+
+    /** Adds a line to the system log shown on the command center. */
+    public void log(String level, String text) {
+        telemetry.log(System.currentTimeMillis(), level, text);
+        if (listener != null) listener.onLog(telemetry.lastEvent());
+    }
+
+    private void notifyTelemetry() {
+        if (listener != null) listener.onTelemetry();
     }
 
     // ------------------------------------------------------------------
@@ -481,6 +581,11 @@ public final class Engine {
                                     : "No AI answered on port " + scanPort + " (" + where + ").");
                             if (full) notice("Scan finished: no Ollama server answered on port " + scanPort
                                     + " (" + where + ").", "warn");
+                            if (!loggedOffline) {
+                                loggedOffline = true;
+                                log("warn", nets.isEmpty() ? "No Wi-Fi — waiting for a network"
+                                        : "No AI on " + where + " · port " + scanPort);
+                            }
                             scheduleOfflineRetry();
                         }
                     }
@@ -501,6 +606,8 @@ public final class Engine {
         notice(sb.toString().trim(), "ok");
     }
 
+    private boolean loggedOffline;
+
     private void scheduleOfflineRetry() {
         main.removeCallbacks(offlineRetry);
         if (!visible) return;
@@ -518,8 +625,18 @@ public final class Engine {
         if (changed) {
             running.clear();
             thinkSupport.clear();
+            details.clear();
         }
+        boolean wasOnline = state == State.ONLINE;
         setState(State.ONLINE, "Ollama " + (s.version.length() > 0 ? s.version + " " : "") + "at " + s.label());
+        loggedOffline = false;
+        if (s.latencyMs >= 0) {
+            telemetry.latencyMs.add(s.latencyMs);
+            notifyTelemetry();
+        }
+        if (!wasOnline || changed) {
+            log("ok", "Link established · Ollama " + (s.version.length() > 0 ? s.version + " " : "") + "@ " + s.label());
+        }
         refreshModels(null);
     }
 
@@ -579,17 +696,18 @@ public final class Engine {
         io.execute(new Runnable() {
             @Override
             public void run() {
-                Boolean t = null;
+                OllamaClient.ModelDetails d = null;
                 try {
-                    t = c.show(model).supports("thinking");
+                    d = c.show(model);
                 } catch (IOException ignored) {
                 }
-                final Boolean ft = t;
+                final OllamaClient.ModelDetails fd = d;
                 main.post(new Runnable() {
                     @Override
                     public void run() {
-                        if (c == client && ft != null) {
-                            thinkSupport.put(model, ft);
+                        if (c == client && fd != null) {
+                            thinkSupport.put(model, fd.supports("thinking"));
+                            details.put(model, fd);
                             notifyState();
                         }
                     }
@@ -610,8 +728,11 @@ public final class Engine {
             public void run() {
                 boolean ok;
                 List<ModelInfo> ps = null;
+                long latency = -1;
                 try {
+                    long t0 = System.nanoTime();
                     c.version(3000);
+                    latency = (System.nanoTime() - t0) / 1000000L;
                     ok = true;
                     try {
                         ps = c.listRunning();
@@ -622,12 +743,17 @@ public final class Engine {
                 }
                 final boolean fOk = ok;
                 final List<ModelInfo> fPs = ps;
+                final long fLatency = latency;
                 main.post(new Runnable() {
                     @Override
                     public void run() {
                         if (c != client) return;
                         if (fOk) {
                             healthFailures = 0;
+                            if (fLatency >= 0) {
+                                telemetry.latencyMs.add(fLatency);
+                                notifyTelemetry();
+                            }
                             if (state != State.ONLINE) setState(State.ONLINE, "Ollama at " + server.label());
                             if (fPs != null && !sameNames(fPs)) {
                                 setRunning(fPs);
@@ -636,6 +762,8 @@ public final class Engine {
                         } else if (++healthFailures >= 2 && job == null) {
                             healthFailures = 0;
                             setState(State.SEARCHING, "Lost " + server.label() + " — reconnecting…");
+                            log("error", "Link lost · " + server.label() + " — reconnecting");
+                            telemetry.errors++;
                             discover(false);
                         } else if (healthFailures == 1) {
                             main.postDelayed(new Runnable() {
@@ -785,6 +913,34 @@ public final class Engine {
         });
     }
 
+    /** Renames the current chat. */
+    public void renameChat(String title) {
+        conv.title = title == null ? "" : title.trim();
+        conv.updated = System.currentTimeMillis();
+        save();
+        notifyState();
+    }
+
+    /** Renames a saved chat by id (the current one or any other). */
+    public void renameChat(final String id, final String title) {
+        if (id.equals(conv.id)) {
+            renameChat(title);
+            return;
+        }
+        disk.execute(new Runnable() {
+            @Override
+            public void run() {
+                Conversation c = store.load(id);
+                if (c == null) return;
+                c.title = title == null ? "" : title.trim();
+                try {
+                    store.save(c);
+                } catch (IOException ignored) {
+                }
+            }
+        });
+    }
+
     public void deleteMessage(ChatMessage m) {
         if (job != null && job.target == m) stop();
         if (conv.messages.remove(m)) {
@@ -815,9 +971,17 @@ public final class Engine {
         final StringBuilder content = new StringBuilder();
         final StringBuilder thinking = new StringBuilder();
         final AtomicBoolean posted = new AtomicBoolean();
+        final long startNanos = System.nanoTime();
+        /** ms from request to the first token; -1 until it arrives. */
+        final java.util.concurrent.atomic.AtomicLong ttft = new java.util.concurrent.atomic.AtomicLong(-1);
+        int numCtx;
 
         Job(ChatMessage target) {
             this.target = target;
+        }
+
+        void firstToken() {
+            if (ttft.get() < 0) ttft.compareAndSet(-1, (System.nanoTime() - startNanos) / 1000000L);
         }
 
         void schedule() {
@@ -831,6 +995,7 @@ public final class Engine {
             if (job != this) return;
             copy();
             if (listener != null) listener.onMessageChanged(target);
+            if (settings.readAloud()) speech().feed(target.id, target.content, false);
         }
 
         void copy() {
@@ -843,8 +1008,15 @@ public final class Engine {
 
     /** Sends a chat message. Returns false (and keeps the text for the composer) when it can't. */
     public boolean send(String text) {
+        return send(text, null);
+    }
+
+    /** Sends a message with optional base64 JPEG/PNG images (for vision models). */
+    public boolean send(String text, List<String> images) {
         String t = text == null ? "" : text.trim();
-        if (t.length() == 0) return false;
+        boolean hasImages = images != null && !images.isEmpty();
+        if (t.length() == 0 && !hasImages) return false;
+        if (t.length() == 0) t = "Describe this image.";
         if (job != null) {
             toast("Wait for the reply to finish, or tap stop.");
             return false;
@@ -858,7 +1030,9 @@ public final class Engine {
             notice("No models are installed on the PC yet. Try `/pull llama3.2`.", "warn");
             return false;
         }
-        add(new ChatMessage(ChatMessage.USER, t));
+        ChatMessage u = new ChatMessage(ChatMessage.USER, t);
+        if (hasImages) u.images.addAll(images);
+        add(u);
         conv.autoTitle();
         startReply();
         return true;
@@ -883,9 +1057,12 @@ public final class Engine {
         target.startedAt = System.currentTimeMillis();
         add(target);
         final Job j = job = new Job(target);
-        final JSONObject body = OllamaClient.chatBody(model, msgs, thinkFor(model, deep), keepAlive(),
-                runnerOptions(model));
+        JSONObject opts = runnerOptions(model);
+        addGenerationOptions(opts);
+        j.numCtx = opts.optInt("num_ctx", 0);
+        final JSONObject body = OllamaClient.chatBody(model, msgs, thinkFor(model, deep), keepAlive(), opts);
         final boolean wasLoaded = running.containsKey(model);
+        if (settings.readAloud()) speech().stop();
         final OllamaClient c = client;
         notifyBusy();
         save();
@@ -895,6 +1072,7 @@ public final class Engine {
                 c.chat(body, j.cancel, new OllamaClient.ChatListener() {
                     @Override
                     public void onThinking(String delta) {
+                        j.firstToken();
                         synchronized (j) {
                             j.thinking.append(delta);
                         }
@@ -903,6 +1081,7 @@ public final class Engine {
 
                     @Override
                     public void onContent(String delta) {
+                        j.firstToken();
                         synchronized (j) {
                             j.content.append(delta);
                         }
@@ -941,16 +1120,28 @@ public final class Engine {
         t.content = stripLeadingBlank(t.content);
         t.thinking = t.thinking.trim();
         t.streaming = false;
+        t.ttftMs = j.ttft.get();
         if (stats != null) {
-            t.stats = stats.summary();
+            t.stats = stats.summary() + (t.ttftMs >= 0 ? " · first token " + Fmt.seconds(t.ttftMs) : "");
             if (stats.evalMs > 0) lastSpeed = Fmt.oneDecimal(stats.tokensPerSecond()) + " tok/s";
             if (t.content.length() == 0 && t.thinking.length() == 0) t.stats = "empty reply · " + t.stats;
+            telemetry.reply(stats, t.ttftMs, j.numCtx);
+            log("ok", "Reply · " + t.model + " · " + stats.evalTokens + " tok"
+                    + (stats.evalMs > 0 ? " @ " + Fmt.oneDecimal(stats.tokensPerSecond()) + " tok/s" : "")
+                    + (stats.reloaded() ? " · load " + Fmt.seconds(stats.loadMs) : ""));
+            notifyTelemetry();
+            if (settings.readAloud()) speech().feed(t.id, t.content, true);
         } else if (cancelled) {
             t.stopped = true;
             t.stats = "stopped";
+            log("warn", "Reply stopped · " + t.model);
+            speechStop();
         } else {
             t.error = true;
             t.stats = error == null ? "failed" : error;
+            telemetry.errors++;
+            log("error", "Reply failed · " + (error == null ? "unknown error" : Fmt.ellipsize(error, 90)));
+            speechStop();
         }
         job = null;
         if (listener != null) listener.onMessageChanged(t);
@@ -1037,6 +1228,71 @@ public final class Engine {
         } catch (JSONException ignored) {
         }
         return o;
+    }
+
+    /**
+     * Sampling settings (temperature, top_p, max tokens). They are not runner
+     * options, so changing them never makes Ollama reload the model.
+     */
+    void addGenerationOptions(JSONObject o) {
+        try {
+            if (settings.temperature() >= 0) o.put("temperature", round2(settings.temperature()));
+            if (settings.topP() >= 0) o.put("top_p", round2(settings.topP()));
+            if (settings.maxTokens() > 0) o.put("num_predict", settings.maxTokens());
+        } catch (JSONException ignored) {
+        }
+    }
+
+    private static double round2(float v) {
+        return Math.round(v * 100.0) / 100.0;
+    }
+
+    Speech speech() {
+        if (speech == null) {
+            speech = new Speech(app);
+            speech.setRate(settings.speechRate());
+        }
+        return speech;
+    }
+
+    /** Turns read-aloud on or off (the /mute command and the speaker toggles). */
+    public void setReadAloud(boolean on) {
+        settings.setReadAloud(on);
+        if (!on) {
+            speechStop();
+        } else {
+            speech().setRate(settings.speechRate());
+            if (job != null) speech().skip(job.target.id, job.target.content.length());
+        }
+        notifyState();
+    }
+
+    public void setSpeechRate(float rate) {
+        settings.setSpeechRate(rate);
+        if (speech != null) speech.setRate(settings.speechRate());
+    }
+
+    /** Speaks one line if read-aloud is on (status announcements). */
+    public void announce(String line) {
+        if (settings.readAloud()) speech().say(line);
+    }
+
+    public void speechStop() {
+        if (speech != null) speech.stop();
+    }
+
+    /** Reads one message aloud right away, interrupting anything already speaking. */
+    public void speakNow(String text) {
+        if (text == null || text.trim().length() == 0) return;
+        Speech s = speech();
+        s.setRate(settings.speechRate());
+        s.stop();
+        s.say(text);
+    }
+
+    /** True while the phone is speaking a reply or announcement. */
+    public boolean speaking() {
+        return speech != null && speech.speaking();
     }
 
     /** Only sent to models that support thinking — others reject the field. */
@@ -1150,8 +1406,15 @@ public final class Engine {
                 main.post(new Runnable() {
                     @Override
                     public void run() {
-                        if (fErr != null) updateNotice(n, "Couldn't load **" + model + "**: " + fErr, "error");
-                        else updateNotice(n, "**" + model + "** is loaded and ready (" + Fmt.seconds(fMs) + ").", "ok");
+                        if (fErr != null) {
+                            updateNotice(n, "Couldn't load **" + model + "**: " + fErr, "error");
+                            log("error", "Load failed · " + model);
+                        } else {
+                            updateNotice(n, "**" + model + "** is loaded and ready (" + Fmt.seconds(fMs) + ").", "ok");
+                            log("ok", "Model online · " + model + " (" + Fmt.seconds(fMs) + ")");
+                            telemetry.lastLoadMs = fMs;
+                            notifyTelemetry();
+                        }
                         refreshModels(null);
                     }
                 });
@@ -1177,8 +1440,12 @@ public final class Engine {
                 main.post(new Runnable() {
                     @Override
                     public void run() {
-                        if (fErr != null) updateNotice(n, "Couldn't unload **" + model + "**: " + fErr, "error");
-                        else updateNotice(n, "Unloaded **" + model + "** — its memory is free on the PC.", "ok");
+                        if (fErr != null) {
+                            updateNotice(n, "Couldn't unload **" + model + "**: " + fErr, "error");
+                        } else {
+                            updateNotice(n, "Unloaded **" + model + "** — its memory is free on the PC.", "ok");
+                            log("info", "Model offline · " + model + " (memory released)");
+                        }
                         refreshModels(null);
                     }
                 });
@@ -1208,6 +1475,9 @@ public final class Engine {
             return;
         }
         final Cancellable cancel = pullCancel = new Cancellable();
+        final PullState ps = pullState = new PullState(n0);
+        if (listener != null) listener.onPull();
+        log("info", "Download started · " + n0);
         final ChatMessage n = notice("Downloading **" + n0 + "** onto the PC…", "info");
         final OllamaClient c = client;
         final long[] lastUi = {0};
@@ -1216,10 +1486,29 @@ public final class Engine {
             public void run() {
                 c.pull(n0, cancel, new OllamaClient.PullListener() {
                     @Override
-                    public void onProgress(String status, long completed, long total) {
+                    public void onProgress(final String status, final long completed, final long total) {
                         long now = System.currentTimeMillis();
                         if (now - lastUi[0] < 250) return;
                         lastUi[0] = now;
+                        final long at = now;
+                        main.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                ps.status = status;
+                                if (total > 0) {
+                                    long dt = at - ps.lastAt;
+                                    if (completed >= ps.lastBytes && dt > 0 && ps.total == total) {
+                                        double inst = (completed - ps.lastBytes) * 1000.0 / dt;
+                                        ps.bytesPerSec = ps.bytesPerSec <= 0 ? inst : ps.bytesPerSec * 0.7 + inst * 0.3;
+                                    }
+                                    ps.total = total;
+                                    ps.completed = completed;
+                                    ps.lastBytes = completed;
+                                    ps.lastAt = at;
+                                }
+                                if (listener != null) listener.onPull();
+                            }
+                        });
                         final String text = "Downloading **" + n0 + "** — " + status
                                 + (total > 0 ? " · " + (completed * 100 / total) + "% (" + Fmt.bytes(completed) + " / "
                                 + Fmt.bytes(total) + ")" : "") + "\n`/pull stop` cancels.";
@@ -1238,7 +1527,12 @@ public final class Engine {
                             @Override
                             public void run() {
                                 pullCancel = null;
+                                ps.done = true;
+                                ps.status = "success";
+                                ps.completed = ps.total;
+                                if (listener != null) listener.onPull();
                                 updateNotice(n, "**" + n0 + "** is downloaded. Use it with `/model " + n0 + "`.", "ok");
+                                log("ok", "Download complete · " + n0);
                                 refreshModels(null);
                             }
                         });
@@ -1250,12 +1544,200 @@ public final class Engine {
                             @Override
                             public void run() {
                                 pullCancel = null;
+                                ps.done = true;
+                                ps.error = cancelled ? "stopped" : message;
+                                if (listener != null) listener.onPull();
                                 updateNotice(n, cancelled ? "Download of **" + n0 + "** stopped."
                                         : "Download of **" + n0 + "** failed: " + message, cancelled ? "warn" : "error");
+                                log(cancelled ? "warn" : "error", (cancelled ? "Download stopped · " : "Download failed · ") + n0);
                             }
                         });
                     }
                 });
+            }
+        });
+    }
+
+    /** Fetches /api/show details for a model (cached). */
+    public void fetchDetails(final String model, final Callback<OllamaClient.ModelDetails> cb) {
+        OllamaClient.ModelDetails cached = details.get(model);
+        if (cached != null) {
+            cb.done(cached, null);
+            return;
+        }
+        final OllamaClient c = client;
+        if (c == null) {
+            cb.done(null, "Not connected.");
+            return;
+        }
+        io.execute(new Runnable() {
+            @Override
+            public void run() {
+                OllamaClient.ModelDetails d = null;
+                String err = null;
+                try {
+                    d = c.show(model);
+                } catch (IOException e) {
+                    err = e.getMessage();
+                }
+                final OllamaClient.ModelDetails fd = d;
+                final String fe = err;
+                main.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (fd != null && c == client) {
+                            details.put(model, fd);
+                            thinkSupport.put(model, fd.supports("thinking"));
+                        }
+                        cb.done(fd, fd == null ? (fe == null ? "No details." : fe) : null);
+                    }
+                });
+            }
+        });
+    }
+
+    /** Deletes a model from the PC's disk. */
+    public void deleteModel(final String model, final Callback<Boolean> cb) {
+        final OllamaClient c = client;
+        if (c == null) {
+            cb.done(null, "Not connected.");
+            return;
+        }
+        io.execute(new Runnable() {
+            @Override
+            public void run() {
+                String err = null;
+                try {
+                    c.deleteModel(model);
+                } catch (IOException e) {
+                    err = e.getMessage();
+                }
+                final String fe = err;
+                main.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (fe == null) {
+                            log("warn", "Model deleted · " + model);
+                            details.remove(model);
+                            thinkSupport.remove(model);
+                            if (model.equals(settings.model())) settings.setModel("");
+                            refreshModels(null);
+                            cb.done(Boolean.TRUE, null);
+                        } else {
+                            cb.done(null, fe);
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    /** Checks whether LaunchBridge answers (no auth needed). */
+    public void bridgeHealth(final Callback<JSONObject> cb) {
+        bridgeAsync(new BridgeCall<JSONObject>() {
+            @Override
+            public JSONObject run(BridgeClient b) throws BridgeClient.BridgeException {
+                return b.health();
+            }
+        }, new Callback<JSONObject>() {
+            @Override
+            public void done(JSONObject v, String error) {
+                Boolean was = bridgeOnline;
+                bridgeOnline = error == null;
+                if (was == null || was != bridgeOnline) {
+                    log(bridgeOnline ? "ok" : "warn", bridgeOnline ? "PC bridge online" : "PC bridge unreachable");
+                    notifyState();
+                }
+                cb.done(v, error);
+            }
+        });
+    }
+
+    /** Reads CPU / RAM / disk / battery from the PC (get_system_info). */
+    public void bridgeVitals(final Callback<Vitals> cb) {
+        bridgeAsync(new BridgeCall<Vitals>() {
+            @Override
+            public Vitals run(BridgeClient b) throws BridgeClient.BridgeException {
+                return Vitals.parse(b.deskRun("get_system_info", null));
+            }
+        }, new Callback<Vitals>() {
+            @Override
+            public void done(Vitals v, String error) {
+                if (v != null) {
+                    lastVitals = v;
+                    lastVitalsAt = System.currentTimeMillis();
+                    bridgeOnline = Boolean.TRUE;
+                    notifyTelemetry();
+                }
+                cb.done(v, error);
+            }
+        });
+    }
+
+    /** Searches the PC's installed apps (LaunchBridge index). */
+    public void bridgeApps(final String query, final int limit, Callback<JSONArray> cb) {
+        bridgeAsync(new BridgeCall<JSONArray>() {
+            @Override
+            public JSONArray run(BridgeClient b) throws BridgeClient.BridgeException {
+                return b.apps(query, limit);
+            }
+        }, cb);
+    }
+
+    /** Desktop tools the bridge offers. */
+    public void bridgeCapabilities(Callback<List<String>> cb) {
+        bridgeAsync(new BridgeCall<List<String>>() {
+            @Override
+            public List<String> run(BridgeClient b) throws BridgeClient.BridgeException {
+                JSONObject caps = b.deskCapabilities();
+                List<String> out = new ArrayList<String>();
+                JSONArray tools = caps.optJSONArray("tools");
+                if (tools != null) {
+                    for (int i = 0; i < tools.length(); i++) {
+                        Object t = tools.opt(i);
+                        String name = t instanceof JSONObject ? OllamaClient.str((JSONObject) t, "name") : String.valueOf(t);
+                        if (name.length() > 0) out.add(name);
+                    }
+                }
+                return out;
+            }
+        }, cb);
+    }
+
+    /** Runs any desktop tool and returns its raw result. */
+    public void bridgeRun(final String tool, final JSONObject args, final Callback<Object> cb) {
+        bridgeAsync(new BridgeCall<Object>() {
+            @Override
+            public Object run(BridgeClient b) throws BridgeClient.BridgeException {
+                Object r = b.deskRun(tool, args);
+                return r == null ? "" : r;
+            }
+        }, new Callback<Object>() {
+            @Override
+            public void done(Object v, String error) {
+                if (error == null) log("info", "PC · " + tool);
+                cb.done(v, error);
+            }
+        });
+    }
+
+    /** Pairs with the bridge; callback gets the token. */
+    public void bridgePair(final Callback<String> cb) {
+        bridgeAsync(new BridgeCall<String>() {
+            @Override
+            public String run(BridgeClient b) throws BridgeClient.BridgeException {
+                return b.pair();
+            }
+        }, new Callback<String>() {
+            @Override
+            public void done(String token, String error) {
+                if (token != null) {
+                    settings.setBridgeToken(token);
+                    bridgeOnline = Boolean.TRUE;
+                    log("ok", "PC bridge paired");
+                    notifyState();
+                }
+                cb.done(token, error);
             }
         });
     }
@@ -1516,19 +1998,13 @@ public final class Engine {
     public void bridgePair() {
         final BridgeClient b0 = bridge();
         final String where = b0 == null ? "the PC" : b0.where();
-        bridgeAsync(new BridgeCall<String>() {
-            @Override
-            public String run(BridgeClient b) throws BridgeClient.BridgeException {
-                return b.pair();
-            }
-        }, new Callback<String>() {
+        bridgePair(new Callback<String>() {
             @Override
             public void done(String token, String error) {
                 if (error != null) {
                     notice("Pairing failed: " + error, "error");
                     return;
                 }
-                settings.setBridgeToken(token);
                 notice("Paired with LaunchBridge on " + where + ". `/open`, `/vol`, `/sys`, `/shot` and "
                         + "`/pcclip` now control the PC.", "ok");
             }
