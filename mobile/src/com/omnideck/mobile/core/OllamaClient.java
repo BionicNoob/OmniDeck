@@ -152,8 +152,10 @@ public final class OllamaClient {
         } catch (JSONException ignored) {
         }
         String notOllama = isOllama || code == 401 || code == 403 ? null
+                : code >= 500 ? host + ":" + port + " answered with HTTP " + code + " — if it's a proxy, the Ollama "
+                + "behind it may be stopped or unreachable."
                 : "Something answered at " + host + ":" + port + " (HTTP " + code + "), but it isn't Ollama — "
-                + "check the port (Ollama uses 11434).";
+                + (https ? "check that the address forwards to Ollama." : "check the port (Ollama uses 11434).");
         return new Probe(isOllama ? new ServerInfo(host, port, https, version, latency) : null, code, notOllama);
     }
 

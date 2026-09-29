@@ -86,6 +86,23 @@ public class WakeAndGuardTest extends Harness {
     }
 
     @Test
+    public void anUnboundTokenIsNotTiedToTheHttpsHostItWasNeverSentTo() throws Exception {
+        withBridge(true); // a token typed in Settings: not bound to any PC yet
+        int port = closedPort();
+        prefs().edit().putString("server", "https://127.0.0.1:" + port).commit();
+        engineSettingsLast("127.0.0.1", port);
+        launch("light", MainActivity.TAB_COMMAND);
+        waitFor("offline", () -> engine().state() == Engine.State.OFFLINE);
+        AtomicReference<String> r = new AtomicReference<>();
+        engine().lockPc((x, e) -> r.set(e != null ? e : x));
+        waitFor("bridge answered", () -> r.get() != null);
+        assertEquals("still unbound: it binds to the bridge address the user enters next", "",
+                engine().settings.bridgeTokenHost());
+        engine().settings.setBridgeHost("127.0.0.1");
+        assertTrue(engine().bridgePaired());
+    }
+
+    @Test
     public void anEmptyChatSuggestsPcRequestsOnlyWhenOmniCanActOnThePc() throws Exception {
         launch("light", MainActivity.TAB_COMMS);
         waitOnline();
@@ -105,6 +122,18 @@ public class WakeAndGuardTest extends Harness {
         });
         advance(1500);
         shoot("comms-cyber-empty-pc");
+        assertFalse("llama3.2 can't see a screenshot", shows("What's on my screen?"));
+
+        // A model with vision gets the screen question too.
+        ollama.addModel(new MockOllama.Model("llama3.2-vision:11b", 7_800_000_000L, "11B", "Q4_K_M", false));
+        engine().refreshModels(null);
+        waitFor("listed", () -> engine().models().size() > 1 && engine().resolveInstalled("llama3.2-vision:11b") != null);
+        engine().setModel("llama3.2-vision:11b");
+        engine().fetchDetails("llama3.2-vision:11b", (d, e) -> { });
+        waitFor("screen question", () -> {
+            advance(100);
+            return shows("What's on my screen?");
+        });
     }
 
     private static void engineSettingsLast(String host, int port) {

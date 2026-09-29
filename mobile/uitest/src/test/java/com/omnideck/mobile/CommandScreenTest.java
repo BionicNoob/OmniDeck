@@ -249,10 +249,11 @@ public class CommandScreenTest extends Harness {
         waitFor("offline", () -> engine().state() == Engine.State.OFFLINE);
         advance(1500);
         assertEquals(CoreView.OFFLINE, core().mode());
-        // A typed address on a closed port: the card says exactly that, and how to fix it.
-        assertTrue(shows("YOUR AI REFUSED THE CONNECTION"));
+        // A typed address on a closed port: the card says exactly that, and the steps that fix it.
+        assertTrue(shows("CAN'T REACH YOUR AI"));
         assertTrue(shows("refused port " + port));
         assertTrue(shows("OLLAMA_HOST=0.0.0.0"));
+        assertTrue("step 03 names the port that was scanned", shows("Allow port " + port + " through"));
         assertNotNull(button("Scan again"));
         assertNotNull(button("Enter address"));
         shoot("command-cyber-offline");
@@ -303,7 +304,7 @@ public class CommandScreenTest extends Harness {
     @Test
     public void lightOffline() throws Exception {
         launchOffline("light");
-        assertTrue(shows("Your AI refused the connection"));
+        assertTrue(shows("Can't reach your AI"));
         assertTrue(shows("OLLAMA_HOST=0.0.0.0"));
         shoot("command-light-offline");
     }

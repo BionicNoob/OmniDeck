@@ -279,6 +279,7 @@ public final class Engine {
         if (auxCancel != null) auxCancel.cancel();
         if (scanCancel != null) scanCancel.cancel();
         if (pullCancel != null) pullCancel.cancel();
+        WorkService.sync(app, false, visible);
         main.removeCallbacksAndMessages(null);
         if (speech != null) speech.shutdown();
         unregisterNetworkCallback();
@@ -609,6 +610,10 @@ public final class Engine {
         visible = v;
         if (v) {
             syncWork();
+            if (wakingUntil > System.currentTimeMillis()) {
+                main.removeCallbacks(wakeWatch);
+                main.post(wakeWatch);
+            }
             registerNetworkCallback();
             if (state == State.ONLINE) checkHealth();
             else discover(false);
@@ -625,6 +630,7 @@ public final class Engine {
             main.removeCallbacks(healthTick);
             main.removeCallbacks(offlineRetry);
             main.removeCallbacks(timerTick);
+            main.removeCallbacks(wakeWatch); // no LAN sweeps from the background; resumes on return
             // A PC action waiting for the user's OK: they may come right back; if not, it's declined.
             if (pendingApproval() != null) main.postDelayed(approvalTimeout, APPROVAL_BACKGROUND_MS);
         }
@@ -659,6 +665,7 @@ public final class Engine {
                 }
                 return;
             }
+            if (!visible) return; // setVisible(true) picks the watch up again
             if (!scanning) discover(false);
             main.postDelayed(this, WAKE_POLL_MS);
         }
@@ -846,8 +853,10 @@ public final class Engine {
                             }
                             scheduleOfflineRetry();
                         } else if (typed != null && typed.failure != null) {
-                            // The address the user typed failed for a reason worth saying.
-                            setState(State.OFFLINE, typed.failure);
+                            // The address the user typed failed for a reason worth saying (and a LAN
+                            // address can't answer a phone that isn't on Wi-Fi).
+                            setState(State.OFFLINE, nets.isEmpty() && !manual.https
+                                    ? "This phone isn't on Wi-Fi. " + typed.failure : typed.failure);
                             if (full) notice("Couldn't connect to **" + manual.label(OllamaClient.DEFAULT_PORT)
                                     + "** — " + typed.failure, "warn");
                             if (!loggedOffline) {
@@ -1007,6 +1016,18 @@ public final class Engine {
         for (ModelInfo m : ps) running.put(m.name, m);
     }
 
+    /**
+     * Keeps what {@code model} can do (thinking, tools, vision…); the first
+     * time it's learned the screens refresh, so capability-driven UI (the
+     * thinking toggle, PC suggestions) appears without another event.
+     */
+    private void cacheDetails(String model, OllamaClient.ModelDetails d) {
+        boolean fresh = !details.containsKey(model) || !thinkSupport.containsKey(model);
+        details.put(model, d);
+        thinkSupport.put(model, d.supports("thinking"));
+        if (fresh) notifyState();
+    }
+
     private void ensureCapabilities(final String model) {
         final OllamaClient c = client;
         if (c == null || model == null || model.length() == 0 || thinkSupport.containsKey(model)) return;
@@ -1022,11 +1043,7 @@ public final class Engine {
                 main.post(new Runnable() {
                     @Override
                     public void run() {
-                        if (c == client && fd != null) {
-                            thinkSupport.put(model, fd.supports("thinking"));
-                            details.put(model, fd);
-                            notifyState();
-                        }
+                        if (c == client && fd != null) cacheDetails(model, fd);
                     }
                 });
             }
@@ -1599,10 +1616,7 @@ public final class Engine {
                 main.post(new Runnable() {
                     @Override
                     public void run() {
-                        if (d != null && c == client) {
-                            details.put(model, d);
-                            thinkSupport.put(model, d.supports("thinking"));
-                        }
+                        if (d != null && c == client) cacheDetails(model, d);
                         if (fCat != null) cacheCatalog(key, fCat);
                         else if (fErr != null) catalogFailed(fErr);
                         if (job != j) return;
@@ -2863,13 +2877,7 @@ public final class Engine {
                 main.post(new Runnable() {
                     @Override
                     public void run() {
-                        if (fd != null && c == client) {
-                            boolean fresh = !details.containsKey(model);
-                            details.put(model, fd);
-                            thinkSupport.put(model, fd.supports("thinking"));
-                            // What the active model can do (tools, vision…) shows up in the UI.
-                            if (fresh && model.equals(currentModel())) notifyState();
-                        }
+                        if (fd != null && c == client) cacheDetails(model, fd);
                         cb.done(fd, fd == null ? (fe == null ? "No details." : fe) : null);
                     }
                 });
@@ -3447,12 +3455,12 @@ public final class Engine {
      * that host issued it: the Ollama host (and so the default bridge host)
      * can be any machine on a foreign network, and the token opens the PC.
      */
-    static final String TLS_BRIDGE_HINT = "Your AI is reached over https, but the PC bridge speaks plain http — "
+    public static final String TLS_BRIDGE_HINT = "Your AI is reached over https, but the PC bridge speaks plain http — "
             + "enter the bridge's own address (a LAN or VPN IP) in Settings › PC bridge, so its token never "
             + "travels unencrypted.";
 
     /** No bridge address of its own, and the AI's address is https: the bridge would ride that route in the clear. */
-    boolean bridgeOverTls() {
+    public boolean bridgeOverTls() {
         if (settings.bridgeHost().length() > 0) return false;
         return server != null ? server.https : settings.lastHttps() && settings.lastHost().length() > 0;
     }
@@ -3460,16 +3468,17 @@ public final class Engine {
     private BridgeClient bridge() {
         String host = bridgeHost();
         if (host.length() == 0) return null;
+        if (bridgeOverTls()) {
+            // The AI is reached over https (a reverse proxy, often across the internet) but the bridge
+            // speaks plain http: never send the token that opens the PC along that route (nor bind an
+            // unbound one to that host).
+            return new BridgeClient(host, settings.bridgePort(), "", TLS_BRIDGE_HINT);
+        }
         String saved = settings.bridgeToken();
         if (saved.length() > 0 && settings.bridgeTokenHost().length() == 0) {
             // A token from before tokens were bound (or typed in Settings): bind it to the PC it's
             // first used with, so it is never sent to another host afterwards.
             settings.setBridgeTokenHost(host);
-        }
-        if (bridgeOverTls()) {
-            // The AI is reached over https (a reverse proxy, often across the internet) but the bridge
-            // speaks plain http: never send the token that opens the PC along that route.
-            return new BridgeClient(host, settings.bridgePort(), "", TLS_BRIDGE_HINT);
         }
         String token = bridgeTokenFor(host);
         String hint = saved.length() > 0 && token.length() == 0

@@ -1688,14 +1688,18 @@ public final class CommandScreen extends Screen {
             offlineMeter.setIndeterminate(false);
             return;
         }
-        boolean searching = s == Engine.State.SEARCHING;
-        if (e.isWaking()) searching = true; // amber, with the meter running: something is on its way
+        boolean waking = e.isWaking();
+        // Waking is a search too: amber, with the meter running — something is on its way.
+        boolean searching = s == Engine.State.SEARCHING || waking;
         if (offlineStyledSearching == null || offlineStyledSearching != searching) styleOfflineCard(searching);
         String sd = e.stateDetail();
-        boolean waking = e.isWaking();
-        boolean refused = !searching && !waking && sd.contains("refused");
+        // The AI answered but wants (another) API key: the setup steps don't apply.
+        boolean refused = !searching && sd.contains("refused the connection (HTTP");
+        boolean typedFailed = !searching && !refused && !sd.startsWith("No AI answered")
+                && !sd.startsWith("This phone isn't on Wi-Fi.");
         offlineTitle.setText(caps(waking ? "Waking your PC" : searching ? "Scanning for your AI"
-                : refused ? "Your AI refused the connection" : "AI not found on this network"));
+                : refused ? "Your AI refused the connection" : typedFailed ? "Can't reach your AI"
+                : "AI not found on this network"));
         // The core's line says what was searched; this card says why and what to do.
         offlineDetail.setText(waking ? "Wake-up packet sent. Checking every few seconds while the PC boots and "
                 + "Ollama starts; this usually takes under a minute."

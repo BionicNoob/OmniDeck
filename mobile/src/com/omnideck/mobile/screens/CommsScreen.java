@@ -116,6 +116,8 @@ public final class CommsScreen extends Screen {
     private TextView emptySub;
     /** "Ask about the PC" prompts, shown only when OMNI can act on the PC. */
     private LinearLayout pcPrompts;
+    /** "What's on my screen?" needs a model that can see the screenshot. */
+    private View pcScreenRow;
     private View jumpBtn;
     private LinearLayout ctxWarn;
     private TextView ctxWarnText;
@@ -606,6 +608,7 @@ public final class CommsScreen extends Screen {
                 row.addView(c, lp);
             }
             pcPrompts.addView(row, Ui.fillW());
+            pcScreenRow = row; // the last row: the screen question
         }
         pcPrompts.setVisibility(View.GONE);
         box.addView(pcPrompts, Ui.fillW());
@@ -1252,6 +1255,7 @@ public final class CommsScreen extends Screen {
             sb.append(".\nType, tap the mic to speak, or / for commands.");
             emptySub.setText(sb);
             pcPrompts.setVisibility(e.toolsReady(model) ? View.VISIBLE : View.GONE);
+            pcScreenRow.setVisibility(Boolean.TRUE.equals(e.supportsVision(model)) ? View.VISIBLE : View.GONE);
         } else if (s == Engine.State.SEARCHING) {
             pcPrompts.setVisibility(View.GONE);
             emptySub.setText("Searching the network for your AI…");

@@ -1192,7 +1192,7 @@ public final class PcScreen extends Screen {
 
     /** A token is saved, but for another PC than the one the tab points at. */
     private boolean pairedElsewhere() {
-        return e.settings.bridgeToken().length() > 0 && !e.bridgePaired();
+        return e.settings.bridgeToken().length() > 0 && !e.bridgePaired() && !e.bridgeOverTls();
     }
 
     /**
@@ -1324,7 +1324,9 @@ public final class PcScreen extends Screen {
             downError.setVisibility(useful ? View.VISIBLE : View.GONE);
         }
         if (s == UNPAIRED) {
-            if (pairedElsewhere()) {
+            if (e.bridgeOverTls()) {
+                pairLead.setText(Engine.TLS_BRIDGE_HINT);
+            } else if (pairedElsewhere()) {
                 SpannableStringBuilder sb = new SpannableStringBuilder("This phone is paired with the PC at ");
                 sb.append(ui.mono(e.settings.bridgeTokenHost())).append(", not this one. Pair with ")
                         .append(ui.mono(address())).append(" to control it here — that replaces the other pairing.");

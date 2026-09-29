@@ -2106,6 +2106,8 @@ public final class SettingsScreen extends Screen {
         if (host.length() == 0) {
             bridgeDetail.setText("Enter the PC's address below, or connect to your AI — the bridge usually runs on "
                     + "the same PC.");
+        } else if (e.bridgeOverTls()) {
+            bridgeDetail.setText(Engine.TLS_BRIDGE_HINT);
         } else if (!paired && e.settings.bridgeToken().length() > 0 && other.length() > 0) {
             SpannableStringBuilder sb = new SpannableStringBuilder("Paired with the bridge at ");
             sb.append(ui.mono(other)).append(", not ").append(ui.mono(host)).append(" — pair again for this PC.");
