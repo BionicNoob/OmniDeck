@@ -104,6 +104,8 @@ public final class SettingsScreen extends Screen {
     }
 
     private final SettingsKit kit;
+    /** True while {@link #refresh()} reads everything back (fields drop edits that couldn't be saved). */
+    private boolean fullRefresh;
     private final List<Section> sections = new ArrayList<Section>();
     private ScrollView scroll;
     private LinearLayout column;
@@ -810,7 +812,7 @@ public final class SettingsScreen extends Screen {
         SettingsKit.enable(scanBtn, !e.isScanning());
         setStatus(secConnection, s == Engine.State.ONLINE && !Double.isNaN(lat) ? "Online · " + Math.round(lat) + " ms"
                 : st, c);
-        if (!apiKeyBox.field.hasFocus()) apiKeyBox.edits.bind(e.settings.apiKey());
+        showSaved(apiKeyBox.field, apiKeyBox.edits, e.settings.apiKey(), null);
         if (e.settings.apiKey().length() > 0 && manual.length() == 0) {
             kit.show(apiKeyNotice, "Not in use: the key only goes to an address you typed in. Set the AI address "
                     + "above to your proxy.", t.warn);
@@ -2064,10 +2066,10 @@ public final class SettingsScreen extends Screen {
                 ? sentence("Leave empty to use the PC running your AI (", aiHost, "). The port is 8765 unless you "
                 + "changed it.") : "Leave empty to use the PC running your AI. The port is 8765 unless you changed it.");
         hostField.setHint(aiHost.length() > 0 ? aiHost : "PC address");
-        if (!hostField.hasFocus()) hostEdits.bind(e.settings.bridgeHost());
-        if (!portField.hasFocus()) portEdits.bind(String.valueOf(e.settings.bridgePort()));
-        if (!tokenBox.field.hasFocus()) tokenBox.edits.bind(e.settings.bridgeToken());
-        if (!macField.hasFocus()) macEdits.bind(e.settings.pcMac());
+        showSaved(hostField, hostEdits, e.settings.bridgeHost(), hostNotice);
+        showSaved(portField, portEdits, String.valueOf(e.settings.bridgePort()), null);
+        showSaved(tokenBox.field, tokenBox.edits, e.settings.bridgeToken(), null);
+        showSaved(macField, macEdits, e.settings.pcMac(), wolStatus);
         pairNowBtn.setVisibility(paired ? View.GONE : View.VISIBLE);
         pairAgainBtn.setVisibility(paired ? View.VISIBLE : View.GONE);
         TextView pb = paired ? pairAgainBtn : pairNowBtn;
@@ -2382,14 +2384,36 @@ public final class SettingsScreen extends Screen {
     // Refresh / lifecycle
     // ------------------------------------------------------------------
 
+    /**
+     * Shows a field's saved value — unless the user is typing in it, or (on
+     * a partial refresh) it holds an edit that couldn't be saved, which stays
+     * next to the notice explaining why. A full refresh (the page shown
+     * again) drops such an edit and its notice.
+     */
+    private void showSaved(EditText f, SettingsWidgets.EditTracker ed, String saved, SettingsKit.Notice invalid) {
+        if (f.hasFocus()) return;
+        if (ed.edited() && !fullRefresh) return;
+        ed.bind(saved);
+        if (invalid != null && INVALID.equals(invalid.key)) kit.hide(invalid);
+    }
+
     /** Reads every control back from the live settings and engine state. */
     private void refresh() {
+        fullRefresh = true;
+        try {
+            refreshAll();
+        } finally {
+            fullRefresh = false;
+        }
+    }
+
+    private void refreshAll() {
         refreshAppearance();
         refreshConnection();
         refreshModel();
         refreshPerformance();
         refreshGeneration();
-        if (!promptField.hasFocus()) promptEdits.bind(e.settings.systemPrompt());
+        showSaved(promptField, promptEdits, e.settings.systemPrompt(), null);
         updatePromptState();
         refreshFacts();
         refreshPersonaStatus();

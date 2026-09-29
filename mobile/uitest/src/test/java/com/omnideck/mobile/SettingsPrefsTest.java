@@ -170,6 +170,18 @@ public class SettingsPrefsTest extends SettingsBaseTest {
         assertTrue(shows("isn't a MAC address"));
         assertEquals("kept in the field to fix", "3c-7c-3f-12-ab", mac.getText().toString());
         assertEquals("not saved", "3C:7C:3F:12:AB:CD", settings().pcMac());
+        // Engine updates meanwhile leave the edit and its notice together…
+        engine().setMode(Settings.MODE_FAST);
+        idle();
+        assertEquals("3c-7c-3f-12-ab", mac.getText().toString());
+        assertTrue(shows("isn't a MAC address"));
+        // …and coming back to the page shows what's saved, without the stale notice.
+        closeSettings();
+        openSettings();
+        assertEquals("3C:7C:3F:12:AB:CD", field("PC MAC address").getText().toString());
+        assertFalse(shows("isn't a MAC address"));
+        typeDone(mac, "3c-7c-3f-12-ab");
+        assertTrue(shows("isn't a MAC address"));
         typeDone(mac, "3C:7C:3F:12:AB:CD");
         assertFalse(shows("isn't a MAC address"));
 
