@@ -9,9 +9,13 @@ import android.widget.EditText;
 import android.widget.ImageView;
 import android.widget.TextView;
 
+import android.text.Spanned;
+
 import com.omnideck.mobile.core.ConversationStore;
+import com.omnideck.mobile.ui.SettingsKit;
 import com.omnideck.mobile.ui.SettingsWidgets;
 import com.omnideck.mobile.ui.Theme;
+import com.omnideck.mobile.ui.Ui;
 
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -21,6 +25,8 @@ import org.robolectric.annotation.GraphicsMode;
 import org.robolectric.annotation.LooperMode;
 import org.robolectric.shadows.ShadowToast;
 
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 import static org.junit.Assert.assertEquals;
@@ -404,6 +410,24 @@ public class SettingsFixesTest extends SettingsBaseTest {
         jump("Generation");
         assertTrue(need("Reset generation").getPaddingRight() <= Math.round(4 * act.getResources()
                 .getDisplayMetrics().density));
+    }
+
+    @Test
+    public void addressesAndMacsInSentencesAreSetInMono() throws Exception {
+        launch("light", MainActivity.TAB_COMMAND);
+        SettingsKit kit = new SettingsKit(act.ui(), null);
+        String text = "Wake-up packet sent to 3C:7C:3F:12:AB:CD. Bridge at 192.168.1.20:8765, proxy "
+                + "https://ai.example.com. Host pc.lan:8765 since 19:36, Ollama 0.12.6.";
+        CharSequence s = kit.idents(text);
+        assertEquals("the words are unchanged", text, s.toString());
+        Spanned sp = (Spanned) s;
+        List<String> mono = new ArrayList<>();
+        for (Ui.IdentSpan span : sp.getSpans(0, sp.length(), Ui.IdentSpan.class)) {
+            mono.add(s.subSequence(sp.getSpanStart(span), sp.getSpanEnd(span)).toString());
+        }
+        assertEquals(Arrays.asList("3C:7C:3F:12:AB:CD", "192.168.1.20:8765", "https://ai.example.com", "pc.lan:8765"),
+                mono);
+        assertSame("plain text stays plain", "No address here.", kit.idents("No address here."));
     }
 
     private static void assertClose(String what, int want, int got) {

@@ -839,7 +839,7 @@ public final class SettingsWidgets {
                 mini(c, right, backRight, frame);
                 c.restoreToCount(s2);
                 p.setStyle(Paint.Style.FILL);
-                p.setColor(0x66808890);
+                p.setColor(Theme.alpha(cur.dim, 0x80));
                 c.drawRect(frame.centerX() - d * 0.5f, frame.top, frame.centerX() + d * 0.5f, frame.bottom, p);
             }
             c.restoreToCount(save);
@@ -947,7 +947,8 @@ public final class SettingsWidgets {
             p.setColor(Theme.alpha(t.dim, 0x99));
             bar(c, tx, by - h * 0.025f, (cr - tx - w * 0.06f) * 0.7f, h * 0.022f);
             float my = cb - (cb - ct) * 0.17f;
-            p.setColor(t.hud ? Theme.alpha(t.accent, 0x2E) : t.isDark ? 0x2EFFFFFF : 0x1F171717);
+            // The theme's meter: a 20% data-ink track under the data fill (the sliders' look).
+            p.setColor(Theme.alpha(t.data, 0x33));
             bar(c, cl + w * 0.07f, my, (cr - cl) - w * 0.14f, h * 0.022f);
             p.setColor(t.data);
             bar(c, cl + w * 0.07f, my, ((cr - cl) - w * 0.14f) * 0.62f, h * 0.022f);

@@ -454,7 +454,7 @@ public final class SettingsKit {
                 : IconDrawable.INFO;
         n.icon.setImageDrawable(new IconDrawable(icon, color, color, ui.dp(15)));
         n.text.setText(idents(text));
-        n.text.setTextColor(color == t.dim ? t.dim : color);
+        n.text.setTextColor(color);
         n.row.setVisibility(View.VISIBLE);
     }
 
