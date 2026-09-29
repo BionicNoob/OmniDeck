@@ -54,6 +54,8 @@ public final class MockBridge {
      * default so the original fixtures stay exactly as they were.
      */
     public volatile boolean rich;
+    /** An older bridge that ignores dry_run: a /launch query always opens the app. */
+    public volatile boolean ignoreDryRun;
     /** Desktop tools called through /desk/run in rich mode, in order. */
     public final List<String> ranTools = Collections.synchronizedList(new ArrayList<String>());
     /** Delay before answering any request, in ms (loading states). */
@@ -148,8 +150,26 @@ public final class MockBridge {
         }
         if (rich && richRoute(ex, method, path)) return;
         if ("GET".equals(method) && "/apps".equals(path)) {
-            JSONArray m = new JSONArray().put(new JSONObject().put("id", "app-notepad").put("name", "Notepad"))
-                    .put(new JSONObject().put("id", "app-spotify").put("name", "Spotify"));
+            // Empty query: the two classic apps; otherwise a name search over a small catalog.
+            String q = queryParam(ex, "q").toLowerCase();
+            JSONArray m = new JSONArray();
+            if (q.length() == 0) {
+                m.put(new JSONObject().put("id", "app-notepad").put("name", "Notepad"))
+                        .put(new JSONObject().put("id", "app-spotify").put("name", "Spotify"));
+            } else if (!q.contains("ghost")) {
+                // {id, name, path, search keywords} — like LaunchBridge's fuzzy index.
+                String[][] catalog = {{"app-notepad", "Notepad", "C:\\Windows\\notepad.exe", "notepad text"},
+                        {"app-spotify", "Spotify", "C:\\Apps\\app.exe", "spotify music"},
+                        {"app-vscode", "Visual Studio Code", "C:\\Program Files\\Microsoft VS Code\\Code.exe",
+                                "visual studio code vscode editor"},
+                        {"app-vscodium", "VSCodium", "C:\\Program Files\\VSCodium\\VSCodium.exe",
+                                "vscodium code editor"}};
+                for (String[] a : catalog) {
+                    if (a[1].toLowerCase().contains(q) || a[0].contains(q) || a[3].contains(q)) {
+                        m.put(new JSONObject().put("id", a[0]).put("name", a[1]).put("path", a[2]));
+                    }
+                }
+            }
             send(ex, 200, new JSONObject().put("matches", m).toString());
         } else if ("POST".equals(method) && "/launch".equals(path)) {
             JSONObject req = body(ex);
@@ -181,7 +201,7 @@ public final class MockBridge {
                 app = new JSONObject().put("id", q.contains("spot") ? "app-spotify" : "app-notepad")
                         .put("name", q.contains("spot") ? "Spotify" : "Notepad").put("path", "C:\\Apps\\app.exe");
             }
-            if (req.optBoolean("dry_run", false)) {
+            if (req.optBoolean("dry_run", false) && !ignoreDryRun) {
                 send(ex, 200, new JSONObject().put("would_launch", app).toString());
             } else {
                 launched.add(app.getString("name"));
@@ -420,5 +440,22 @@ public final class MockBridge {
         JSONObject o = new JSONObject(raw.trim().length() == 0 ? "{}" : raw);
         bodies.put(ex, o);
         return o;
+    }
+
+    /** A URL query parameter, decoded ("" when absent). */
+    static String queryParam(HttpExchange ex, String key) {
+        String raw = ex.getRequestURI().getRawQuery();
+        if (raw == null) return "";
+        for (String kv : raw.split("&")) {
+            int eq = kv.indexOf('=');
+            String k = eq < 0 ? kv : kv.substring(0, eq);
+            if (!k.equals(key)) continue;
+            try {
+                return java.net.URLDecoder.decode(eq < 0 ? "" : kv.substring(eq + 1), "UTF-8");
+            } catch (java.io.UnsupportedEncodingException e) {
+                return "";
+            }
+        }
+        return "";
     }
 }

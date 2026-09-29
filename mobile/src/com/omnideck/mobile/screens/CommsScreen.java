@@ -1436,6 +1436,15 @@ public final class CommsScreen extends Screen {
     @Override
     public void onDestroy() {
         handler.removeCallbacksAndMessages(null);
+        // An open approval question outlives this activity (the recreated one asks again):
+        // let go of the sheet without answering it, and without touching a dead window later.
+        if (approvalShown != null) approvalShown.setOnSettled(null);
+        if (approvalSheet != null) {
+            approvalSheet.onDismiss(null);
+            approvalSheet.dismiss();
+        }
+        approvalSheet = null;
+        approvalShown = null;
     }
 
     @Override
@@ -2075,10 +2084,11 @@ public final class CommsScreen extends Screen {
         TextView k = ui.label(key);
         k.setPadding(0, ui.dp(2), ui.dp(8), 0);
         r.addView(k, new LinearLayout.LayoutParams(ui.dp(104), ViewGroup.LayoutParams.WRAP_CONTENT));
-        TextView v = ui.text(value, 13, t.ink, t.mono);
+        // Never cut short: what the user approves must be visible in full (the sheet scrolls).
+        TextView v = ui.text(value.length() > 400 ? value + "\n(" + value.length() + " characters)" : value,
+                13, t.ink, t.mono);
         v.setLineSpacing(0, 1.15f);
-        v.setMaxLines(8);
-        v.setEllipsize(TextUtils.TruncateAt.END);
+        v.setTextIsSelectable(true);
         r.addView(v, Ui.weight(1));
         return r;
     }

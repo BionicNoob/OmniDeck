@@ -228,6 +228,29 @@ public class ToolKitTest {
         assertEquals("a read that deletes is destructive", ToolKit.DESTRUCTIVE,
                 ToolKit.risk(null, "get_and_delete_file", none));
         assertEquals(ToolKit.DESTRUCTIVE, ToolKit.risk(tool("sleep_pc", ""), "sleep_pc", none));
+
+        // Mutating verbs beat the read-only shapes.
+        assertEquals(ToolKit.CHANGE, ToolKit.risk(null, "set_status", none));
+        assertEquals(ToolKit.CHANGE, ToolKit.risk(null, "update_status", none));
+        assertEquals(ToolKit.CHANGE, ToolKit.risk(null, "upload_screenshot", none));
+        assertEquals(ToolKit.CHANGE, ToolKit.risk(null, "send_screenshot", none));
+        assertEquals(ToolKit.CHANGE, ToolKit.risk(null, "write_info", none));
+        // A screenshot is read-only only when nothing asks to keep it.
+        assertEquals(ToolKit.CHANGE, ToolKit.risk(null, "screenshot", obj("{\"save\":\"yes\"}")));
+        assertEquals(ToolKit.CHANGE, ToolKit.risk(null, "screenshot", obj("{\"save\":1}")));
+        assertEquals(ToolKit.READ, ToolKit.risk(null, "screenshot", obj("{\"save\":null}")));
+        // Power/kill names in other spellings, and free-form executors, always ask.
+        assertEquals(ToolKit.DESTRUCTIVE, ToolKit.risk(null, "turnOffPc", none));
+        assertEquals(ToolKit.DESTRUCTIVE, ToolKit.risk(null, "power-down", none));
+        assertEquals(ToolKit.DESTRUCTIVE, ToolKit.risk(null, "end_task", none));
+        assertEquals(ToolKit.DESTRUCTIVE, ToolKit.risk(null, "close_app", none));
+        assertEquals(ToolKit.DESTRUCTIVE, ToolKit.risk(null, "run_command", none));
+        assertEquals(ToolKit.DESTRUCTIVE, ToolKit.risk(null, "powershell", none));
+        assertEquals(ToolKit.DESTRUCTIVE, ToolKit.risk(null, "exec", none));
+        assertEquals(ToolKit.DESTRUCTIVE, ToolKit.risk(null, "type_text", none));
+        // …but whole words only: "description" isn't "script".
+        assertEquals(ToolKit.READ, ToolKit.risk(null, "get_description", none));
+        assertEquals(ToolKit.READ, ToolKit.risk(null, "get_executable_path", none));
     }
 
     // ------------------------------------------------------------------

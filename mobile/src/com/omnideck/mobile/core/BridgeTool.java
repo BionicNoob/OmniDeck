@@ -32,7 +32,21 @@ public final class BridgeTool {
     private static final String[] DESTRUCTIVE = {"shutdown", "shut_down", "poweroff", "power_off", "restart",
             "reboot", "sleep", "suspend", "hibernate", "logoff", "log_off", "logout", "log_out", "signout",
             "sign_out", "kill", "terminate", "end_process", "delete", "remove", "format", "uninstall", "wipe",
-            "empty_trash", "empty_recycle"};
+            "empty_trash", "empty_recycle", "turn_off", "power_down", "end_task", "taskkill", "close_app",
+            "close_window", "force_quit", "erase", "trash", "empty_bin", "run_command", "type_text", "send_keys"};
+    /**
+     * Whole name tokens that always need a yes: free-form executors (their
+     * arguments can carry a shutdown or a delete) and quit/exit/clear verbs.
+     */
+    private static final String[] DESTRUCTIVE_TOKENS = {"exec", "execute", "shell", "powershell", "cmd", "script",
+            "bash", "eval", "keystroke", "keystrokes", "quit", "exit", "clear", "rm", "rmdir", "del"};
+
+    /** Lower-case, with '-', spaces and camelCase boundaries as '_' ("forceQuit" → "force_quit"). */
+    public static String normalize(String name) {
+        if (name == null) return "";
+        String s = name.trim().replaceAll("([a-z0-9])([A-Z])", "$1_$2");
+        return s.toLowerCase(Locale.US).replace('-', '_').replace(' ', '_');
+    }
 
     /** One argument of a tool. */
     public static final class Param {
@@ -93,9 +107,14 @@ public final class BridgeTool {
 
     /** Shuts down, restarts, sleeps, signs out, kills or deletes something: ask before running it. */
     public boolean destructive() {
-        String n = name.toLowerCase(Locale.US);
+        String n = normalize(name);
         for (String d : DESTRUCTIVE) {
             if (n.contains(d)) return true;
+        }
+        for (String tok : n.split("_")) {
+            for (String d : DESTRUCTIVE_TOKENS) {
+                if (tok.equals(d)) return true;
+            }
         }
         return false;
     }

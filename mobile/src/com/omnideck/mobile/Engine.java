@@ -52,6 +52,7 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -535,6 +536,12 @@ public final class Engine {
                 || (Settings.MODE_AUTO.equals(mode) && looksHard(prompt == null ? "" : prompt));
         if (!deep) return base;
         if (hasImages && Boolean.FALSE.equals(supportsVision(deepModel))) return base;
+        // Auto mode never trades PC tools for depth: with tools on, a deep model that
+        // can't call them doesn't get the message (Deep mode is the user's explicit choice).
+        if (Settings.MODE_AUTO.equals(mode) && toolsWanted() && Boolean.TRUE.equals(supportsTools(base))
+                && !Boolean.TRUE.equals(supportsTools(deepModel))) {
+            return base;
+        }
         return deepModel;
     }
 
@@ -1356,6 +1363,8 @@ public final class Engine {
         String pc = "";
         /** Tool rounds run so far. */
         int round;
+        /** Apps the bridge listed during this reply, by id (open_app opens only these). */
+        final Map<String, JSONObject> appsSeen = new HashMap<String, JSONObject>();
         /** A request is on the wire: stop() cancels it and its end finishes the reply. */
         boolean inRequest;
         /** Tool calls in the response streaming now (collected off the main thread). */
@@ -1578,7 +1587,8 @@ public final class Engine {
      * {@link ToolKit#MAX_ROUNDS} rounds; after that the model has to answer.
      */
     private void streamRound(final Job j) {
-        boolean offer = j.toolsJson != null && j.round < ToolKit.MAX_ROUNDS;
+        // toolsWanted(): PC tools switched off (or unpaired) mid-reply → no tools from here on.
+        boolean offer = j.toolsJson != null && j.round < ToolKit.MAX_ROUNDS && toolsWanted();
         // A screenshot a tool just took may be the chat's first image.
         j.withImages = j.conv.hasImages() && !Boolean.FALSE.equals(supportsVision(j.model));
         String sys = systemPrompt();
@@ -1711,6 +1721,19 @@ public final class Engine {
 
     /** Checks a call against the PC's tools, gets the user's OK when it needs one, then runs it. */
     private void runCall(final Job j, final ToolCall tc) {
+        if (!toolsWanted()) {
+            // PC tools were switched off (or the bridge unpaired) mid-reply: nothing more runs.
+            for (ToolCall c : j.target.tools) {
+                if (c.round == j.round && ToolCall.QUEUED.equals(c.state)) {
+                    c.state = ToolCall.DECLINED;
+                    c.result = "Not run: PC tools were turned off.";
+                }
+            }
+            changed(j);
+            j.round = ToolKit.MAX_ROUNDS; // the next request carries no tools
+            streamRound(j);
+            return;
+        }
         if (tc.argsError.length() > 0) {
             settleCall(j, tc, ToolCall.FAILED, "The arguments weren't a JSON object: " + tc.argsError);
             nextCall(j);
@@ -1848,35 +1871,42 @@ public final class Engine {
     }
 
     /**
-     * The built-in open_app: a dry run finds the app (nothing opens); exactly
-     * one match opens once allowed. Several matches go back to the model as a
-     * list with their app ids, so it can ask which one.
+     * The built-in open_app. The app is looked up with the bridge's app search
+     * (GET /apps, which can never open anything — a /launch "dry run" would
+     * open the app on a bridge that ignores dry_run). Exactly one match (or one
+     * exact name) is opened by id once allowed; several go back to the model
+     * as a list with their app ids. An app_id from the model opens only if the
+     * bridge really lists an app under that id, and the question names it.
      */
     private void openApp(final Job j, final ToolCall tc) {
         final String query = OllamaClient.str(tc.args, "query").trim();
         final String appId = OllamaClient.str(tc.args, "app_id").trim();
-        if (appId.length() > 0) {
-            // A choice from an earlier open_app result.
-            String name = query.length() > 0 ? query : appId;
-            approve(j, tc, ToolKit.CHANGE, "open " + name, appId, launchApp(j, tc, appId, name));
-            return;
-        }
-        if (query.length() == 0) {
+        if (query.length() == 0 && appId.length() == 0) {
             settleCall(j, tc, ToolCall.FAILED, "open_app needs the app's name in \"query\".");
             nextCall(j);
+            return;
+        }
+        JSONObject seen = appId.length() > 0 ? j.appsSeen.get(appId) : null;
+        if (seen != null) {
+            approveOpen(j, tc, seen);
             return;
         }
         tc.state = ToolCall.RUNNING;
         changed(j);
         final long t0 = System.currentTimeMillis();
-        bridgeAsync(new BridgeCall<JSONObject>() {
+        bridgeAsync(new BridgeCall<JSONArray>() {
             @Override
-            public JSONObject run(BridgeClient b) throws BridgeClient.BridgeException {
-                return b.launchQuery(query, true);
+            public JSONArray run(BridgeClient b) throws BridgeClient.BridgeException {
+                JSONArray found = b.apps(query, 30);
+                if (appId.length() == 0 || listsId(found, appId)) return found;
+                // An id the name search didn't turn up: look it up in the whole list.
+                JSONArray all = b.apps("", 500);
+                for (int i = 0; i < all.length(); i++) found.put(all.opt(i));
+                return found;
             }
-        }, new Callback<JSONObject>() {
+        }, new Callback<JSONArray>() {
             @Override
-            public void done(JSONObject r, String error) {
+            public void done(JSONArray r, String error) {
                 tc.ms = System.currentTimeMillis() - t0;
                 if (job != j) {
                     // Stopped while the app was looked up: nothing was opened.
@@ -1892,39 +1922,72 @@ public final class Engine {
                     nextCall(j);
                     return;
                 }
-                if (r.optBoolean("needs_choice", false)) {
-                    JSONArray cands = r.optJSONArray("candidates");
-                    if (cands == null || cands.length() == 0) {
-                        settleCall(j, tc, ToolCall.FAILED, "No app on the PC matches \"" + query + "\".");
-                    } else {
-                        tc.label = "Find “" + Fmt.ellipsize(query, 32) + "” → " + cands.length()
-                                + (cands.length() == 1 ? " match" : " matches");
-                        settleCall(j, tc, ToolCall.DONE, ToolKit.candidatesText(query, cands));
+                JSONArray apps = new JSONArray();
+                JSONObject exact = null;
+                int exactCount = 0;
+                for (int i = 0; i < r.length(); i++) {
+                    JSONObject a = r.optJSONObject(i);
+                    if (a == null) continue;
+                    String id = OllamaClient.str(a, "id");
+                    if (id.length() == 0) id = OllamaClient.str(a, "app_id");
+                    if (id.length() == 0) continue;
+                    try {
+                        a.put("id", id);
+                    } catch (JSONException ignored) {
                     }
+                    j.appsSeen.put(id, a);
+                    apps.put(a);
+                    if (query.length() > 0 && OllamaClient.str(a, "name").equalsIgnoreCase(query)) {
+                        exact = a;
+                        exactCount++;
+                    }
+                }
+                if (appId.length() > 0) {
+                    JSONObject match = j.appsSeen.get(appId);
+                    if (match != null) {
+                        approveOpen(j, tc, match);
+                    } else {
+                        settleCall(j, tc, ToolCall.FAILED, "No app with app_id \"" + appId + "\" on the PC.");
+                        nextCall(j);
+                    }
+                    return;
+                }
+                if (apps.length() == 0) {
+                    settleCall(j, tc, ToolCall.FAILED, "No app on the PC matches \"" + query + "\".");
                     nextCall(j);
                     return;
                 }
-                JSONObject target = r.optJSONObject("would_launch");
-                if (target == null) {
-                    // A bridge without dry runs opens right away.
-                    JSONObject app = r.optJSONObject("app");
-                    if (app != null) {
-                        settleCall(j, tc, ToolCall.DONE, "Opened " + OllamaClient.str(app, "name") + " on the PC.");
-                    } else {
-                        settleCall(j, tc, ToolCall.FAILED, "The PC bridge didn't say which app matches \"" + query
-                                + "\".");
-                    }
-                    nextCall(j);
+                JSONObject target = apps.length() == 1 ? apps.optJSONObject(0) : exactCount == 1 ? exact : null;
+                if (target != null) {
+                    approveOpen(j, tc, target);
                     return;
                 }
-                String name = OllamaClient.str(target, "name");
-                if (name.length() == 0) name = query;
-                tc.label = "Open " + name;
-                tc.state = ToolCall.QUEUED;
-                approve(j, tc, ToolKit.CHANGE, "open " + name, OllamaClient.str(target, "path"),
-                        launchApp(j, tc, OllamaClient.str(target, "id"), name));
+                tc.label = "Find “" + Fmt.ellipsize(query, 32) + "” → " + apps.length()
+                        + (apps.length() == 1 ? " match" : " matches");
+                settleCall(j, tc, ToolCall.DONE, ToolKit.candidatesText(query, apps));
+                nextCall(j);
             }
         });
+    }
+
+    private static boolean listsId(JSONArray apps, String id) {
+        for (int i = 0; i < apps.length(); i++) {
+            JSONObject a = apps.optJSONObject(i);
+            if (a != null && (id.equals(OllamaClient.str(a, "id")) || id.equals(OllamaClient.str(a, "app_id")))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Asks to open a resolved app (its real name and path in the question), then opens it by id. */
+    private void approveOpen(Job j, ToolCall tc, JSONObject app) {
+        String id = OllamaClient.str(app, "id");
+        String name = OllamaClient.str(app, "name");
+        if (name.length() == 0) name = id;
+        tc.label = "Open " + name;
+        tc.state = ToolCall.QUEUED;
+        approve(j, tc, ToolKit.CHANGE, "open " + name, OllamaClient.str(app, "path"), launchApp(j, tc, id, name));
     }
 
     private Runnable launchApp(final Job j, final ToolCall tc, final String appId, final String name) {
@@ -2026,11 +2089,13 @@ public final class Engine {
     /**
      * A tool's screenshot as a JPEG of at most {@link #TOOL_IMAGE_MAX_SIDE}
      * px (worker thread): what the chat keeps and a vision model is sent. A
-     * small image stays as it is; one that can't be decoded too.
+     * small image stays as it is. Null when it doesn't decode: then it wasn't
+     * an image at all (just a long base64-looking string), and nothing is shown
+     * or sent as one.
      */
     static String shrinkImage(String b64) {
         android.graphics.Bitmap bmp = ImageUtil.decode(b64, TOOL_IMAGE_MAX_SIDE);
-        if (bmp == null) return b64;
+        if (bmp == null) return null;
         try {
             int w = bmp.getWidth(), h = bmp.getHeight();
             float scale = Math.min(1f, TOOL_IMAGE_MAX_SIDE / (float) Math.max(1, Math.max(w, h)));
@@ -3512,6 +3577,8 @@ public final class Engine {
     public void setAiTools(boolean on) {
         settings.setAiTools(on);
         if (on && bridgePaired() && toolCatalog() == null) refreshToolCatalog(null);
+        // A question on screen can no longer be honored: decline it; the reply then ends without tools.
+        if (!on && job != null && job.approval != null) job.approval.deny();
         notifyState();
     }
 
@@ -3611,7 +3678,7 @@ public final class Engine {
         s.enabled = settings.aiTools();
         s.paired = bridgePaired();
         s.confirm = settings.confirmPcActions();
-        s.model = currentModel();
+        s.model = effectiveModel(); // the model replies actually go to (Deep mode routes elsewhere)
         final Runnable compose = new Runnable() {
             @Override
             public void run() {

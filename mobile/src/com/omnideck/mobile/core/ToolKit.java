@@ -181,12 +181,19 @@ public final class ToolKit {
      * else {@link #CHANGE}. {@code t} may be null (e.g. open_app).
      */
     public static int risk(BridgeTool t, String name, JSONObject args) {
-        String n = name == null ? "" : name.trim().toLowerCase(Locale.US);
+        String n = BridgeTool.normalize(name);
         BridgeTool probe = t != null ? t : new BridgeTool(n, "", null);
-        if (probe.destructive()) return DESTRUCTIVE;
+        if (probe.destructive() || new BridgeTool(n, "", null).destructive()) return DESTRUCTIVE;
         if (OPEN_APP.equals(n)) return CHANGE;
-        if (n.contains("screenshot") || n.startsWith("capture_screen")) {
-            return args != null && args.optBoolean("save", false) ? CHANGE : READ;
+        // Mutating verbs win over any "looks read-only" rule ("set_status", "upload_screenshot").
+        for (String v : CHANGE_VERBS) {
+            if (n.startsWith(v) || n.contains("_" + v)) return CHANGE;
+        }
+        if (n.equals("screenshot") || n.equals("capture_screen") || n.equals("take_screenshot")
+                || n.equals("get_screenshot")) {
+            // Read-only only when nothing asks to keep it (save absent, null or false).
+            Object save = args == null ? null : args.opt("save");
+            return save == null || save == JSONObject.NULL || Boolean.FALSE.equals(save) ? READ : CHANGE;
         }
         for (String p : READ_PREFIXES) {
             if (n.startsWith(p)) return READ;
@@ -197,6 +204,10 @@ public final class ToolKit {
         if (n.endsWith("_info") || n.endsWith("_status")) return READ;
         return CHANGE;
     }
+
+    private static final String[] CHANGE_VERBS = {"set_", "update_", "write_", "send_", "upload_", "post_", "put_",
+            "create_", "toggle_", "enable_", "disable_", "save_", "move_", "rename_", "copy_", "open_", "launch_",
+            "start_", "stop_", "play_", "pause_", "press_", "click_", "lock"};
 
     /** Tools that only look ("show_…" isn't one: it can put something on the PC's screen). */
     private static final String[] READ_PREFIXES = {"get_", "list_", "read", "query_", "search_", "find_", "check_"};

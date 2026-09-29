@@ -260,7 +260,11 @@ public final class Sheet {
     }
 
     public void dismiss() {
-        if (d.isShowing()) d.dismiss();
+        try {
+            if (d.isShowing()) d.dismiss();
+        } catch (RuntimeException ignored) {
+            // The window went away with its activity ("View not attached to window manager").
+        }
     }
 
     /**
