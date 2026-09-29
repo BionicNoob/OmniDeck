@@ -25,14 +25,16 @@ By default Ollama only answers the PC itself. To let the phone reach it:
 2. **Open the firewall** for TCP port 11434 on private networks. On Windows, from an admin prompt:
    `netsh advfirewall firewall add rule name="Ollama LAN" dir=in action=allow protocol=TCP localport=11434 profile=private`
 
-The app finds the PC by itself. If your network blocks discovery, open **Command → Enter address** (or tap the status pill) and type the PC's IP, e.g. `192.168.1.20`.
+The app walks you through all of this too: **Command → Setup guide** (or `/setup`) shows these steps for Windows, macOS or Linux with copy buttons. The app finds the PC by itself. If your network blocks discovery, open **Command → Enter address** (or tap the status pill) and type the PC's IP, e.g. `192.168.1.20`.
 
 > Ollama's API has no password. Once it listens on the network, anyone on the same Wi-Fi can use it, so only do this on networks you trust.
 
 **PC control (optional).** The PC tab talks to OMNI-DECK's LaunchBridge on port 8765 with the same API the web app uses.
 - LaunchBridge listens only on `127.0.0.1` today, so the PC tab explains what's needed until it's reachable from the network.
 - The bridge can have its own address (**Settings → PC bridge**), so PC control works even before Ollama is reachable.
+- To make it reachable without touching LaunchBridge, forward a LAN port to it. For example, on Windows (admin prompt): `netsh interface portproxy add v4tov4 listenaddress=0.0.0.0 listenport=8766 connectaddress=127.0.0.1 connectport=8765`, then open port 8766 in the firewall. **Settings → PC bridge → Bridge setup guide** has the commands for every OS and a one-tap *Use port 8766*.
 - Once it's reachable, tap **Pair** once.
+- If your AI is reached over `https://` (a reverse proxy), the bridge needs its own LAN or VPN address. The pairing token is never sent unencrypted along that route.
 
 ## What's inside
 
@@ -41,7 +43,10 @@ The app finds the PC by itself. If your network blocks discovery, open **Command
 - **Safety:**
   - Reading information just happens.
   - Anything that changes the PC asks you first. You can allow it for the rest of the chat, or turn the questions off in Settings.
-  - Destructive actions (shut down, restart…) always ask.
+  - Destructive actions (shut down, restart, closing apps, running commands…) always ask.
+  - Nothing is launched to "check" an app before you say yes. The question names the app that will actually open, and an app the PC doesn't list is refused.
+  - Turning PC tools off mid-reply declines anything still waiting.
+  - In Auto mode, PC requests stay on a model that can use tools.
   - In hands-free mode you can answer "yes" or "no" by voice.
 - **Status:** `/tools` explains what's available and why. `/tools off` turns it off.
 
@@ -51,7 +56,8 @@ The app finds the PC by itself. If your network blocks discovery, open **Command
 - **Quick actions:** talk, new chat, summarize, read aloud, warm or unload the model, benchmark, models, scan the network, PC, history, diagnostics.
 - **Telemetry:** latency, throughput and first-token traces, a context-window gauge, loaded models with their VRAM/CPU split, and session stats.
 - **PC vitals** (when paired) and a live **system log** you can copy.
-- **When the AI can't be found:** step-by-step guidance with *Scan again* and *Enter address*.
+- **When the AI can't be found:** step-by-step guidance with *Scan again*, *Enter address* and the *Setup guide*. A typed address that fails says why: the port refused the connection, it timed out, the name didn't resolve, or it isn't Ollama.
+- **Wake PC:** after a Wake-on-LAN packet the card shows *Waking your PC* and keeps checking every few seconds until the AI answers.
 
 ### Comms: chat
 - **Streaming:** replies stream token by token with Markdown, code blocks with a language label and **Copy**, links, tables and a stop button. Reasoning from thinking models appears in a collapsible block.
@@ -81,7 +87,8 @@ The app finds the PC by itself. If your network blocks discovery, open **Command
   - Speak a question and the answer is read back.
   - **Hands-free** mode listens again after each spoken answer.
   - **Stop speaking** is always one tap away.
-- **Background notifications** tell you when a reply or model download finishes, or a timer rings, even if the app is closed.
+- **Background work:** a reply, summary, benchmark or model download keeps going for a while after you switch apps. **Background notifications** tell you when it finishes, or a timer rings, even if the app is closed.
+- **OMNI knows who it is and today's date**, and keeps spoken answers short and free of Markdown (Settings → Persona can turn this context off).
 - **PC power:**
   - `/wol` wakes the PC with Wake-on-LAN (the MAC is learned automatically once paired).
   - `/lock` locks it.
@@ -137,6 +144,7 @@ Type `/` to see suggestions. Start a message with `//` to send text that begins 
 | `/appearance cyber\|light\|dark\|system` (`/theme`) | switch the look |
 | `/voice` (`/talk`), `/mute` | speak a message, toggle reading replies aloud |
 | `/settings`, `/debug`, `/timer 5m tea`, `/clip` | settings, diagnostics, in-app timer, paste the phone's clipboard |
+| `/setup` (`/guide`) | the step-by-step PC setup guide |
 
 `/web`, `/investigate`, `/task` and the other PC-app-only commands reply that they run in OMNI-DECK on the PC.
 

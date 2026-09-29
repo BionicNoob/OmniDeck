@@ -165,6 +165,7 @@ public final class SettingsScreen extends Screen {
     private TextView promptCount, promptSave, promptClear;
     private LinearLayout factsBox;
     private List<String> shownFacts;
+    private Widgets.Toggle assistantContext;
 
     // Voice
     private Section secVoice;
@@ -1387,6 +1388,16 @@ public final class SettingsScreen extends Screen {
         actions.addView(promptSave, sp);
         body.addView(actions, Ui.fillW());
         kit.sep(body);
+        assistantContext = kit.toggleRow(body, "Assistant context", "Tells the model it is OMNI, today's date, and "
+                        + "to keep spoken answers short and plain.",
+                new Widgets.Toggle.OnChange() {
+                    @Override
+                    public void changed(boolean on) {
+                        e.settings.setAssistantContext(on);
+                        e.log("info", "Assistant context · " + (on ? "ON" : "OFF"));
+                    }
+                }, null);
+        kit.sep(body);
         kit.heading(body, "Memory", "Facts OMNI always knows about you, sent with every message.");
         factsBox = ui.vbox();
         body.addView(factsBox, Ui.fillW());
@@ -2458,6 +2469,7 @@ public final class SettingsScreen extends Screen {
         showSaved(promptField, promptEdits, e.settings.systemPrompt(), null);
         updatePromptState();
         refreshFacts();
+        SettingsKit.bind(assistantContext, e.settings.assistantContext());
         refreshPersonaStatus();
         refreshVoice();
         refreshNotifications();

@@ -42,6 +42,8 @@ public final class MockBridge {
     private final HttpServer server;
     public volatile String token = "tok-" + Long.toHexString(System.nanoTime());
     public volatile int volume = 35;
+    /** POST /pair requests received. */
+    public final java.util.concurrent.atomic.AtomicInteger pairs = new java.util.concurrent.atomic.AtomicInteger();
     public final List<String> launched = Collections.synchronizedList(new ArrayList<String>());
     /** App ids launched (not dry runs), in order. */
     public final List<String> launchedIds = Collections.synchronizedList(new ArrayList<String>());
@@ -141,6 +143,7 @@ public final class MockBridge {
             return;
         }
         if ("POST".equals(method) && "/pair".equals(path)) {
+            pairs.incrementAndGet();
             send(ex, 200, new JSONObject().put("token", token).toString());
             return;
         }

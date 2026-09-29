@@ -491,6 +491,7 @@ public final class Engine {
     /** The token to send to {@code host}: the saved one when that host issued it (or it isn't bound yet), else "". */
     private String bridgeTokenFor(String host) {
         String tok = settings.bridgeToken();
+        if (bridgeOverTls()) return "";
         if (tok.length() == 0) return "";
         String bound = settings.bridgeTokenHost();
         return bound.length() == 0 || HostPort.sameHost(bound, host) ? tok : "";
@@ -577,7 +578,13 @@ public final class Engine {
     }
 
     private void notifyBusy() {
+        syncWork();
         if (listener != null) listener.onBusyChanged();
+    }
+
+    /** Keeps the process alive while a reply, aux task or download runs (see {@link WorkService}). */
+    private void syncWork() {
+        WorkService.sync(app, job != null || auxBusy || pullCancel != null, visible);
     }
 
     private void toast(String s) {
@@ -601,6 +608,7 @@ public final class Engine {
         if (visible == v) return;
         visible = v;
         if (v) {
+            syncWork();
             registerNetworkCallback();
             if (state == State.ONLINE) checkHealth();
             else discover(false);
@@ -630,6 +638,38 @@ public final class Engine {
             if (a != null && !visible) a.unavailable();
         }
     };
+
+    /** How long after a Wake-on-LAN packet the app keeps looking for the PC. */
+    static final long WAKE_WATCH_MS = 150_000;
+    static final long WAKE_POLL_MS = 8_000;
+    private long wakingUntil;
+
+    /** A wake-up packet went out and the PC isn't back yet: the app re-checks every few seconds. */
+    public boolean isWaking() {
+        return wakingUntil > System.currentTimeMillis() && state != State.ONLINE;
+    }
+
+    private final Runnable wakeWatch = new Runnable() {
+        @Override
+        public void run() {
+            if (!isWaking()) {
+                if (wakingUntil != 0) {
+                    wakingUntil = 0;
+                    notifyState();
+                }
+                return;
+            }
+            if (!scanning) discover(false);
+            main.postDelayed(this, WAKE_POLL_MS);
+        }
+    };
+
+    private void watchWake() {
+        wakingUntil = System.currentTimeMillis() + WAKE_WATCH_MS;
+        main.removeCallbacks(wakeWatch);
+        main.postDelayed(wakeWatch, 3_000);
+        notifyState();
+    }
 
     private final Runnable healthTick = new Runnable() {
         @Override
@@ -803,6 +843,16 @@ public final class Engine {
                                 loggedOffline = true;
                                 log("warn", "Refused by " + who + " · API key "
                                         + (key.length() > 0 ? "rejected" : "missing"));
+                            }
+                            scheduleOfflineRetry();
+                        } else if (typed != null && typed.failure != null) {
+                            // The address the user typed failed for a reason worth saying.
+                            setState(State.OFFLINE, typed.failure);
+                            if (full) notice("Couldn't connect to **" + manual.label(OllamaClient.DEFAULT_PORT)
+                                    + "** — " + typed.failure, "warn");
+                            if (!loggedOffline) {
+                                loggedOffline = true;
+                                log("warn", "No AI at " + manual.label(OllamaClient.DEFAULT_PORT));
                             }
                             scheduleOfflineRetry();
                         } else {
@@ -2694,6 +2744,7 @@ public final class Engine {
             return;
         }
         final Cancellable cancel = pullCancel = new Cancellable();
+        syncWork();
         final PullState ps = pullState = new PullState(n0);
         if (listener != null) listener.onPull();
         log("info", "Download started · " + n0);
@@ -2746,6 +2797,7 @@ public final class Engine {
                             @Override
                             public void run() {
                                 pullCancel = null;
+                                syncWork();
                                 ps.done = true;
                                 ps.status = "success";
                                 ps.completed = ps.total;
@@ -2764,6 +2816,7 @@ public final class Engine {
                             @Override
                             public void run() {
                                 pullCancel = null;
+                                syncWork();
                                 ps.done = true;
                                 ps.error = cancelled ? "stopped" : message;
                                 ReplyError why = cancelled ? null : ReplyError.explainPull(message, n0);
@@ -2811,8 +2864,11 @@ public final class Engine {
                     @Override
                     public void run() {
                         if (fd != null && c == client) {
+                            boolean fresh = !details.containsKey(model);
                             details.put(model, fd);
                             thinkSupport.put(model, fd.supports("thinking"));
+                            // What the active model can do (tools, vision…) shows up in the UI.
+                            if (fresh && model.equals(currentModel())) notifyState();
                         }
                         cb.done(fd, fd == null ? (fe == null ? "No details." : fe) : null);
                     }
@@ -3090,6 +3146,7 @@ public final class Engine {
                             return;
                         }
                         log("ok", "Wake-on-LAN sent · " + m);
+                        if (state != State.ONLINE) watchWake();
                         cb.done("Wake-up packet sent to " + m + ". If Wake-on-LAN is on in the PC's BIOS and network "
                                 + "adapter, it will be up in a few seconds.", null);
                     }
@@ -3101,6 +3158,10 @@ public final class Engine {
     /** Pairs with the bridge; callback gets the token (saved, bound to the host that issued it). */
     public void bridgePair(final Callback<String> cb) {
         final String host = bridgeHost();
+        if (bridgeOverTls()) {
+            cb.done(null, TLS_BRIDGE_HINT);
+            return;
+        }
         bridgeAsync(new BridgeCall<String>() {
             @Override
             public String run(BridgeClient b) throws BridgeClient.BridgeException {
@@ -3386,6 +3447,16 @@ public final class Engine {
      * that host issued it: the Ollama host (and so the default bridge host)
      * can be any machine on a foreign network, and the token opens the PC.
      */
+    static final String TLS_BRIDGE_HINT = "Your AI is reached over https, but the PC bridge speaks plain http — "
+            + "enter the bridge's own address (a LAN or VPN IP) in Settings › PC bridge, so its token never "
+            + "travels unencrypted.";
+
+    /** No bridge address of its own, and the AI's address is https: the bridge would ride that route in the clear. */
+    boolean bridgeOverTls() {
+        if (settings.bridgeHost().length() > 0) return false;
+        return server != null ? server.https : settings.lastHttps() && settings.lastHost().length() > 0;
+    }
+
     private BridgeClient bridge() {
         String host = bridgeHost();
         if (host.length() == 0) return null;
@@ -3394,6 +3465,11 @@ public final class Engine {
             // A token from before tokens were bound (or typed in Settings): bind it to the PC it's
             // first used with, so it is never sent to another host afterwards.
             settings.setBridgeTokenHost(host);
+        }
+        if (bridgeOverTls()) {
+            // The AI is reached over https (a reverse proxy, often across the internet) but the bridge
+            // speaks plain http: never send the token that opens the PC along that route.
+            return new BridgeClient(host, settings.bridgePort(), "", TLS_BRIDGE_HINT);
         }
         String token = bridgeTokenFor(host);
         String hint = saved.length() > 0 && token.length() == 0

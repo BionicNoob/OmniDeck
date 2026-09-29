@@ -1689,16 +1689,20 @@ public final class CommandScreen extends Screen {
             return;
         }
         boolean searching = s == Engine.State.SEARCHING;
+        if (e.isWaking()) searching = true; // amber, with the meter running: something is on its way
         if (offlineStyledSearching == null || offlineStyledSearching != searching) styleOfflineCard(searching);
         String sd = e.stateDetail();
-        boolean refused = !searching && sd.contains("refused");
-        offlineTitle.setText(caps(searching ? "Scanning for your AI" : refused ? "Your AI refused the connection"
-                : "AI not found on this network"));
+        boolean waking = e.isWaking();
+        boolean refused = !searching && !waking && sd.contains("refused");
+        offlineTitle.setText(caps(waking ? "Waking your PC" : searching ? "Scanning for your AI"
+                : refused ? "Your AI refused the connection" : "AI not found on this network"));
         // The core's line says what was searched; this card says why and what to do.
-        offlineDetail.setText(searching ? "Sweeping this network for an Ollama server. This takes up to 15 seconds."
+        offlineDetail.setText(waking ? "Wake-up packet sent. Checking every few seconds while the PC boots and "
+                + "Ollama starts; this usually takes under a minute."
+                : searching ? "Sweeping this network for an Ollama server. This takes up to 15 seconds."
                 : sd.startsWith("No AI answered") ? "Check these three things, then scan again:"
                 : refused ? sd : sd + " Then check these three things and scan again:");
-        offlineSteps.setVisibility(refused ? View.GONE : View.VISIBLE);
+        offlineSteps.setVisibility(refused || waking ? View.GONE : View.VISIBLE);
         int port = e.scanPort();
         if (port != firewallPort) {
             firewallPort = port;

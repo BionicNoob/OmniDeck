@@ -64,5 +64,10 @@
         <receiver
             android:name=".TimerReceiver"
             android:exported="false" />
+
+        <!-- Keeps a reply or download alive for a while after you switch apps. -->
+        <service
+            android:name=".WorkService"
+            android:exported="false" />
     </application>
 </manifest>

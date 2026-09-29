@@ -583,7 +583,16 @@ public class CommandFixesTest extends Harness {
         }
         assertEquals(0, copies);
         assertNotNull(commandText("Port " + port + " · 127.0.3.1/28 · probed"));
-        assertNotNull(commandText("Check these three things, then scan again:"));
+        // The typed address refused: the card says exactly that, once, instead of the generic checklist.
+        assertNotNull(commandText("refused port " + port));
+        assertNull(commandText("Check these three things"));
+        // An address that accepts but never answers: the checklist, naming the port that was scanned.
+        try (ServerSocket blackHole = new ServerSocket(port, 50, java.net.InetAddress.getByName("127.0.0.1"))) {
+            engine().discover(true);
+            waitFor("scan gives up", () -> engine().state() == Engine.State.OFFLINE);
+        }
+        advance(600);
+        assertNotNull(commandText("Then check these three things and scan again:"));
         assertNotNull("step 03 names the scanned port", commandText("Allow port " + port + " through"));
         assertNull("11434 only when that's the port", commandText("Allow port 11434"));
         // The core goes dark: its annunciator is dim, not a second red alarm.

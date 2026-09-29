@@ -114,6 +114,8 @@ public final class CommsScreen extends Screen {
     private LinearLayout list;
     private LinearLayout emptyState;
     private TextView emptySub;
+    /** "Ask about the PC" prompts, shown only when OMNI can act on the PC. */
+    private LinearLayout pcPrompts;
     private View jumpBtn;
     private LinearLayout ctxWarn;
     private TextView ctxWarnText;
@@ -578,6 +580,35 @@ public final class CommsScreen extends Screen {
         }
         box.addView(row1);
         box.addView(row2);
+        pcPrompts = ui.vbox();
+        pcPrompts.setGravity(Gravity.CENTER_HORIZONTAL);
+        TextView head = ui.dim(t.hud ? "PC LINK · ASK OMNI TO" : "Ask OMNI to act on your PC", 12);
+        head.setGravity(Gravity.CENTER);
+        if (t.hud) {
+            head.setTypeface(t.labelFace);
+            head.setLetterSpacing(0.12f);
+        }
+        pcPrompts.addView(head, ui.margins(Ui.fillW(), 0, 20, 0, 8));
+        LinearLayout row3 = ui.hbox();
+        row3.setGravity(Gravity.CENTER);
+        String[] pc = {"How's my PC doing?", "Set the volume to 30", "What's on my screen?"};
+        for (final String p : pc) {
+            TextView c = ui.actionChip(p, false, new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    submitText(p);
+                }
+            });
+            LinearLayout.LayoutParams lp = Ui.wrap();
+            lp.setMargins(ui.dp(4), 0, ui.dp(4), ui.dp(8));
+            row3.addView(c, lp);
+        }
+        HorizontalScrollView hs = new HorizontalScrollView(a);
+        hs.setHorizontalScrollBarEnabled(false);
+        hs.addView(row3);
+        pcPrompts.addView(hs, Ui.wrap());
+        pcPrompts.setVisibility(View.GONE);
+        box.addView(pcPrompts, Ui.fillW());
         return box;
     }
 
@@ -1220,9 +1251,12 @@ public final class CommsScreen extends Screen {
             if (model.length() > 0) sb.append(" · ").append(ui.mono(model));
             sb.append(".\nType, tap the mic to speak, or / for commands.");
             emptySub.setText(sb);
+            pcPrompts.setVisibility(e.toolsReady(model) ? View.VISIBLE : View.GONE);
         } else if (s == Engine.State.SEARCHING) {
+            pcPrompts.setVisibility(View.GONE);
             emptySub.setText("Searching the network for your AI…");
         } else {
+            pcPrompts.setVisibility(View.GONE);
             emptySub.setText("Your AI isn't reachable yet. Commands still work — type /help.");
         }
     }

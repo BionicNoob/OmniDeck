@@ -103,10 +103,17 @@ public final class OllamaClient {
         public final ServerInfo server;
         /** HTTP status of GET / (-1 when nothing answered). 401/403: the server wants an API key. */
         public final int code;
+        /** Why a typed address didn't work, in plain words (null when it did, or when unknown). */
+        public final String failure;
 
         Probe(ServerInfo server, int code) {
+            this(server, code, null);
+        }
+
+        Probe(ServerInfo server, int code, String failure) {
             this.server = server;
             this.code = code;
+            this.failure = failure;
         }
 
         /** True when a server answered but refused the request (missing or wrong API key). */
@@ -129,7 +136,7 @@ public final class OllamaClient {
             code = r.code;
             isOllama = r.ok() && r.body.contains(BANNER);
         } catch (IOException e) {
-            return new Probe(null, -1);
+            return new Probe(null, -1, explainFailure(e, host, port, https));
         }
         String version = "";
         try {
@@ -144,7 +151,35 @@ public final class OllamaClient {
         } catch (IOException ignored) {
         } catch (JSONException ignored) {
         }
-        return new Probe(isOllama ? new ServerInfo(host, port, https, version, latency) : null, code);
+        String notOllama = isOllama || code == 401 || code == 403 ? null
+                : "Something answered at " + host + ":" + port + " (HTTP " + code + "), but it isn't Ollama — "
+                + "check the port (Ollama uses 11434).";
+        return new Probe(isOllama ? new ServerInfo(host, port, https, version, latency) : null, code, notOllama);
+    }
+
+    /** Why a connection to a typed address failed, and what usually fixes it. */
+    static String explainFailure(IOException e, String host, int port, boolean https) {
+        String where = host + ":" + port;
+        String msg = e.getMessage() == null ? "" : e.getMessage();
+        if (e instanceof java.net.ConnectException && msg.toLowerCase(java.util.Locale.US).contains("refused")) {
+            return "The PC at " + host + " refused port " + port + ": Ollama is probably only listening on the PC "
+                    + "itself, or isn't running. Set OLLAMA_HOST=0.0.0.0 and restart it (see /setup).";
+        }
+        if (e instanceof java.net.SocketTimeoutException) {
+            return where + " didn't answer in time: the PC may be asleep or on another network, or a firewall "
+                    + "blocks port " + port + ".";
+        }
+        if (e instanceof java.net.UnknownHostException) {
+            return "\"" + host + "\" isn't a name this network knows — check the address.";
+        }
+        if (e instanceof java.net.NoRouteToHostException) {
+            return "No route to " + host + ": the phone and the PC seem to be on different networks.";
+        }
+        if (e instanceof javax.net.ssl.SSLException) {
+            return "The secure (https) connection to " + host + " failed" + (msg.length() > 0 ? " (" + msg + ")" : "")
+                    + ". Check the proxy's certificate" + (https ? ", or use http:// on your home network." : ".");
+        }
+        return "Couldn't reach " + where + (msg.length() > 0 ? ": " + msg : "") + ".";
     }
 
     public String version(int timeoutMs) throws IOException {
