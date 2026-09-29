@@ -48,9 +48,11 @@ import com.omnideck.mobile.ui.Ui;
 import com.omnideck.mobile.ui.Widgets;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -202,6 +204,8 @@ public final class SettingsScreen extends Screen {
     private SettingsKit.Check toolModel, toolBridge;
     /** Models whose capabilities were asked for while this page showed (asked once each). */
     private final Set<String> toolsAsked = new HashSet<String>();
+    /** What those answers said about tool calling (the Engine keeps its own copy per link). */
+    private final Map<String, Boolean> toolSupport = new HashMap<String, Boolean>();
 
     // Privacy
     private Section secPrivacy;
@@ -508,7 +512,15 @@ public final class SettingsScreen extends Screen {
         return String.format(Locale.US, "%,d", v);
     }
 
-    /** Words in the theme's label case around an identifier kept in its own case (model tags). */
+    /** A sentence in the body face around an identifier set in mono, in its own case (host, model tag). */
+    private CharSequence sentence(String before, String ident, String after) {
+        SpannableStringBuilder sb = new SpannableStringBuilder(before);
+        sb.append(ui.mono(ident));
+        sb.append(after);
+        return sb;
+    }
+
+    /** Mono readout words in the theme's label case around an identifier kept in its own case (model tags). */
     private CharSequence withIdent(String before, String ident, String after) {
         SpannableStringBuilder sb = new SpannableStringBuilder();
         sb.append(t.hud ? t.labelUnits(before) : before);
@@ -776,7 +788,7 @@ public final class SettingsScreen extends Screen {
         String st = s == Engine.State.ONLINE ? "Online" : s == Engine.State.SEARCHING ? "Scanning" : "Offline";
         linkState.setText(t.hud ? "LINK // " + st.toUpperCase(Locale.US) : st);
         linkState.setTextColor(c);
-        linkDetail.setText(e.stateDetail());
+        linkDetail.setText(kit.idents(e.stateDetail()));
         boolean on = s == Engine.State.ONLINE && srv != null;
         String last = e.settings.lastHost();
         kit.setReadout(linkGrid[0], on ? srv.label() : last.length() > 0 ? last + ":" + e.settings.lastPort() : "—",
@@ -790,7 +802,7 @@ public final class SettingsScreen extends Screen {
         }
         kit.setReadout(linkGrid[3], on ? e.models().size() + " · " + loaded + " loaded" : "—", on);
         String manual = e.settings.server();
-        kit.setSub(addressLine, manual.length() > 0 ? "Manual · " + manual
+        kit.setSub(addressLine, manual.length() > 0 ? sentence("Manual · ", manual, "")
                 : "Auto-detect · finds Ollama on this Wi-Fi network.");
         SettingsKit.enable(autoBtn, manual.length() > 0 || s == Engine.State.OFFLINE);
         kit.relabel(scanBtn, e.isScanning() ? "Scanning…" : "Scan now");
@@ -1830,7 +1842,10 @@ public final class SettingsScreen extends Screen {
      * issued it, so a different PC shows as not paired until paired again.
      */
     private void commitBridgeHost() {
-        if (!hostEdits.edited()) return;
+        if (!hostEdits.edited()) {
+            if (INVALID.equals(hostNotice.key)) kit.hide(hostNotice);
+            return;
+        }
         String raw = hostEdits.text();
         String host = "";
         int port = e.settings.bridgePort();
@@ -1882,7 +1897,11 @@ public final class SettingsScreen extends Screen {
     }
 
     private void commitMac() {
-        if (!macEdits.edited()) return;
+        if (!macEdits.edited()) {
+            // Back to the saved value: nothing to save, and nothing invalid on show any more.
+            if (INVALID.equals(wolStatus.key)) kit.hide(wolStatus);
+            return;
+        }
         String raw = macEdits.text();
         String mac = "";
         if (raw.length() > 0) {
@@ -2029,13 +2048,16 @@ public final class SettingsScreen extends Screen {
             bridgeDetail.setText("Enter the PC's address below, or connect to your AI — the bridge usually runs on "
                     + "the same PC.");
         } else if (!paired && e.settings.bridgeToken().length() > 0 && other.length() > 0) {
-            bridgeDetail.setText("Paired with the bridge at " + other + ", not " + host + " — pair again for this PC.");
+            SpannableStringBuilder sb = new SpannableStringBuilder("Paired with the bridge at ");
+            sb.append(ui.mono(other)).append(", not ").append(ui.mono(host)).append(" — pair again for this PC.");
+            bridgeDetail.setText(sb);
         } else {
-            bridgeDetail.setText("LaunchBridge at " + host + ":" + e.settings.bridgePort());
+            bridgeDetail.setText(sentence("LaunchBridge at ", host + ":" + e.settings.bridgePort(), ""));
         }
         String aiHost = aiHost();
-        kit.setSub(hostLine, "Leave empty to use the PC running your AI"
-                + (aiHost.length() > 0 ? " (" + aiHost + ")" : "") + ". The port is 8765 unless you changed it.");
+        kit.setSub(hostLine, aiHost.length() > 0
+                ? sentence("Leave empty to use the PC running your AI (", aiHost, "). The port is 8765 unless you "
+                + "changed it.") : "Leave empty to use the PC running your AI. The port is 8765 unless you changed it.");
         hostField.setHint(aiHost.length() > 0 ? aiHost : "PC address");
         if (!hostField.hasFocus()) hostEdits.bind(e.settings.bridgeHost());
         if (!portField.hasFocus()) portEdits.bind(String.valueOf(e.settings.bridgePort()));
@@ -2046,7 +2068,8 @@ public final class SettingsScreen extends Screen {
         TextView pb = paired ? pairAgainBtn : pairNowBtn;
         SettingsKit.enable(pb, !pairing);
         kit.relabel(pb, pairing ? "Pairing…" : paired ? "Pair again" : "Pair now");
-        SettingsKit.enable(forgetBtn, paired);
+        // Nothing to forget until paired: no disabled red button next to Pair now.
+        forgetBtn.setVisibility(paired ? View.VISIBLE : View.GONE);
         SettingsKit.enable(wakeBtn, !waking);
         // A result line describes the bridge as it was; once that changes, it goes.
         if (pairStatus.isShowing() && !pairing && !checking && !bridgeKey().equals(pairStatus.key)) {
@@ -2116,14 +2139,15 @@ public final class SettingsScreen extends Screen {
             kit.setCheck(toolModel, "No model chosen yet.", t.warn);
         } else {
             OllamaClient.ModelDetails d = e.details(model);
-            if (d == null) {
-                kit.setCheck(toolModel, withIdent("Checking ", model, "…"), t.dim);
+            Boolean tools = d != null ? Boolean.valueOf(d.supports("tools")) : toolSupport.get(model);
+            if (tools == null) {
+                kit.setCheck(toolModel, sentence("", model, " · checking what it can do…"), t.dim);
                 askCapabilities(model);
-            } else if (d.supports("tools")) {
+            } else if (tools) {
                 modelOk = true;
-                kit.setCheck(toolModel, withIdentBody(model, " can call tools."), t.ok);
+                kit.setCheck(toolModel, sentence("", model, " can call tools."), t.ok);
             } else {
-                kit.setCheck(toolModel, withIdentBody(model, " can't call tools — choose one that can "
+                kit.setCheck(toolModel, sentence("", model, " can't call tools — choose one that can "
                         + "(qwen3, llama3.1…)."), t.warn);
             }
         }
@@ -2138,24 +2162,19 @@ public final class SettingsScreen extends Screen {
         setStatus(secTools, s, !on ? t.dim : modelOk && bridgeOk ? (ask ? t.ok : t.engagedInk) : t.warn);
     }
 
-    /** "model" + body text, the model in mono (the Check line is set in the body face). */
-    private CharSequence withIdentBody(String model, String after) {
-        SpannableStringBuilder sb = new SpannableStringBuilder();
-        sb.append(ui.mono(model));
-        sb.append(after);
-        return sb;
-    }
-
     private void askCapabilities(final String model) {
         if (!isShown() || !toolsAsked.add(model)) return;
         e.fetchDetails(model, new Engine.Callback<OllamaClient.ModelDetails>() {
             @Override
             public void done(OllamaClient.ModelDetails d, String error) {
                 if (!isBuilt()) return;
-                if (d == null && model.equals(e.currentModel())) {
-                    kit.setCheck(toolModel, withIdentBody(model, " — couldn't read its capabilities."), t.dim);
+                if (d == null) {
+                    if (model.equals(e.currentModel())) {
+                        kit.setCheck(toolModel, sentence("", model, " — couldn't read what it can do."), t.dim);
+                    }
                     return;
                 }
+                toolSupport.put(model, d.supports("tools"));
                 refreshTools();
             }
         });
@@ -2393,6 +2412,7 @@ public final class SettingsScreen extends Screen {
     protected void onShow() {
         shownFacts = null;
         toolsAsked.clear();
+        toolSupport.clear();
         // Result lines belong to the visit that produced them.
         if (!pairing) kit.hide(pairStatus);
         if (!waking) kit.hide(wolStatus);

@@ -3,6 +3,7 @@ package com.omnideck.mobile.ui;
 import android.content.Context;
 import android.content.res.ColorStateList;
 import android.graphics.drawable.RippleDrawable;
+import android.text.SpannableStringBuilder;
 import android.text.TextUtils;
 import android.util.TypedValue;
 import android.view.Gravity;
@@ -13,6 +14,8 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 
 import java.util.Locale;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Row and field builders for the Settings deck, drawn from the theme's
@@ -341,6 +344,45 @@ public final class SettingsKit {
     }
 
     // ------------------------------------------------------------------
+    // Identifiers in running text
+    // ------------------------------------------------------------------
+
+    /**
+     * Addresses and MACs as they appear in sentences: MAC addresses, http(s)
+     * URLs, IPv4 addresses (with a port) and host:port. MACs come first, so
+     * "3C:7C:3F:12:AB:CD" isn't read as a host and a port.
+     */
+    private static final Pattern IDENT = Pattern.compile(
+            "(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}"
+                    + "|https?://[^\\s,;)]+"
+                    + "|\\b\\d{1,3}(?:\\.\\d{1,3}){3}(?::\\d{1,5})?\\b"
+                    + "|\\b[A-Za-z][A-Za-z0-9-]*(?:\\.[A-Za-z0-9-]+)*:\\d{2,5}\\b");
+
+    /**
+     * {@code s} with every address and MAC in it set in mono, in its own
+     * case (the way the top bar and the PC tab show them), the words around
+     * them unchanged.
+     */
+    public CharSequence idents(CharSequence s) {
+        if (s == null || s.length() == 0) return s;
+        Matcher m = IDENT.matcher(s);
+        SpannableStringBuilder sb = null;
+        int at = 0;
+        while (m.find()) {
+            int end = m.end();
+            // A sentence's full stop isn't part of a URL.
+            while (end > m.start() + 1 && ".".indexOf(s.charAt(end - 1)) >= 0) end--;
+            if (sb == null) sb = new SpannableStringBuilder();
+            sb.append(s.subSequence(at, m.start()));
+            sb.append(ui.mono(s.subSequence(m.start(), end).toString()));
+            at = end;
+        }
+        if (sb == null) return s;
+        sb.append(s.subSequence(at, s.length()));
+        return sb;
+    }
+
+    // ------------------------------------------------------------------
     // Notes, notices and checks
     // ------------------------------------------------------------------
 
@@ -396,13 +438,14 @@ public final class SettingsKit {
 
     /**
      * Shows a notice. {@code color} is t.ok / t.warn / t.danger / t.dim; the
-     * icon follows it (check, alert triangle, info).
+     * icon follows it (check, alert triangle, info). Addresses and MACs in
+     * the text are set in mono.
      */
     public void show(Notice n, CharSequence text, int color) {
         int icon = color == t.ok ? IconDrawable.CHECK : color == t.warn || color == t.danger ? IconDrawable.WARN
                 : IconDrawable.INFO;
         n.icon.setImageDrawable(new IconDrawable(icon, color, color, ui.dp(15)));
-        n.text.setText(text);
+        n.text.setText(idents(text));
         n.text.setTextColor(color == t.dim ? t.dim : color);
         n.row.setVisibility(View.VISIBLE);
     }
