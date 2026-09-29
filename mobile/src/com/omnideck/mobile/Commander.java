@@ -283,6 +283,10 @@ public final class Commander {
             pastePhoneClipboard();
         } else if ("/settings".equals(name)) {
             act.openSettings();
+        } else if ("/setup".equals(name)) {
+            String arg = a.toLowerCase(Locale.US);
+            SetupGuide.show(act, arg.contains("bridge") || arg.contains("pc") || arg.contains("launch")
+                    ? SetupGuide.BRIDGE : SetupGuide.AI);
         } else if ("/debug".equals(name)) {
             e.diagnostics(act.appVersion());
         } else {

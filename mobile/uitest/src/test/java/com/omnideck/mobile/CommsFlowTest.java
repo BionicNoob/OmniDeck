@@ -128,15 +128,19 @@ public class CommsFlowTest extends Harness {
         assertFalse("no temperature unless configured", req.getJSONObject("options").has("temperature"));
         assertFalse("think not sent to non-thinking models", req.has("think"));
         JSONArray msgs = req.getJSONArray("messages");
-        assertEquals(1, msgs.length());
-        assertEquals("hello phone", msgs.getJSONObject(0).getString("content"));
+        // A short system message tells the model who it is and today's date.
+        assertEquals(2, msgs.length());
+        assertEquals("system", msgs.getJSONObject(0).getString("role"));
+        assertTrue(msgs.getJSONObject(0).getString("content").startsWith("You are OMNI"));
+        assertTrue(msgs.getJSONObject(0).getString("content").contains("Today is "));
+        assertEquals("hello phone", msgs.getJSONObject(1).getString("content"));
 
         // Second turn carries the history.
         ollama.tokenDelayMs = 2;
         chatAndWait("and again");
         JSONArray msgs2 = ollama.lastChatRequest().getJSONArray("messages");
-        assertEquals(3, msgs2.length());
-        assertEquals("assistant", msgs2.getJSONObject(1).getString("role"));
+        assertEquals(4, msgs2.length());
+        assertEquals("assistant", msgs2.getJSONObject(2).getString("role"));
         assertTrue(shows("You said: and again"));
 
         // Telemetry recorded the replies.

@@ -443,7 +443,7 @@ public class EngineFixesTest extends Harness {
         chat("and now?");
         JSONArray text = ollama.lastChatRequest().getJSONArray("messages");
         for (int i = 0; i < text.length(); i++) assertFalse(text.getJSONObject(i).has("images"));
-        assertTrue(text.getJSONObject(0).getString("content").contains("[An image was attached here."));
+        assertTrue(text.getJSONObject(1).getString("content").contains("[An image was attached here."));
 
         // Unknown capabilities: the request checks /api/show first.
         engine().settings.setModel("phi3:mini");

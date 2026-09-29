@@ -33,6 +33,8 @@ public final class ChatMessage {
     public boolean error;
     /** For failed replies: the {@link ReplyError} kind (e.g. "model_missing"), "" when unknown. */
     public String errorKind = "";
+    /** A user message that was spoken (its answer is read aloud, so it should be plain speech). */
+    public boolean voice;
     public boolean stopped;
     /** Base64 PNG/JPEG shown under the text (screenshots from the PC). */
     public String image = "";
@@ -117,6 +119,7 @@ public final class ChatMessage {
         if (!"info".equals(tone)) o.put("tone", tone);
         if (error) o.put("error", true);
         if (errorKind.length() > 0) o.put("error_kind", errorKind);
+        if (voice) o.put("voice", true);
         if (stopped) o.put("stopped", true);
         if (image.length() > 0) o.put("image", image);
         if (!images.isEmpty()) {
@@ -144,6 +147,7 @@ public final class ChatMessage {
         m.tone = tone.length() > 0 ? tone : "info";
         m.error = o.optBoolean("error", false);
         m.errorKind = OllamaClient.str(o, "error_kind");
+        m.voice = o.optBoolean("voice", false);
         m.stopped = o.optBoolean("stopped", false);
         m.image = OllamaClient.str(o, "image");
         JSONArray a = o.optJSONArray("images");

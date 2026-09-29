@@ -51,6 +51,7 @@ import java.util.Collections;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Date;
 import java.util.Locale;
 import java.util.HashMap;
 import java.util.Map;
@@ -1432,6 +1433,11 @@ public final class Engine {
 
     /** Sends a message with optional base64 JPEG/PNG images (for vision models). */
     public boolean send(String text, List<String> images) {
+        return send(text, images, false);
+    }
+
+    /** {@code voice}: the message was spoken, so the answer should be plain speech. */
+    public boolean send(String text, List<String> images, boolean voice) {
         String t = text == null ? "" : text.trim();
         boolean hasImages = images != null && !images.isEmpty();
         if (t.length() == 0 && !hasImages) return false;
@@ -1455,6 +1461,7 @@ public final class Engine {
             return false;
         }
         ChatMessage u = new ChatMessage(ChatMessage.USER, t);
+        u.voice = voice;
         if (hasImages) u.images.addAll(images);
         add(u);
         conv.autoTitle();
@@ -1591,7 +1598,7 @@ public final class Engine {
         boolean offer = j.toolsJson != null && j.round < ToolKit.MAX_ROUNDS && toolsWanted();
         // A screenshot a tool just took may be the chat's first image.
         j.withImages = j.conv.hasImages() && !Boolean.FALSE.equals(supportsVision(j.model));
-        String sys = systemPrompt();
+        String sys = systemPromptFor(j.conv.lastOfRole(ChatMessage.USER));
         if (j.toolsJson != null) {
             String add = ToolKit.systemPrompt(j.pc) + (offer ? "" : "\n\n" + ToolKit.LIMIT_PROMPT);
             sys = sys.length() > 0 ? sys + "\n\n" + add : add;
@@ -2296,6 +2303,35 @@ public final class Engine {
             tokens += (ToolKit.toolsArray(cat, true).toString().length() + ToolKit.systemPrompt(pcName()).length()) / 4;
         }
         return tokens / (double) ctx;
+    }
+
+    /**
+     * The system prompt for a reply: who the assistant is and today's date
+     * (the model knows neither), the user's persona and facts, and — when the
+     * question was spoken — how to answer for the ear. Only the date changes,
+     * once a day, so Ollama keeps reusing the cached prompt prefix.
+     */
+    String systemPromptFor(ChatMessage lastUser) {
+        // The user's persona and facts lead; the context line follows.
+        StringBuilder sb = new StringBuilder(systemPrompt());
+        if (settings.assistantContext()) {
+            StringBuilder ctx = new StringBuilder();
+            if (settings.systemPrompt().trim().length() == 0) {
+                ctx.append("You are OMNI, the user's personal AI assistant. You run on their own PC and they reach "
+                        + "you from their phone through the OmniDeck app. ");
+            }
+            ctx.append("Today is ")
+                    .append(new java.text.SimpleDateFormat("EEEE d MMMM yyyy", Locale.US).format(new Date()))
+                    .append('.');
+            if (sb.length() == 0) sb.append(ctx);
+            else sb.append("\n\n").append(ctx);
+        }
+        if (lastUser != null && lastUser.voice) {
+            sb.append(sb.length() > 0 ? "\n\n" : "").append("This question was spoken and your answer will be "
+                    + "read aloud. Answer in short, natural sentences, without Markdown, lists, tables, code or "
+                    + "emoji, unless the user asks for detail.");
+        }
+        return sb.toString();
     }
 
     public String systemPrompt() {

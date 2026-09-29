@@ -30,6 +30,7 @@ import android.widget.TextView;
 
 import com.omnideck.mobile.Engine;
 import com.omnideck.mobile.MainActivity;
+import com.omnideck.mobile.SetupGuide;
 import com.omnideck.mobile.core.BridgeTool;
 import com.omnideck.mobile.core.HostPort;
 import com.omnideck.mobile.core.OllamaClient;
@@ -521,6 +522,15 @@ public final class PcScreen extends Screen {
         });
         addr.setContentDescription("Change PC address");
         buttons.addView(addr, Ui.wrap());
+        buttons.addView(ui.space(10, 1));
+        TextView guide = ui.button("Setup", IconDrawable.DOC, Ui.GHOST, new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                SetupGuide.show(a, SetupGuide.BRIDGE);
+            }
+        });
+        guide.setContentDescription("Bridge setup guide");
+        buttons.addView(guide, Ui.wrap());
         buttons.addView(ui.flexSpace());
         buttons.addView(kit.iconKey(IconDrawable.SETTINGS, "Bridge settings", new View.OnClickListener() {
             @Override

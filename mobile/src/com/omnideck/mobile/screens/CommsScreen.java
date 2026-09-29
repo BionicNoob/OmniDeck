@@ -1524,7 +1524,7 @@ public final class CommsScreen extends Screen {
             ui.toast(model + " can't see images — pick a vision model (e.g. llava, gemma3, qwen2.5vl).");
             return;
         }
-        if (e.send(msg, pendingImages.isEmpty() ? null : new ArrayList<String>(pendingImages))) {
+        if (e.send(msg, pendingImages.isEmpty() ? null : new ArrayList<String>(pendingImages), voiceTurn)) {
             setWaitingForLink(false, false);
             clearInput();
             clearAttachments();

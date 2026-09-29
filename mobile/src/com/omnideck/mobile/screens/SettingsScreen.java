@@ -30,6 +30,7 @@ import android.widget.TextView;
 
 import com.omnideck.mobile.Engine;
 import com.omnideck.mobile.MainActivity;
+import com.omnideck.mobile.SetupGuide;
 import com.omnideck.mobile.Settings;
 import com.omnideck.mobile.core.BridgeClient;
 import com.omnideck.mobile.core.ConversationStore;
@@ -783,6 +784,14 @@ public final class SettingsScreen extends Screen {
         });
         btns.addView(scanBtn, Ui.weight(1));
         body.addView(btns, Ui.fillW());
+        TextView aiGuide = ui.button("PC setup guide", IconDrawable.DOC, Ui.GHOST, new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                SetupGuide.show(a, SetupGuide.AI);
+            }
+        });
+        aiGuide.setContentDescription("PC setup guide");
+        body.addView(aiGuide, ui.margins(Ui.wrap(), 0, 6, 0, 0));
         foundBox = ui.vbox();
         foundBox.setVisibility(View.GONE);
         body.addView(foundBox, Ui.fillW());
@@ -1802,6 +1811,14 @@ public final class SettingsScreen extends Screen {
         fp.leftMargin = ui.dp(8);
         btns.addView(forgetBtn, fp);
         body.addView(btns, Ui.fillW());
+        TextView bridgeGuide = ui.button("Bridge setup guide", IconDrawable.DOC, Ui.GHOST, new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                SetupGuide.show(a, SetupGuide.BRIDGE);
+            }
+        });
+        bridgeGuide.setContentDescription("Bridge setup guide");
+        body.addView(bridgeGuide, ui.margins(Ui.wrap(), 0, 6, 0, 0));
         pairStatus = kit.notice(body);
 
         View rule2 = kit.sep(body);

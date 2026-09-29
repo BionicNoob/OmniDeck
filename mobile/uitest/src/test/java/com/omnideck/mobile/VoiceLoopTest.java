@@ -94,6 +94,8 @@ public class VoiceLoopTest extends Harness {
         answerRecognizer("what is the status");
         assertEquals("what is the status", last(ChatMessage.USER).content);
         waitReplyTo("what is the status");
+        String sys = ollama.lastChatRequest().getJSONArray("messages").getJSONObject(0).getString("content");
+        assertTrue("the model is told the answer will be heard: " + sys, sys.contains("read aloud"));
         TextToSpeech tts = ttsReady();
         String spoken = shadowOf(tts).getLastSpokenText();
         assertNotNull(spoken);
@@ -103,6 +105,8 @@ public class VoiceLoopTest extends Harness {
         shadowOf(tts).clearLastSpokenText();
         submit("typed question");
         waitReplyTo("typed question");
+        assertFalse(ollama.lastChatRequest().getJSONArray("messages").getJSONObject(0).getString("content")
+                .contains("read aloud"));
         advance(500);
         assertNull(shadowOf(tts).getLastSpokenText());
     }

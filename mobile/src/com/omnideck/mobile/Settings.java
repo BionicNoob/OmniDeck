@@ -181,6 +181,10 @@ public final class Settings {
     public String timers() { return s("timers", "[]"); }
     public void setTimers(String json) { put("timers", json); }
 
+    /** Tell the model who it is (OMNI) and today's date in the system prompt. */
+    public boolean assistantContext() { return sp.getBoolean("assistant_context", true); }
+    public void setAssistantContext(boolean v) { put("assistant_context", v); }
+
     public boolean incognito() { return sp.getBoolean("incognito", false); }
     public void setIncognito(boolean v) { put("incognito", v); }
 

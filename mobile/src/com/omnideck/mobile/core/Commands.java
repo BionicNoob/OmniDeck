@@ -104,6 +104,8 @@ public final class Commands {
         l.add(new Cmd("/clip", "/clip", "Paste the phone's clipboard into the composer.", GROUP_APP));
         l.add(new Cmd("/settings", "/settings", "Open settings.", GROUP_APP, "/config"));
         l.add(new Cmd("/debug", "/debug", "Connection diagnostics.", GROUP_APP, "/diag"));
+        l.add(new Cmd("/setup", "/setup [bridge]", "Step-by-step PC setup (Ollama, or the PC bridge).", GROUP_APP,
+                "/guide"));
         // Only inside the web app on the PC.
         l.add(new Cmd("/web", "/web <query>", "Web search (runs in OMNI-DECK on the PC).", GROUP_PC_APP_ONLY));
         l.add(new Cmd("/investigate", "/investigate <target>", "OSINT lookup (PC app only).", GROUP_PC_APP_ONLY,

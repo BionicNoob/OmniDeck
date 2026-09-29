@@ -20,6 +20,7 @@ import android.widget.TextView;
 
 import com.omnideck.mobile.Engine;
 import com.omnideck.mobile.MainActivity;
+import com.omnideck.mobile.SetupGuide;
 import com.omnideck.mobile.Settings;
 import com.omnideck.mobile.core.ChatMessage;
 import com.omnideck.mobile.core.Fmt;
@@ -663,10 +664,21 @@ public final class CommandScreen extends Screen {
         });
         addr.setContentDescription("Enter address");
         if (t.id == Theme.DARK) addr.setTextColor(t.ink);
-        LinearLayout.LayoutParams alp = Ui.wrap();
-        alp.gravity = Gravity.CENTER_HORIZONTAL;
+        TextView guide = ui.button("Setup guide", IconDrawable.DOC, Ui.GHOST, new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                SetupGuide.show(a, SetupGuide.AI);
+            }
+        });
+        guide.setContentDescription("Setup guide");
+        if (t.id == Theme.DARK) guide.setTextColor(t.ink);
+        LinearLayout links = ui.hbox();
+        links.setGravity(Gravity.CENTER_HORIZONTAL);
+        links.addView(addr, Ui.wrap());
+        links.addView(guide, Ui.wrap());
+        LinearLayout.LayoutParams alp = Ui.fillW();
         alp.topMargin = ui.dp(4);
-        card.addView(addr, alp);
+        card.addView(links, alp);
         styleOfflineCard(false);
         card.setVisibility(View.GONE);
         return card;
