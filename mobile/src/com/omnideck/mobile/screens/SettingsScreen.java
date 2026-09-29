@@ -213,6 +213,7 @@ public final class SettingsScreen extends Screen {
     private SettingsKit.Line incognitoLine, historyLine;
     private TextView clearBtn;
     private int savedChats = -1;
+    private boolean leavingIncognito;
 
     // About
     private Section secAbout;
@@ -681,9 +682,9 @@ public final class SettingsScreen extends Screen {
             note = "Follows the phone's light or dark mode. Showing " + (t.isDark ? "Dark" : "Light") + " right now.";
         }
         themeNote.setText(note);
-        reduceMotion.setChecked(e.settings.reduceMotion(), false);
-        hudEffects.setChecked(e.settings.hudEffects(), false);
-        haptics.setChecked(e.settings.haptics(), false);
+        SettingsKit.bind(reduceMotion, e.settings.reduceMotion());
+        SettingsKit.bind(hudEffects, e.settings.hudEffects());
+        SettingsKit.bind(haptics, e.settings.haptics());
         kit.setSub(hudLine, t.hud ? "Hairline grid, top bloom and the slow scan line."
                 : "Grid, bloom and scan line · Cyber only.");
         hudLine.row.setAlpha(t.hud ? 1f : 0.6f);
@@ -825,8 +826,11 @@ public final class SettingsScreen extends Screen {
         String v = ed.text();
         ed.settled();
         if (v.equals(e.settings.apiKey())) return;
-        e.setApiKey(v); // saves it and reconnects with it
-        e.log("info", v.length() == 0 ? "API key removed" : "API key saved · reconnecting");
+        boolean inUse = e.settings.server().length() > 0;
+        // The key only goes to a typed-in address: reconnect only when there is one to reconnect to.
+        if (inUse) e.setApiKey(v);
+        else e.settings.setApiKey(v);
+        e.log("info", v.length() == 0 ? "API key removed" : inUse ? "API key saved · reconnecting" : "API key saved");
         saved();
         refreshConnection();
     }
@@ -996,7 +1000,7 @@ public final class SettingsScreen extends Screen {
             modeNote.setText(hasDeep ? "Hard prompts (proofs, debugging, analysis) go to " + deep
                     + "; everything else stays fast." : "Routes hard prompts to the deep-mode model — choose one above.");
         }
-        keepLoaded.setChecked(e.settings.keepLoaded(), false);
+        SettingsKit.bind(keepLoaded, e.settings.keepLoaded());
         String modeName = mi == 1 ? "Fast" : mi == 2 ? "Deep" : "Auto";
         if (!online) setStatus(secModel, modeName + " · offline", t.warn);
         else setStatus(secModel, modeName + " · " + ms.size() + (ms.size() == 1 ? " model" : " models"), t.dim);
@@ -1576,9 +1580,9 @@ public final class SettingsScreen extends Screen {
 
     private void refreshVoice() {
         boolean on = e.settings.readAloud();
-        readAloud.setChecked(on, false);
+        SettingsKit.bind(readAloud, on);
         boolean hf = e.settings.handsFree();
-        handsFree.setChecked(hf, false);
+        SettingsKit.bind(handsFree, hf);
         float rate = e.settings.speechRate();
         if (!rateSlider.isPressed()) rateSlider.bind(rate, false);
         rateValue.setText(String.format(Locale.US, "%.2f×", rate));
@@ -1649,7 +1653,7 @@ public final class SettingsScreen extends Screen {
     private void refreshNotifications() {
         if (notifyToggle == null) return;
         boolean on = e.settings.notifications();
-        notifyToggle.setChecked(on, false);
+        SettingsKit.bind(notifyToggle, on);
         String why = on ? e.notificationsBlocked() : "";
         if (why.length() > 0) {
             kit.show(notifyNotice, why + " Until then OmniDeck can't tell you when something finishes in the "
@@ -1944,6 +1948,7 @@ public final class SettingsScreen extends Screen {
     private void pair() {
         if (pairing) return;
         commitBridgeHost();
+        if (hostEdits.edited()) return; // the typed address is invalid: its notice says why
         commitPort();
         String host = e.bridgeHost();
         pairing = true;
@@ -2128,8 +2133,8 @@ public final class SettingsScreen extends Screen {
         if (aiTools == null) return;
         boolean on = e.settings.aiTools();
         boolean ask = e.settings.confirmPcActions();
-        aiTools.setChecked(on, false);
-        confirmActions.setChecked(ask, false);
+        SettingsKit.bind(aiTools, on);
+        SettingsKit.bind(confirmActions, ask);
         // Model: can it call tools? (/api/show capabilities, fetched once per model while shown)
         boolean modelOk = false;
         String model = e.currentModel();
@@ -2227,7 +2232,12 @@ public final class SettingsScreen extends Screen {
      */
     private void leaveIncognito() {
         boolean close = !e.conversation().isEmpty();
-        if (close) e.newChat();
+        leavingIncognito = true;
+        try {
+            if (close) e.newChat();
+        } finally {
+            leavingIncognito = false;
+        }
         e.settings.setIncognito(false);
         if (close) ui.toast("Incognito off · the open chat was closed without saving.");
     }
@@ -2298,7 +2308,7 @@ public final class SettingsScreen extends Screen {
 
     private void refreshPrivacy() {
         boolean inc = e.settings.incognito();
-        incognito.setChecked(inc, false);
+        SettingsKit.bind(incognito, inc);
         kit.setSub(incognitoLine, inc ? "On: nothing is saved. Turning it off closes the open chat without saving it."
                 : "New chats and replies aren't saved on this phone while it's on.");
         incognitoLine.title.setTextColor(inc ? t.engagedInk : t.ink);
@@ -2485,7 +2495,8 @@ public final class SettingsScreen extends Screen {
 
     @Override
     public void onConversationReplaced() {
-        if (isBuilt()) refreshPrivacy();
+        // Mid-way through turning incognito off the setting is still on: the switch refreshes after.
+        if (isBuilt() && !leavingIncognito) refreshPrivacy();
     }
 
     @Override

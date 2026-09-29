@@ -160,6 +160,7 @@ public class SettingsFixesTest extends SettingsBaseTest {
         openSettings();
         click("Incognito");
         assertFalse(settings().incognito());
+        assertFalse("the switch stays off while the chat is replaced", toggle("Incognito").isChecked());
         idle();
         assertTrue("the private chat is still not on disk", savedChats().isEmpty());
         assertTrue("…and it's closed", engine().conversation().messages.isEmpty());

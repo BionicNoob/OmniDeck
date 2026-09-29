@@ -105,6 +105,14 @@ public final class SettingsKit {
         return tg;
     }
 
+    /**
+     * Shows a stored value on a switch. Only a different value is set, so a
+     * switch the user just flipped keeps its slide instead of jumping.
+     */
+    public static void bind(Widgets.Toggle tg, boolean on) {
+        if (tg.isChecked() != on) tg.setChecked(on, false);
+    }
+
     /** A tappable row that opens something (trailing icon). */
     public Line navRow(LinearLayout body, String title, String sub, int icon, final Runnable r) {
         ImageView iv = new ImageView(c);
@@ -460,11 +468,13 @@ public final class SettingsKit {
         public final LinearLayout row;
         public final Widgets.StatusDot dot;
         public final TextView value;
+        final String label;
 
-        Check(LinearLayout row, Widgets.StatusDot dot, TextView value) {
+        Check(LinearLayout row, Widgets.StatusDot dot, TextView value, String label) {
             this.row = row;
             this.dot = dot;
             this.value = value;
+            this.label = label;
         }
     }
 
@@ -484,12 +494,13 @@ public final class SettingsKit {
         v.setEllipsize(TextUtils.TruncateAt.END);
         row.addView(v, Ui.weight(1));
         body.addView(row, Ui.fillW());
-        return new Check(row, dot, v);
+        return new Check(row, dot, v, label);
     }
 
     public void setCheck(Check k, CharSequence value, int color) {
         k.dot.setColor(color);
         k.value.setText(value);
-        k.row.setContentDescription(value);
+        // One announcement per line: "Model: llama3.2:3b can call tools."
+        k.row.setContentDescription(k.label + ": " + value);
     }
 }

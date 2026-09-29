@@ -117,6 +117,9 @@ public class SettingsPrefsTest extends SettingsBaseTest {
         assertEquals("kept in the field to fix", "https://pc.lan", host.getText().toString());
         typeDone(host, "bad host name");
         assertTrue(shows("isn't an address"));
+        click("Pair now");
+        assertFalse("no pairing with an address that doesn't parse", shows("Pairing with LaunchBridge"));
+        assertEquals("localhost", settings().bridgeHost());
 
         // Empty again: back to the AI's PC, paired as before.
         typeDone(host, "");
