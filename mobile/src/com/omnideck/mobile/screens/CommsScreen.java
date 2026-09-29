@@ -588,25 +588,25 @@ public final class CommsScreen extends Screen {
             head.setTypeface(t.labelFace);
             head.setLetterSpacing(0.12f);
         }
-        pcPrompts.addView(head, ui.margins(Ui.fillW(), 0, 20, 0, 8));
-        LinearLayout row3 = ui.hbox();
-        row3.setGravity(Gravity.CENTER);
-        String[] pc = {"How's my PC doing?", "Set the volume to 30", "What's on my screen?"};
-        for (final String p : pc) {
-            TextView c = ui.actionChip(p, false, new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    submitText(p);
-                }
-            });
-            LinearLayout.LayoutParams lp = Ui.wrap();
-            lp.setMargins(ui.dp(4), 0, ui.dp(4), ui.dp(8));
-            row3.addView(c, lp);
+        pcPrompts.addView(head, ui.margins(Ui.fillW(), 0, 20, 0, 2));
+        String[][] pc = {{"How's my PC doing?", "Set the volume to 30"}, {"What's on my screen?"}};
+        for (String[] line : pc) {
+            LinearLayout row = ui.hbox();
+            row.setGravity(Gravity.CENTER);
+            row.setPadding(0, ui.dp(6), 0, 0);
+            for (final String p : line) {
+                TextView c = ui.actionChip(p, false, new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        submitText(p);
+                    }
+                });
+                LinearLayout.LayoutParams lp = Ui.wrap();
+                lp.setMargins(ui.dp(4), 0, ui.dp(4), ui.dp(2));
+                row.addView(c, lp);
+            }
+            pcPrompts.addView(row, Ui.fillW());
         }
-        HorizontalScrollView hs = new HorizontalScrollView(a);
-        hs.setHorizontalScrollBarEnabled(false);
-        hs.addView(row3);
-        pcPrompts.addView(hs, Ui.wrap());
         pcPrompts.setVisibility(View.GONE);
         box.addView(pcPrompts, Ui.fillW());
         return box;

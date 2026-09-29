@@ -6,6 +6,7 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.RobolectricTestRunner;
 import org.robolectric.annotation.Config;
+import org.robolectric.annotation.GraphicsMode;
 import org.robolectric.annotation.LooperMode;
 
 import java.net.DatagramSocket;
@@ -21,7 +22,8 @@ import static org.junit.Assert.assertTrue;
  * bridge token never rides an https AI route over plain http.
  */
 @RunWith(RobolectricTestRunner.class)
-@Config(sdk = 34)
+@Config(sdk = 34, qualifiers = "w393dp-h852dp-xhdpi")
+@GraphicsMode(GraphicsMode.Mode.NATIVE)
 @LooperMode(LooperMode.Mode.PAUSED)
 public class WakeAndGuardTest extends Harness {
 
@@ -48,7 +50,7 @@ public class WakeAndGuardTest extends Harness {
         }
         assertTrue(r.get(), r.get().startsWith("Wake-up packet sent"));
         assertTrue(engine().isWaking());
-        advance(600);
+        advance(1500);
         assertTrue(shows("WAKING YOUR PC"));
         shoot("command-cyber-waking");
 
@@ -101,6 +103,7 @@ public class WakeAndGuardTest extends Harness {
             advance(100);
             return shows("Set the volume to 30");
         });
+        advance(1500);
         shoot("comms-cyber-empty-pc");
     }
 
