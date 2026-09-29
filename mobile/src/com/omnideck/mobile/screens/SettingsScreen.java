@@ -1343,7 +1343,6 @@ public final class SettingsScreen extends Screen {
             }
         });
         actions.addView(promptClear);
-        actions.addView(ui.space(6, 1));
         promptSave = kit.smallButton("Save", IconDrawable.CHECK, Ui.PRIMARY, "Save system prompt",
                 new View.OnClickListener() {
                     @Override
@@ -1352,7 +1351,10 @@ public final class SettingsScreen extends Screen {
                         SettingsWidgets.parkFocus(promptField);
                     }
                 });
-        actions.addView(promptSave);
+        // The gap belongs to Save, so a lone Clear link ends on the content edge.
+        LinearLayout.LayoutParams sp = Ui.wrap();
+        sp.leftMargin = ui.dp(6);
+        actions.addView(promptSave, sp);
         body.addView(actions, Ui.fillW());
         kit.sep(body);
         kit.heading(body, "Memory", "Facts OMNI always knows about you, sent with every message.");
@@ -1768,7 +1770,6 @@ public final class SettingsScreen extends Screen {
         btns.addView(pairNowBtn);
         pairAgainBtn = kit.bigButton("Pair again", IconDrawable.LINK, Ui.SECONDARY, "Pair again", pairClick);
         btns.addView(pairAgainBtn);
-        btns.addView(ui.space(8, 1));
         forgetBtn = kit.bigButton("Forget pairing", IconDrawable.CLOSE, Ui.DANGER, "Forget pairing",
                 new View.OnClickListener() {
                     @Override
@@ -1776,7 +1777,9 @@ public final class SettingsScreen extends Screen {
                         forgetPairing();
                     }
                 });
-        btns.addView(forgetBtn);
+        LinearLayout.LayoutParams fp = Ui.wrap();
+        fp.leftMargin = ui.dp(8);
+        btns.addView(forgetBtn, fp);
         body.addView(btns, Ui.fillW());
         pairStatus = kit.notice(body);
 
