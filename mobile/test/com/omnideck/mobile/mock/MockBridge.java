@@ -152,7 +152,7 @@ public final class MockBridge {
                     .put(new JSONObject().put("id", "app-spotify").put("name", "Spotify"));
             send(ex, 200, new JSONObject().put("matches", m).toString());
         } else if ("POST".equals(method) && "/launch".equals(path)) {
-            JSONObject req = new JSONObject(MockOllama.readBody(ex));
+            JSONObject req = body(ex);
             JSONObject app;
             if (req.has("app_id")) {
                 String id = req.getString("app_id");
@@ -192,7 +192,7 @@ public final class MockBridge {
             send(ex, 200, new JSONObject().put("tools", new JSONArray().put("get_system_info").put("get_volume")
                     .put("set_volume").put("screenshot").put("get_clipboard")).toString());
         } else if ("POST".equals(method) && "/desk/run".equals(path)) {
-            JSONObject req = new JSONObject(MockOllama.readBody(ex));
+            JSONObject req = body(ex);
             String tool = req.optString("tool");
             JSONObject args = req.optJSONObject("args");
             Object result;
@@ -243,7 +243,7 @@ public final class MockBridge {
             return true;
         }
         if ("POST".equals(method) && "/launch".equals(path)) {
-            JSONObject req = new JSONObject(MockOllama.readBody(ex));
+            JSONObject req = body(ex);
             String id = req.optString("app_id", "");
             if (id.length() == 0) return false;
             for (String[] app : CATALOG) {
@@ -277,7 +277,7 @@ public final class MockBridge {
             return true;
         }
         if (!"POST".equals(method) || !"/desk/run".equals(path)) return false;
-        JSONObject req = new JSONObject(MockOllama.readBody(ex));
+        JSONObject req = body(ex);
         String tool = req.optString("tool");
         JSONObject args = req.optJSONObject("args");
         ranTools.add(tool);
@@ -402,5 +402,23 @@ public final class MockBridge {
         OutputStream os = ex.getResponseBody();
         os.write(b);
         os.close();
+    }
+
+    /** Bodies already read, per exchange (HttpExchange attributes are shared by the whole context). */
+    private final java.util.Map<HttpExchange, JSONObject> bodies =
+            java.util.Collections.synchronizedMap(new java.util.WeakHashMap<HttpExchange, JSONObject>());
+
+    /**
+     * The request's JSON body, read once per exchange: a rich-mode route that
+     * declines a request hands it on to the plain route, which must see the
+     * same body (the stream can only be read once).
+     */
+    private JSONObject body(HttpExchange ex) throws IOException, JSONException {
+        JSONObject cached = bodies.get(ex);
+        if (cached != null) return cached;
+        String raw = MockOllama.readBody(ex);
+        JSONObject o = new JSONObject(raw.trim().length() == 0 ? "{}" : raw);
+        bodies.put(ex, o);
+        return o;
     }
 }

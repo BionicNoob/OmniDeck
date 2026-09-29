@@ -155,17 +155,17 @@ public class VoiceLoopTest extends Harness {
         act.speakingOverride = true; // stands in for the TTS engine
         advance(800);
         assertTrue(act.isSpeaking());
+        // Command: the AI core's own Stop (the top bar's stays hidden).
+        assertEquals("one Stop control on Command", 1, stopControls());
+        // Other pages: the top bar's.
+        tab(MainActivity.TAB_MODELS);
+        assertEquals("one Stop control on Models", 1, stopControls());
         assertNotNull("in the top bar on other pages", button("Stop speaking"));
         shoot("shell-light-speaking");
 
         // On the chat, the header's speaker button turns into the control instead.
         tab(MainActivity.TAB_COMMS);
-        int stops = 0;
-        for (View v : views()) {
-            if (v.isShown() && "Stop speaking".contentEquals(v.getContentDescription() == null ? ""
-                    : v.getContentDescription())) stops++;
-        }
-        assertEquals("one Stop control at a time", 1, stops);
+        assertEquals("one Stop control at a time", 1, stopControls());
         assertNull(button("Read replies aloud"));
         advance(300);
         shoot("comms-light-speaking");
@@ -174,5 +174,14 @@ public class VoiceLoopTest extends Harness {
         assertFalse(act.isSpeaking());
         assertNull(button("Stop speaking"));
         assertNotNull(button("Read replies aloud"));
+    }
+
+    private int stopControls() {
+        int stops = 0;
+        for (View v : views()) {
+            if (v.isShown() && "Stop speaking".contentEquals(v.getContentDescription() == null ? ""
+                    : v.getContentDescription())) stops++;
+        }
+        return stops;
     }
 }

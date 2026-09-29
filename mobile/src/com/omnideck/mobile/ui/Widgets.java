@@ -286,6 +286,12 @@ public final class Widgets {
      */
     public abstract static class Animated extends View {
         private ValueAnimator loop;
+        /**
+         * Set from onDetachedFromWindow: while that callback runs the view
+         * still reports itself attached and shown, so the flag is what stops
+         * a removed view's loop.
+         */
+        private boolean detached;
 
         protected Animated(Context c) {
             super(c);
@@ -301,7 +307,8 @@ public final class Widgets {
         protected void onLoopStopped() {}
 
         protected final void syncLoop() {
-            boolean run = wantsLoop() && isAttachedToWindow() && getWindowVisibility() == VISIBLE && isShown();
+            boolean run = !detached && wantsLoop() && isAttachedToWindow() && getWindowVisibility() == VISIBLE
+                    && isShown();
             if (run && loop == null) {
                 loop = makeLoop();
                 loop.start();
@@ -321,13 +328,15 @@ public final class Widgets {
         @Override
         protected void onAttachedToWindow() {
             super.onAttachedToWindow();
+            detached = false;
             syncLoop();
         }
 
         @Override
         protected void onDetachedFromWindow() {
-            super.onDetachedFromWindow();
+            detached = true;
             syncLoop();
+            super.onDetachedFromWindow();
         }
 
         @Override
@@ -437,6 +446,7 @@ public final class Widgets {
         private int trackOff, trackOn, knobOff, knobOn, edgeOff, edgeOn, glowColor;
         private float knobOffSize = 0.72f, knobOnSize = 0.72f;
         private ValueAnimator slide;
+        private boolean reduceMotion;
 
         public Toggle(Context c, int onColor, int offColor, int knobColor, int edgeColor) {
             super(c);
@@ -500,10 +510,15 @@ public final class Widgets {
             return on;
         }
 
+        /** With Reduce motion on the switch jumps instead of sliding. */
+        public void setReduceMotion(boolean reduce) {
+            reduceMotion = reduce;
+        }
+
         public void setChecked(boolean checked, boolean animate) {
             on = checked;
             if (slide != null) slide.cancel();
-            if (!animate) {
+            if (!animate || reduceMotion) {
                 pos = on ? 1 : 0;
                 invalidate();
                 return;

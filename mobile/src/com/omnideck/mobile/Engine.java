@@ -842,7 +842,9 @@ public final class Engine {
     /** Saves the API key (sent as "Authorization: Bearer …" to the typed-in server) and reconnects. */
     public void setApiKey(String key) {
         settings.setApiKey(key == null ? "" : key);
-        setServer(settings.server());
+        // The key only ever goes to the address the user typed; without one
+        // there's nothing to reconnect (and no reason to rescan the network).
+        if (settings.server().length() > 0) setServer(settings.server());
     }
 
     private void announceScan(List<ServerInfo> all) {
@@ -2740,9 +2742,18 @@ public final class Engine {
                     public void run() {
                         if (fe == null) {
                             log("warn", "Model deleted · " + model);
+                            boolean wasDeep = model.equals(resolveInstalled(settings.deepModel()));
+                            // Forget it everywhere BEFORE anyone asks currentModel() again, or
+                            // the fallback could pick (and save) the model that's just gone.
+                            for (int i = models.size() - 1; i >= 0; i--) {
+                                if (models.get(i).name.equals(model)) models.remove(i);
+                            }
+                            running.remove(model);
                             details.remove(model);
                             thinkSupport.remove(model);
                             if (model.equals(settings.model())) settings.setModel("");
+                            if (wasDeep) settings.setDeepModel("");
+                            notifyState();
                             refreshModels(null);
                             cb.done(Boolean.TRUE, null);
                         } else {

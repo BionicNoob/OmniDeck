@@ -299,7 +299,8 @@ public final class Ui {
         l.setBackground(panel(true, 34));
         if (t.cardElevation > 0) l.setElevation(dp(t.cardElevation));
         LinearLayout head = hbox();
-        head.setPadding(dp(14), 0, dp(14), 0);
+        // Cyber: the dot starts clear of the top-left corner bracket's arm (5dp inset + 10dp).
+        head.setPadding(dp(t.hud ? 18 : 14), 0, dp(14), 0);
         head.setMinimumHeight(dp(34));
         if (t.hud) {
             Widgets.StatusDot dot = new Widgets.StatusDot(c);
@@ -606,6 +607,7 @@ public final class Ui {
             tg.setEdgeWidth(t.isDark ? Math.max(1, dp(1)) : dp(1.5f));
             tg.setKnobSizes(0.5f, 0.74f);
         }
+        tg.setReduceMotion(reduceMotion);
         tg.setChecked(on, false);
         tg.setOnChange(l);
         return tg;

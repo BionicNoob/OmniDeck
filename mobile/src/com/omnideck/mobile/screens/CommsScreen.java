@@ -1101,9 +1101,9 @@ public final class CommsScreen extends Screen {
             b = ui.button("Settings", IconDrawable.SETTINGS, Ui.SECONDARY, new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
-                    a.openSettings();
-                    ui.toast(memory ? "Lower Context size in Performance, or pick a smaller model."
-                            : "Check the API key in Connection.");
+                    a.openSettings(memory ? "Performance" : "Connection");
+                    ui.toast(memory ? "Lower Context size here, or pick a smaller model."
+                            : "Check the API key here.");
                 }
             });
             b.setContentDescription(memory ? "Open Settings to lower the context size" : "Open Settings to check the API key");

@@ -45,7 +45,7 @@ public final class PcSlider extends View {
     public PcSlider(Context c, Theme t) {
         super(c);
         d = c.getResources().getDisplayMetrics().density;
-        track.setColor(Theme.alpha(t.data, t.isDark ? 0x33 : 0x2B));
+        track.setColor(Theme.alpha(t.data, 0x33)); // same track as Settings sliders in every theme
         fill.setColor(t.data);
         tick.setColor(Theme.alpha(t.hud ? t.label : t.faint, 0x8C));
         tick.setStrokeWidth(Math.max(1f, d * 0.8f));

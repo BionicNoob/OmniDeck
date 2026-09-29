@@ -630,6 +630,12 @@ public final class MainActivity extends Activity implements Engine.Listener, The
         updateNav();
     }
 
+    /** Opens Settings on one section (its title, e.g. "Performance"). */
+    public void openSettings(String section) {
+        openSettings();
+        if (settingsScreen != null) settingsScreen.showSection(section);
+    }
+
     public void openSettings() {
         if (settingsOpen) return;
         if (settingsScreen == null) settingsScreen = new SettingsScreen(this);
@@ -807,10 +813,15 @@ public final class MainActivity extends Activity implements Engine.Listener, The
         for (Screen sc : built()) sc.onSpeechChanged(s);
     }
 
-    /** The chat header has its own Stop speaking control, so the top bar's shows on the other pages. */
+    /**
+     * The chat header and the Command hero have their own Stop speaking
+     * control, so the top bar's shows only on the other pages (one per page).
+     */
     private void updateSpeakingUi() {
         if (stopSpeech == null) return;
-        stopSpeech.setVisibility(speaking && currentTab() != TAB_COMMS ? View.VISIBLE : View.GONE);
+        int tabNow = currentTab();
+        boolean own = tabNow == TAB_COMMS || tabNow == TAB_COMMAND;
+        stopSpeech.setVisibility(speaking && !own ? View.VISIBLE : View.GONE);
     }
 
     // ------------------------------------------------------------------

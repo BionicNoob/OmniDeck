@@ -423,8 +423,16 @@ public class CommsActionsTest extends Harness {
         assertFalse("nothing written while incognito", f.exists());
         assertTrue("the header says so", shows("incognito"));
 
+        // Turning it off closes the private chat without ever writing it…
         submit("/incognito off");
-        waitFor("saved once it's off", f::exists);
+        waitFor("incognito off", () -> !engine().settings.incognito());
+        advance(500);
+        assertFalse("the private chat is never written", f.exists());
+        assertFalse("a fresh chat is open", id.equals(engine().conversation().id));
+        // …and the next chat is saved normally.
+        chatAndWait("public plans");
+        final File g = new File(dir, engine().conversation().id + ".json");
+        waitFor("saved once it's off", g::exists);
     }
 
     @Test

@@ -27,6 +27,7 @@ import com.omnideck.mobile.core.LanScanner;
 import com.omnideck.mobile.core.ModelInfo;
 import com.omnideck.mobile.core.ServerInfo;
 import com.omnideck.mobile.core.Telemetry;
+import com.omnideck.mobile.core.ToolCall;
 import com.omnideck.mobile.core.Vitals;
 import com.omnideck.mobile.core.WakeOnLan;
 import com.omnideck.mobile.ui.CommandKit;
@@ -1547,6 +1548,10 @@ public final class CommandScreen extends Screen {
         String deepModel = e.resolveInstalled(e.settings.deepModel());
         boolean deep = m != null && deepModel != null && deepModel.equals(m.model)
                 && !deepModel.equals(e.currentModel());
+        // PC tool calls take precedence: the approval sheet may be waiting on the user.
+        String tool = e.toolActivity();
+        if (ToolCall.ASKING.equals(tool)) return "Awaiting your approval";
+        if (ToolCall.RUNNING.equals(tool)) return "Acting on the PC";
         switch (mode) {
             case CoreView.THINKING: {
                 if (m == null) return "Running a model task"; // a benchmark or compaction

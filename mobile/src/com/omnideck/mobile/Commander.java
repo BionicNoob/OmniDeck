@@ -102,9 +102,16 @@ public final class Commander {
                 e.notice("Incognito is **" + (e.settings.incognito() ? "on" : "off")
                         + "**. Use `/incognito on` or `/incognito off`.", "info");
             } else {
+                boolean closedPrivate = false;
+                if (!on && e.settings.incognito() && !e.conversation().messages.isEmpty()) {
+                    // The private chat is closed WITHOUT being written (newChat saves nothing
+                    // while incognito is still on); saving it here would leak it to disk.
+                    e.newChat();
+                    closedPrivate = true;
+                }
                 e.settings.setIncognito(on);
-                if (!on) e.save();
                 e.notice(on ? "Incognito on — chats aren't saved on this phone until you turn it off."
+                        : closedPrivate ? "Incognito off — the private chat was closed without saving. New chats are saved again."
                         : "Incognito off — chats are saved again.", "ok");
             }
         } else if ("/remember".equals(name)) {

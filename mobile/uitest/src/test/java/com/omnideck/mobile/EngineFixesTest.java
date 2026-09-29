@@ -500,7 +500,7 @@ public class EngineFixesTest extends Harness {
         assertNotNull(posted.get(0).contentIntent);
 
         // Back in the app: the notification has served its purpose.
-        ctl.start().resume();
+        ctl.restart().resume(); // restart(): onRestart+onStart, so a later stop() really runs onStop
         idle();
         assertTrue(notifications().isEmpty());
 
@@ -511,7 +511,7 @@ public class EngineFixesTest extends Harness {
         ctl.pause().stop();
         waitFor("reply", () -> !engine().isBusy());
         assertTrue(notifications().isEmpty());
-        ctl.start().resume();
+        ctl.restart().resume(); // restart(): onRestart+onStart, so a later stop() really runs onStop
     }
 
     @Test

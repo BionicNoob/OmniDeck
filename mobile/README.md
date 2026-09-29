@@ -29,9 +29,21 @@ The app finds the PC by itself. If your network blocks discovery, open **Command
 
 > Ollama's API has no password. Once it listens on the network, anyone on the same Wi-Fi can use it, so only do this on networks you trust.
 
-**PC control (optional).** The PC tab talks to OMNI-DECK's LaunchBridge on port 8765 with the same API the web app uses. LaunchBridge listens only on `127.0.0.1` today, so the PC tab explains what's needed until it's reachable from the network. Then tap **Pair** once.
+**PC control (optional).** The PC tab talks to OMNI-DECK's LaunchBridge on port 8765 with the same API the web app uses.
+- LaunchBridge listens only on `127.0.0.1` today, so the PC tab explains what's needed until it's reachable from the network.
+- The bridge can have its own address (**Settings → PC bridge**), so PC control works even before Ollama is reachable.
+- Once it's reachable, tap **Pair** once.
 
 ## What's inside
+
+### OMNI acts on your PC (tool calling)
+- **What it does:** with a tool-capable model (for example `qwen3`, `llama3.1`/`3.2` or `mistral`) and the PC bridge paired, just ask: *"set the volume to 40"*, *"what's my CPU at?"*, *"open Spotify"*, *"take a screenshot and tell me what's on screen"*. OMNI calls the PC's LaunchBridge tools and then answers. Each reply shows an action log of what it did.
+- **Safety:**
+  - Reading information just happens.
+  - Anything that changes the PC asks you first. You can allow it for the rest of the chat, or turn the questions off in Settings.
+  - Destructive actions (shut down, restart…) always ask.
+  - In hands-free mode you can answer "yes" or "no" by voice.
+- **Status:** `/tools` explains what's available and why. `/tools off` turns it off.
 
 ### Command: mission control
 - **AI core:** an arc-reactor instrument that shows the link state (idle, scanning, thinking, streaming, speaking, offline). Tap it to chat; hold it to talk.
@@ -63,6 +75,21 @@ The app finds the PC by itself. If your network blocks discovery, open **Command
   - The PC clipboard, which you can copy to the phone or send to chat.
 - **App launcher** with search and recents; it asks before opening anything.
 - **Tool runner** for every desktop tool the bridge offers.
+
+### Also
+- **Voice:**
+  - Speak a question and the answer is read back.
+  - **Hands-free** mode listens again after each spoken answer.
+  - **Stop speaking** is always one tap away.
+- **Background notifications** tell you when a reply or model download finishes, or a timer rings, even if the app is closed.
+- **PC power:**
+  - `/wol` wakes the PC with Wake-on-LAN (the MAC is learned automatically once paired).
+  - `/lock` locks it.
+  - The PC tab adds sleep, restart and shut down when the bridge offers them.
+- **Remote AI:** use `https://` addresses and an **API key** to reach your AI through a reverse proxy.
+- **Share into OmniDeck:** share text, text files or photos from any app into OmniDeck to ask about them.
+- **Launcher shortcuts** (long-press the icon): *Talk to OMNI*, *New chat*, *PC screenshot*, *Command center*.
+- **Chats:** each chat remembers its model. Failed replies explain what went wrong and offer the fix (retry, pull the model, switch to a vision model, lower the context size). A message typed while offline is sent when the link returns.
 
 ### Settings
 - **Appearance:** Cyber, Light, Dark or System, with live previews. Also reduce motion, HUD effects (grid and scan line) and haptics.
@@ -101,6 +128,8 @@ Type `/` to see suggestions. Start a message with `//` to send text that begins 
 |---|---|
 | `/open <app>`, `/vol [0-100]`, `/sys` | open an app, volume, CPU/RAM/disk/battery |
 | `/shot`, `/pcclip`, `/pair`, `/desk` | screenshot into the chat, paste the PC clipboard, pair, bridge status |
+| `/wol` (`/wakepc`), `/lock` | wake the PC (Wake-on-LAN), lock it |
+| `/tools [on\|off]` | whether OMNI can use the PC's tools, and which |
 
 | App | |
 |---|---|

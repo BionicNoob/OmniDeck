@@ -181,6 +181,30 @@ light → Light, dark → Dark. Always read colors from `Theme t` fields and nev
   - **Errors:** `PullState.reason` is the plain-language failure. Failed replies carry `m.errorKind` (`core.ReplyError` kinds) and `m.stats = "plain · raw"`.
   - **Preferences:** `settings.bridgeHost/pcMac/apiKey/aiTools/confirmPcActions/handsFree/notifications`.
 
+### 3.2 AI tool calling ("OMNI acts on the PC") and other round-2 additions
+
+- **When tools are offered.** The Engine offers the PC's LaunchBridge tools to the model when three things hold: the bridge is paired, `settings.aiTools()` is on (`e.setAiTools(on)` also refreshes the catalog), and the routed model has the `tools` capability.
+- **Request and reply flow.**
+  - Tools go out in `/api/chat` as `tools` (`core.ToolKit.toolsArray`), plus the built-in `open_app` (a dry run first; several matches go back to the model).
+  - `message.tool_calls` is parsed from any chunk.
+  - Each round is replayed as an assistant message carrying `tool_calls`, followed by `{role:"tool", tool_name, content}`.
+  - Limits: at most `ToolKit.MAX_ROUNDS` (5) rounds and `MAX_CALLS_PER_ROUND` (8) calls. `stop()` ends the loop.
+- **Risk policy (`ToolKit.risk`).**
+  - Read-only tools (get_/list_/read/info/status) just run.
+  - Tools that change something ask first while `settings.confirmPcActions()` is on, unless the user chose "Allow for this chat".
+  - Destructive tools (`BridgeTool.destructive()`) always ask.
+  - The question goes to `Engine.Listener.onToolApproval(core.ToolApproval)`: MainActivity passes it to Comms, which shows a themed sheet. If the app is in the background or the sheet can't show, the call is declined and the model is told so.
+  - In hands-free mode the approval can be answered by voice, except for destructive tools.
+- **UI and status.**
+  - `screens/ToolLog` is the in-reply action log: one row per call with label, state (queued / asking / running / done / declined / failed) and timing; tap a row for its arguments and result.
+  - `e.toolActivity()` reports ASKING or RUNNING (the Command core shows it).
+  - `/tools [on|off]` explains the status (`e.toolsStatus(cb)`).
+- **Settings screen.**
+  - `a.openSettings("Performance")` opens on a section (`SettingsScreen.showSection(title)`).
+  - `SettingsWidgets.SecretField` is a masked secret (body-face dots; mono when revealed).
+  - `EditTracker` makes self-saving fields commit only user edits.
+- **Other screens.** CoreView follows HUD effects and the phone's animator setting on its own. The PC tab has a power strip (Wake / Lock / Sleep / Restart / Shut down, depending on the tools offered), media keys, and tool forms generated from `BridgeTool.params`.
+
 ## 4. Engineering rules
 
 - Java 8 **without lambdas** (anonymous classes), **no AndroidX**, and **minSdk 23**. Any API above 23 needs an `SDK_INT` guard.

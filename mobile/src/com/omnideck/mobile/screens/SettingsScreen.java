@@ -419,6 +419,27 @@ public final class SettingsScreen extends Screen {
         return s;
     }
 
+    /**
+     * Opens the page on a section by its title (e.g. "Performance", "Connection"),
+     * once it's laid out. Returns false when there's no such section.
+     */
+    public boolean showSection(String title) {
+        view();
+        for (int i = 0; i < sections.size(); i++) {
+            if (sections.get(i).name.equalsIgnoreCase(title)) {
+                final int index = i;
+                scroll.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        jumpTo(index);
+                    }
+                });
+                return true;
+            }
+        }
+        return false;
+    }
+
     /** Scrolls a section to the top and pins its tab until the user scrolls by hand. */
     private void jumpTo(int index) {
         Section s = sections.get(index);
@@ -2107,7 +2128,8 @@ public final class SettingsScreen extends Screen {
                 new Widgets.Toggle.OnChange() {
                     @Override
                     public void changed(boolean on) {
-                        e.settings.setAiTools(on);
+                        // Through the Engine so the tool list is read when tools come on.
+                        e.setAiTools(on);
                         e.log("info", "PC tools for OMNI · " + (on ? "ON" : "OFF"));
                         refreshTools();
                     }
