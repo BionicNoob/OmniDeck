@@ -1,17 +1,16 @@
 package com.omnideck.mobile.screens;
 
 import android.animation.ValueAnimator;
-import android.content.ClipData;
-import android.content.ClipboardManager;
-import android.content.Context;
+import android.content.Intent;
 import android.content.res.ColorStateList;
 import android.graphics.drawable.RippleDrawable;
+import android.net.Uri;
 import android.os.Build;
 import android.text.Editable;
 import android.text.InputType;
+import android.text.SpannableStringBuilder;
 import android.text.TextUtils;
 import android.text.TextWatcher;
-import android.text.method.PasswordTransformationMethod;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.KeyEvent;
@@ -19,10 +18,9 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewParent;
-import android.view.accessibility.AccessibilityNodeInfo;
+import android.view.ViewTreeObserver;
 import android.view.animation.DecelerateInterpolator;
 import android.view.inputmethod.EditorInfo;
-import android.view.inputmethod.InputMethodManager;
 import android.widget.EditText;
 import android.widget.HorizontalScrollView;
 import android.widget.ImageView;
@@ -33,30 +31,39 @@ import android.widget.TextView;
 import com.omnideck.mobile.Engine;
 import com.omnideck.mobile.MainActivity;
 import com.omnideck.mobile.Settings;
+import com.omnideck.mobile.core.BridgeClient;
 import com.omnideck.mobile.core.ConversationStore;
+import com.omnideck.mobile.core.HostPort;
 import com.omnideck.mobile.core.ModelInfo;
+import com.omnideck.mobile.core.OllamaClient;
 import com.omnideck.mobile.core.ServerInfo;
+import com.omnideck.mobile.core.Telemetry;
+import com.omnideck.mobile.core.WakeOnLan;
 import com.omnideck.mobile.ui.Backdrop;
 import com.omnideck.mobile.ui.IconDrawable;
+import com.omnideck.mobile.ui.SettingsKit;
 import com.omnideck.mobile.ui.SettingsWidgets;
 import com.omnideck.mobile.ui.Theme;
 import com.omnideck.mobile.ui.Ui;
 import com.omnideck.mobile.ui.Widgets;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 
 /**
  * SETTINGS — the full-screen configuration deck behind the top-bar gear:
  * appearance, the link to the AI, models and routing, runner performance,
- * sampling, persona and memory, voice, the PC bridge, privacy and about.
+ * sampling, persona and memory, voice, notifications, the PC bridge (with
+ * Wake-on-LAN), what the AI may do on the PC, privacy and about.
  * <p>
- * Every control saves the moment it changes (text fields on Save, on focus
- * loss and when the screen closes) and reads the live value back whenever
- * the screen is shown. A sticky header carries a section index that tracks
- * the scroll position and jumps to a section on tap; each card's cap shows a
- * one-glance summary of its state.
+ * Every control saves the moment it changes (text fields on Done, on focus
+ * loss and when the screen closes — only what the user actually edited) and
+ * reads the live value back whenever the screen is shown. A sticky header
+ * carries a section index that tracks the scroll position and jumps to a
+ * section on tap; each card's cap shows a one-glance summary of its state.
  */
 public final class SettingsScreen extends Screen {
     static final int[] CTX_PRESETS = {0, 2048, 4096, 8192, 16384, 32768};
@@ -70,6 +77,12 @@ public final class SettingsScreen extends Screen {
     /** Ollama's own defaults, marked on the sliders while "Default" is in effect. */
     static final float TEMP_DEFAULT = 0.8f;
     static final float TOP_P_DEFAULT = 0.9f;
+    /** CPU threads: the stepper's top and the most a typed-in value may ask for. */
+    static final int MAX_THREADS = 256;
+    /** After Test voice, when to look again whether the phone could speak (the engine starts async). */
+    static final int[] VOICE_RECHECK_MS = {1500, 4000};
+    /** Notice key: the line reports invalid input (dropped once the input is fixed). */
+    private static final String INVALID = "invalid";
 
     /** One card of the page, with its entry in the section index. */
     private static final class Section {
@@ -88,32 +101,7 @@ public final class SettingsScreen extends Screen {
         }
     }
 
-    /** A settings row's views (title, subtitle) so they can be updated. */
-    private static final class Line {
-        final LinearLayout row;
-        final TextView title;
-        final TextView sub;
-
-        Line(LinearLayout row, TextView title, TextView sub) {
-            this.row = row;
-            this.title = title;
-            this.sub = sub;
-        }
-    }
-
-    /** A full-width "select" field: value on the left, detail + chevron on the right. */
-    private static final class Select {
-        final LinearLayout box;
-        final TextView value;
-        final TextView detail;
-
-        Select(LinearLayout box, TextView value, TextView detail) {
-            this.box = box;
-            this.value = value;
-            this.detail = detail;
-        }
-    }
-
+    private final SettingsKit kit;
     private final List<Section> sections = new ArrayList<Section>();
     private ScrollView scroll;
     private LinearLayout column;
@@ -130,7 +118,7 @@ public final class SettingsScreen extends Screen {
     private final TextView[] themeLabels = new TextView[4];
     private TextView themeNote;
     private Widgets.Toggle reduceMotion, hudEffects, haptics;
-    private Line hudLine;
+    private SettingsKit.Line hudLine;
     private Section secAppearance;
 
     // Connection
@@ -138,13 +126,15 @@ public final class SettingsScreen extends Screen {
     private Widgets.StatusDot linkDot;
     private TextView linkState, linkDetail;
     private TextView[] linkGrid;
-    private Line addressLine;
+    private SettingsKit.Line addressLine;
     private TextView autoBtn, scanBtn;
     private LinearLayout foundBox;
+    private SettingsWidgets.SecretField apiKeyBox;
+    private SettingsKit.Notice apiKeyNotice;
 
     // AI model
     private Section secModel;
-    private Select modelSelect, deepSelect;
+    private SettingsKit.Select modelSelect, deepSelect;
     private SettingsWidgets.Segmented modeSeg;
     private TextView modeNote;
     private Widgets.Toggle keepLoaded;
@@ -166,30 +156,57 @@ public final class SettingsScreen extends Screen {
     // Persona
     private Section secPersona;
     private EditText promptField;
+    private SettingsWidgets.EditTracker promptEdits;
     private TextView promptCount, promptSave, promptClear;
     private LinearLayout factsBox;
     private List<String> shownFacts;
 
     // Voice
     private Section secVoice;
-    private Widgets.Toggle readAloud;
+    private Widgets.Toggle readAloud, handsFree;
     private SettingsWidgets.Slider rateSlider;
     private TextView rateValue;
+    private TextView voiceHint;
+    private SettingsKit.Notice voiceNotice;
+    private View voiceFix;
+    private Boolean voiceShownAvailable;
+    private final Runnable voiceRecheck = new Runnable() {
+        @Override
+        public void run() {
+            if (isShown()) refreshVoice();
+        }
+    };
+
+    // Notifications
+    private Section secNotify;
+    private Widgets.Toggle notifyToggle;
+    private SettingsKit.Notice notifyNotice;
+    private View notifyFix;
 
     // PC bridge
     private Section secBridge;
     private Widgets.StatusDot bridgeDot;
-    private TextView bridgeState, bridgeDetail, pairStatus;
-    private EditText portField, tokenField;
-    private ImageView eyeBtn;
-    private boolean tokenVisible;
-    private TextView pairBtn, forgetBtn;
-    private boolean pairing;
+    private TextView bridgeState, bridgeDetail;
+    private SettingsKit.Line hostLine;
+    private EditText hostField, portField, macField;
+    private SettingsWidgets.EditTracker hostEdits, portEdits, macEdits;
+    private SettingsKit.Notice hostNotice, pairStatus, wolStatus;
+    private SettingsWidgets.SecretField tokenBox;
+    private TextView pairNowBtn, pairAgainBtn, forgetBtn, wakeBtn;
+    private boolean pairing, checking, waking;
+
+    // PC tools (what the AI may do on the PC)
+    private Section secTools;
+    private Widgets.Toggle aiTools, confirmActions;
+    private LinearLayout readiness;
+    private SettingsKit.Check toolModel, toolBridge;
+    /** Models whose capabilities were asked for while this page showed (asked once each). */
+    private final Set<String> toolsAsked = new HashSet<String>();
 
     // Privacy
     private Section secPrivacy;
     private Widgets.Toggle incognito;
-    private Line historyLine;
+    private SettingsKit.Line incognitoLine, historyLine;
     private TextView clearBtn;
     private int savedChats = -1;
 
@@ -199,6 +216,12 @@ public final class SettingsScreen extends Screen {
 
     public SettingsScreen(MainActivity a) {
         super(a);
+        kit = new SettingsKit(ui, new Runnable() {
+            @Override
+            public void run() {
+                saved();
+            }
+        });
     }
 
     // ------------------------------------------------------------------
@@ -237,12 +260,14 @@ public final class SettingsScreen extends Screen {
         buildGeneration();
         buildPersona();
         buildVoice();
+        buildNotifications();
         buildBridge();
+        buildTools();
         buildPrivacy();
         buildAbout();
 
         String creditLine = "OMNI-DECK Mobile · companion for OMNI-DECK";
-        TextView credit = ui.text(t.hud ? creditLine.toUpperCase(Locale.US) : creditLine, t.hud ? 9 : 11.5f, t.faint,
+        TextView credit = ui.text(t.hud ? creditLine.toUpperCase(Locale.US) : creditLine, t.hud ? 9 : 11.5f, t.dim,
                 t.hud ? t.labelFace : t.body);
         if (t.hud) credit.setLetterSpacing(0.12f);
         credit.setGravity(Gravity.CENTER);
@@ -264,6 +289,16 @@ public final class SettingsScreen extends Screen {
                     if (pageAnim != null) pageAnim.cancel();
                 }
                 return false;
+            }
+        });
+        // Back from a system dialog (the notification permission) or another app: re-read what it changed.
+        root.getViewTreeObserver().addOnWindowFocusChangeListener(new ViewTreeObserver.OnWindowFocusChangeListener() {
+            @Override
+            public void onWindowFocusChanged(boolean hasFocus) {
+                if (hasFocus && isShown()) {
+                    refreshNotifications();
+                    refreshVoice();
+                }
             }
         });
         setActiveSection(0);
@@ -293,9 +328,9 @@ public final class SettingsScreen extends Screen {
         titles.addView(sub);
         h.addView(titles, Ui.weight(1));
         savedMark = ui.label("Auto-save");
-        savedMark.setTextColor(t.faint);
+        savedMark.setTextColor(t.dim);
         savedMark.setCompoundDrawablePadding(ui.dp(5));
-        setSavedIcon(t.faint);
+        setSavedIcon(t.dim);
         h.addView(savedMark);
         return h;
     }
@@ -311,8 +346,8 @@ public final class SettingsScreen extends Screen {
         @Override
         public void run() {
             savedMark.setText(t.label("Auto-save"));
-            savedMark.setTextColor(t.faint);
-            setSavedIcon(t.faint);
+            savedMark.setTextColor(t.dim);
+            setSavedIcon(t.dim);
         }
     };
 
@@ -331,7 +366,7 @@ public final class SettingsScreen extends Screen {
     // ------------------------------------------------------------------
 
     private Section section(String title, String tabName) {
-        TextView status = ui.readout("", t.hud ? 10 : 11, t.faint);
+        TextView status = ui.readout("", t.hud ? 10 : 11, t.dim);
         if (t.hud) status.setLetterSpacing(0.06f);
         status.setPadding(ui.dp(8), 0, ui.dp(4), 0);
         // The summary gives way before the section title does.
@@ -463,276 +498,55 @@ public final class SettingsScreen extends Screen {
         });
     }
 
+    /** A card's cap summary. Cyber sets it in caps, keeping unit symbols ("44 ms") lower-case. */
     private void setStatus(Section s, String text, int color) {
-        s.status.setText(t.hud ? text.toUpperCase(Locale.US) : text);
+        s.status.setText(t.hud ? t.labelUnits(text) : text);
         s.status.setTextColor(color);
-    }
-
-    /** Reports a switch's on/off state to TalkBack (Widgets.Toggle draws its own track). */
-    private static void describeAsSwitch(View v) {
-        v.setAccessibilityDelegate(new View.AccessibilityDelegate() {
-            @Override
-            public void onInitializeAccessibilityNodeInfo(View host, AccessibilityNodeInfo info) {
-                super.onInitializeAccessibilityNodeInfo(host, info);
-                info.setClassName("android.widget.Switch");
-                info.setCheckable(true);
-                info.setChecked(host instanceof Widgets.Toggle && ((Widgets.Toggle) host).isChecked());
-            }
-        });
-    }
-
-    // ------------------------------------------------------------------
-    // Row helpers
-    // ------------------------------------------------------------------
-
-    private Line line(String title, String subtitle, View control) {
-        LinearLayout row = ui.hbox();
-        row.setPadding(0, ui.dp(11), 0, ui.dp(11));
-        row.setMinimumHeight(ui.dp(52));
-        LinearLayout text = ui.vbox();
-        TextView tt = ui.text(title, 14.5f, t.ink, t.bodyMedium);
-        text.addView(tt);
-        TextView st = ui.dim(subtitle == null ? "" : subtitle, 12);
-        st.setPadding(0, ui.dp(3), ui.dp(10), 0);
-        st.setVisibility(subtitle == null || subtitle.length() == 0 ? View.GONE : View.VISIBLE);
-        text.addView(st);
-        row.addView(text, Ui.weight(1));
-        if (control != null) row.addView(control);
-        return new Line(row, tt, st);
-    }
-
-    private void setSub(Line l, String s) {
-        l.sub.setText(s);
-        l.sub.setVisibility(s == null || s.length() == 0 ? View.GONE : View.VISIBLE);
-    }
-
-    /** A setting row with a switch; tapping anywhere on the row flips it. */
-    private Widgets.Toggle toggleRow(LinearLayout body, String title, String sub, final Widgets.Toggle.OnChange l,
-                                     Line[] out) {
-        final Widgets.Toggle tg = ui.toggle(false, new Widgets.Toggle.OnChange() {
-            @Override
-            public void changed(boolean on) {
-                l.changed(on);
-                saved();
-            }
-        });
-        tg.setContentDescription(title);
-        describeAsSwitch(tg);
-        Line ln = line(title, sub, tg);
-        ln.row.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                ui.tick(v);
-                tg.performClick();
-            }
-        });
-        body.addView(ln.row, Ui.fillW());
-        if (out != null) out[0] = ln;
-        return tg;
-    }
-
-    /** A tappable row that opens something (trailing icon). */
-    private Line navRow(LinearLayout body, String title, String sub, int icon, final Runnable r) {
-        ImageView iv = new ImageView(a);
-        iv.setImageDrawable(new IconDrawable(icon, t.hud ? t.accent : t.dim, t.hud ? t.accent : t.dim, ui.dp(18)));
-        iv.setScaleType(ImageView.ScaleType.CENTER);
-        iv.setLayoutParams(new LinearLayout.LayoutParams(ui.dp(32), ui.dp(32)));
-        Line ln = line(title, sub, iv);
-        ln.row.setContentDescription(title);
-        TypedValue tv = new TypedValue();
-        a.getTheme().resolveAttribute(android.R.attr.selectableItemBackground, tv, true);
-        if (tv.resourceId != 0) ln.row.setBackground(a.getDrawable(tv.resourceId));
-        ln.row.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                ui.tick(v);
-                r.run();
-            }
-        });
-        body.addView(ln.row, Ui.fillW());
-        return ln;
-    }
-
-    /** Title + subtitle over a full-width control. */
-    private Line heading(LinearLayout body, String title, String sub) {
-        Line ln = line(title, sub, null);
-        ln.row.setPadding(0, ui.dp(12), 0, ui.dp(9));
-        ln.row.setMinimumHeight(0);
-        body.addView(ln.row, Ui.fillW());
-        return ln;
-    }
-
-    private void sep(LinearLayout body) {
-        View v = new View(a);
-        v.setBackgroundColor(t.hud ? t.hairSoft : t.isDark ? t.hairSoft : t.hair);
-        body.addView(v, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, Math.max(1, ui.dp(0.7f))));
-    }
-
-    private TextView smallButton(String label, int icon, int style, String desc, View.OnClickListener l) {
-        TextView b = ui.button(label, icon, style, l);
-        b.setTextSize(TypedValue.COMPLEX_UNIT_SP, t.hud ? 10 : 13);
-        b.setPadding(ui.dp(icon != 0 ? 10 : 12), ui.dp(7), ui.dp(12), ui.dp(7));
-        b.setMinHeight(ui.dp(34));
-        b.setMinimumHeight(ui.dp(34));
-        b.setContentDescription(desc);
-        return b;
-    }
-
-    private TextView bigButton(String label, int icon, int style, String desc, View.OnClickListener l) {
-        TextView b = ui.button(label, icon, style, l);
-        b.setContentDescription(desc);
-        return b;
-    }
-
-    /** Relabels a {@link Ui#button} in its theme's case. */
-    private void buttonText(TextView b, String s) {
-        b.setText(t.hud ? s.toUpperCase(Locale.US) : s);
-    }
-
-    private void enable(View v, boolean on) {
-        v.setEnabled(on);
-        v.setAlpha(on ? 1f : 0.45f);
-    }
-
-    /** Recessed tiles of micro-caps label over a mono value, two per row. */
-    private TextView[] readoutGrid(LinearLayout body, String[] labels) {
-        TextView[] out = new TextView[labels.length];
-        LinearLayout row = null;
-        for (int i = 0; i < labels.length; i++) {
-            if (i % 2 == 0) {
-                row = ui.hbox();
-                row.setGravity(Gravity.TOP);
-                LinearLayout.LayoutParams lp = Ui.fillW();
-                lp.topMargin = ui.dp(8);
-                body.addView(row, lp);
-            }
-            LinearLayout cell = ui.vbox();
-            cell.setPadding(ui.dp(10), ui.dp(8), ui.dp(10), ui.dp(9));
-            cell.setBackground(ui.rounded(t.input, t.hud ? t.hairSoft : t.isDark ? t.hairSoft : 0, 7));
-            cell.addView(ui.label(labels[i]));
-            TextView v = ui.readout("—", t.hud ? 13 : 13.5f, t.ink);
-            v.setEllipsize(TextUtils.TruncateAt.END);
-            v.setPadding(0, ui.dp(6), 0, 0);
-            cell.addView(v, Ui.fillW());
-            LinearLayout.LayoutParams clp = Ui.weight(1);
-            if (i % 2 == 0) clp.rightMargin = ui.dp(8);
-            row.addView(cell, clp);
-            out[i] = v;
-        }
-        return out;
-    }
-
-    private Select select(LinearLayout body, String desc, final Runnable onTap) {
-        LinearLayout box = ui.hbox();
-        box.setPadding(ui.dp(12), 0, ui.dp(8), 0);
-        box.setMinimumHeight(ui.dp(44));
-        box.setBackground(new RippleDrawable(ColorStateList.valueOf(Theme.alpha(t.accent, 0x33)),
-                ui.rounded(t.input, t.hud ? t.edge : t.edge, 8), null));
-        TextView v = ui.text("", 14, t.ink, t.mono);
-        v.setSingleLine(true);
-        v.setEllipsize(TextUtils.TruncateAt.MIDDLE);
-        box.addView(v, Ui.weight(1));
-        TextView d = ui.text("", t.hud ? 9 : 11.5f, t.faint, t.hud ? t.labelFace : t.bodyMedium);
-        if (t.hud) d.setLetterSpacing(0.1f);
-        d.setSingleLine(true);
-        d.setPadding(ui.dp(8), 0, ui.dp(2), 0);
-        box.addView(d);
-        ImageView chev = new ImageView(a);
-        chev.setImageDrawable(new IconDrawable(IconDrawable.DOWN, t.dim, t.dim, ui.dp(16)));
-        chev.setScaleType(ImageView.ScaleType.CENTER);
-        box.addView(chev, new LinearLayout.LayoutParams(ui.dp(24), ui.dp(24)));
-        box.setContentDescription(desc);
-        box.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View view) {
-                ui.tick(view);
-                onTap.run();
-            }
-        });
-        body.addView(box, Ui.fillW());
-        return new Select(box, v, d);
-    }
-
-    private TextView valueReadout() {
-        TextView v = ui.readout("", t.hud ? 13 : 13.5f, t.accent);
-        v.setPadding(ui.dp(8), 0, 0, 0);
-        return v;
-    }
-
-    /** A slider header: title + live mono value + a "Default" reset link. */
-    private TextView[] sliderHead(LinearLayout body, String title, String sub, final Runnable onReset) {
-        LinearLayout head = ui.hbox();
-        head.setPadding(0, ui.dp(12), 0, 0);
-        TextView tt = ui.text(title, 14.5f, t.ink, t.bodyMedium);
-        head.addView(tt, Ui.weight(1));
-        TextView reset = null;
-        if (onReset != null) {
-            reset = ui.text(t.hud ? "RESET" : "Reset", t.hud ? 9.5f : 12.5f, t.accent,
-                    t.hud ? t.labelFace : t.bodySemi);
-            if (t.hud) reset.setLetterSpacing(0.1f);
-            reset.setPadding(ui.dp(10), ui.dp(4), ui.dp(10), ui.dp(4));
-            reset.setContentDescription("Reset " + title.toLowerCase(Locale.US));
-            reset.setOnClickListener(new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    ui.tick(v);
-                    onReset.run();
-                    saved();
-                }
-            });
-            head.addView(reset);
-        }
-        TextView value = valueReadout();
-        value.setMinWidth(ui.dp(52));
-        value.setGravity(Gravity.END);
-        head.addView(value);
-        body.addView(head, Ui.fillW());
-        if (sub != null) {
-            TextView st = ui.dim(sub, 12);
-            st.setPadding(0, ui.dp(3), 0, 0);
-            body.addView(st, Ui.fillW());
-        }
-        return new TextView[]{value, reset};
-    }
-
-    /** Scale labels under a slider, aligned with the track ends. */
-    private void scaleRow(LinearLayout body, String left, String mid, String right) {
-        LinearLayout row = ui.hbox();
-        row.setPadding(ui.dp(4), 0, ui.dp(4), ui.dp(4));
-        TextView l = ui.readout(left, 10, t.faint);
-        row.addView(l, Ui.weight(1));
-        if (mid != null) {
-            TextView m = ui.readout(mid, 10, t.faint);
-            m.setGravity(Gravity.CENTER);
-            row.addView(m, Ui.weight(1));
-        }
-        TextView r = ui.readout(right, 10, t.faint);
-        r.setGravity(Gravity.END);
-        row.addView(r, Ui.weight(1));
-        body.addView(row, Ui.fillW());
-    }
-
-    private void note(LinearLayout body, TextView text) {
-        LinearLayout row = ui.hbox();
-        row.setGravity(Gravity.TOP);
-        row.setPadding(0, ui.dp(10), 0, 0);
-        ImageView iv = new ImageView(a);
-        iv.setImageDrawable(new IconDrawable(IconDrawable.INFO, t.faint, t.faint, ui.dp(15)));
-        LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(ui.dp(15), ui.dp(15));
-        ilp.rightMargin = ui.dp(8);
-        ilp.topMargin = ui.dp(1);
-        row.addView(iv, ilp);
-        row.addView(text, Ui.weight(1));
-        body.addView(row, Ui.fillW());
-    }
-
-    private void hideKeyboard(View v) {
-        InputMethodManager imm = (InputMethodManager) a.getSystemService(Context.INPUT_METHOD_SERVICE);
-        if (imm != null && v != null) imm.hideSoftInputFromWindow(v.getWindowToken(), 0);
     }
 
     private static String grouped(int v) {
         return String.format(Locale.US, "%,d", v);
+    }
+
+    /** Words in the theme's label case around an identifier kept in its own case (model tags). */
+    private CharSequence withIdent(String before, String ident, String after) {
+        SpannableStringBuilder sb = new SpannableStringBuilder();
+        sb.append(t.hud ? t.labelUnits(before) : before);
+        sb.append(ident);
+        sb.append(t.hud ? t.labelUnits(after) : after);
+        return sb;
+    }
+
+    /** An editable one-line field in mono (addresses, MACs) that commits on Done and on focus loss. */
+    private EditText monoField(String hint, int inputType, String description, final Runnable commit) {
+        final EditText f = ui.field("", hint, inputType);
+        f.setTypeface(t.mono);
+        f.setSingleLine(true);
+        f.setImeOptions(EditorInfo.IME_ACTION_DONE);
+        f.setContentDescription(description);
+        f.setOnEditorActionListener(new TextView.OnEditorActionListener() {
+            @Override
+            public boolean onEditorAction(TextView v, int actionId, KeyEvent event) {
+                commit.run();
+                SettingsWidgets.parkFocus(f);
+                return true;
+            }
+        });
+        f.setOnFocusChangeListener(new View.OnFocusChangeListener() {
+            @Override
+            public void onFocusChange(View v, boolean has) {
+                if (!has) commit.run();
+            }
+        });
+        return f;
+    }
+
+    private void openSystemScreen(Intent i, String fallback) {
+        try {
+            a.startActivity(i);
+        } catch (RuntimeException ex) {
+            ui.toast(fallback);
+        }
     }
 
     // ------------------------------------------------------------------
@@ -778,20 +592,21 @@ public final class SettingsScreen extends Screen {
         themeNote = ui.dim("", 12.5f);
         themeNote.setPadding(0, ui.dp(12), 0, ui.dp(6));
         body.addView(themeNote, Ui.fillW());
-        sep(body);
-        reduceMotion = toggleRow(body, "Reduce motion", "Stills the AI core, pulses, scan line and boot sequence.",
+        kit.sep(body);
+        reduceMotion = kit.toggleRow(body, "Reduce motion", "Stills the AI core, pulses, scan line and boot sequence.",
                 new Widgets.Toggle.OnChange() {
                     @Override
                     public void changed(boolean on) {
                         e.settings.setReduceMotion(on);
+                        ui.reduceMotion = on;
                         a.updateScanLine();
                         a.onStateChanged(); // re-evaluates the status dots' pulse
                         refreshAppearance();
                     }
                 }, null);
-        sep(body);
-        Line[] hl = new Line[1];
-        hudEffects = toggleRow(body, "HUD effects", "", new Widgets.Toggle.OnChange() {
+        kit.sep(body);
+        SettingsKit.Line[] hl = new SettingsKit.Line[1];
+        hudEffects = kit.toggleRow(body, "HUD effects", "", new Widgets.Toggle.OnChange() {
             @Override
             public void changed(boolean on) {
                 e.settings.setHudEffects(on);
@@ -801,8 +616,8 @@ public final class SettingsScreen extends Screen {
             }
         }, hl);
         hudLine = hl[0];
-        sep(body);
-        haptics = toggleRow(body, "Haptics", "A light tick when you tap controls.", new Widgets.Toggle.OnChange() {
+        kit.sep(body);
+        haptics = kit.toggleRow(body, "Haptics", "A light tick when you tap controls.", new Widgets.Toggle.OnChange() {
             @Override
             public void changed(boolean on) {
                 e.settings.setHaptics(on);
@@ -857,10 +672,11 @@ public final class SettingsScreen extends Screen {
         reduceMotion.setChecked(e.settings.reduceMotion(), false);
         hudEffects.setChecked(e.settings.hudEffects(), false);
         haptics.setChecked(e.settings.haptics(), false);
-        setSub(hudLine, t.hud ? "Hairline grid, top bloom and the slow scan line." : "Grid, bloom and scan line · Cyber only.");
+        kit.setSub(hudLine, t.hud ? "Hairline grid, top bloom and the slow scan line."
+                : "Grid, bloom and scan line · Cyber only.");
         hudLine.row.setAlpha(t.hud ? 1f : 0.6f);
         String name = pref.equals(Settings.THEME_SYSTEM) ? "System · " + t.name : THEME_NAMES[themeIndex(pref)];
-        setStatus(secAppearance, name, t.faint);
+        setStatus(secAppearance, name, t.dim);
     }
 
     private static int themeIndex(String pref) {
@@ -892,10 +708,9 @@ public final class SettingsScreen extends Screen {
         lt.addView(linkDetail);
         link.addView(lt, Ui.weight(1));
         body.addView(link, Ui.fillW());
-        linkGrid = readoutGrid(body, new String[]{"Host", "Ollama", "Latency", "Models"});
-        View gap = ui.space(1, 6);
-        body.addView(gap);
-        addressLine = line("AI address", "", smallButton("Change", IconDrawable.EDIT, Ui.SECONDARY,
+        linkGrid = kit.readoutGrid(body, new String[]{"Host", "Ollama", "Latency", "Models"});
+        body.addView(ui.space(1, 6));
+        addressLine = kit.line("AI address", "", kit.smallButton("Change", IconDrawable.EDIT, Ui.SECONDARY,
                 "Change address", new View.OnClickListener() {
                     @Override
                     public void onClick(View v) {
@@ -905,20 +720,21 @@ public final class SettingsScreen extends Screen {
         body.addView(addressLine.row, Ui.fillW());
         LinearLayout btns = ui.hbox();
         btns.setPadding(0, ui.dp(2), 0, 0);
-        autoBtn = bigButton("Auto-detect", IconDrawable.WIFI, Ui.SECONDARY, "Auto-detect", new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                // setServer("") clears the manual address and starts discovery itself
-                // (a discover(true) right after would be a no-op while that scan runs).
-                e.setServer("");
-                saved();
-                ui.toast("Searching the network for your AI…");
-                refreshConnection();
-            }
-        });
+        autoBtn = kit.bigButton("Auto-detect", IconDrawable.WIFI, Ui.SECONDARY, "Auto-detect",
+                new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        // setServer("") clears the manual address and starts discovery itself
+                        // (a discover(true) right after would be a no-op while that scan runs).
+                        e.setServer("");
+                        saved();
+                        ui.toast("Searching the network for your AI…");
+                        refreshConnection();
+                    }
+                });
         btns.addView(autoBtn, Ui.weight(1));
         btns.addView(ui.space(8, 1));
-        scanBtn = bigButton("Scan now", IconDrawable.SCAN, Ui.SECONDARY, "Scan now", new View.OnClickListener() {
+        scanBtn = kit.bigButton("Scan now", IconDrawable.SCAN, Ui.SECONDARY, "Scan now", new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 if (e.isScanning()) {
@@ -934,6 +750,21 @@ public final class SettingsScreen extends Screen {
         foundBox = ui.vbox();
         foundBox.setVisibility(View.GONE);
         body.addView(foundBox, Ui.fillW());
+
+        View rule = kit.sep(body);
+        ((LinearLayout.LayoutParams) rule.getLayoutParams()).topMargin = ui.dp(14);
+        kit.heading(body, "API key", "For Ollama behind a reverse proxy — https:// addresses work too. The key is "
+                + "only ever sent to the address you typed in.");
+        apiKeyBox = new SettingsWidgets.SecretField(ui, "API key", "Not set", true);
+        apiKeyBox.field.setContentDescription("API key");
+        apiKeyBox.setOnCommit(new SettingsWidgets.SecretField.OnCommit() {
+            @Override
+            public void commit() {
+                commitApiKey();
+            }
+        });
+        body.addView(apiKeyBox, Ui.fillW());
+        apiKeyNotice = kit.notice(body);
     }
 
     private void refreshConnection() {
@@ -947,29 +778,45 @@ public final class SettingsScreen extends Screen {
         linkState.setTextColor(c);
         linkDetail.setText(e.stateDetail());
         boolean on = s == Engine.State.ONLINE && srv != null;
-        linkGrid[0].setText(on ? srv.label() : e.settings.lastHost().length() > 0
-                ? e.settings.lastHost() + ":" + e.settings.lastPort() : "—");
-        linkGrid[0].setTextColor(on ? t.ink : t.faint);
-        linkGrid[1].setText(on && srv.version.length() > 0 ? srv.version : "—");
-        linkGrid[1].setTextColor(on ? t.ink : t.faint);
+        String last = e.settings.lastHost();
+        kit.setReadout(linkGrid[0], on ? srv.label() : last.length() > 0 ? last + ":" + e.settings.lastPort() : "—",
+                on);
+        kit.setReadout(linkGrid[1], on && srv.version.length() > 0 ? srv.version : "—", on);
         double lat = e.telemetry.latencyMs.last();
-        linkGrid[2].setText(on && !Double.isNaN(lat) ? Math.round(lat) + " ms" : "—");
-        linkGrid[2].setTextColor(on ? t.ink : t.faint);
+        kit.setReadout(linkGrid[2], on && !Double.isNaN(lat) ? Math.round(lat) + " ms" : "—", on);
         int loaded = 0;
         for (ModelInfo m : e.models()) {
             if (e.isLoaded(m.name)) loaded++;
         }
-        linkGrid[3].setText(on ? e.models().size() + " · " + loaded + " loaded" : "—");
-        linkGrid[3].setTextColor(on ? t.ink : t.faint);
+        kit.setReadout(linkGrid[3], on ? e.models().size() + " · " + loaded + " loaded" : "—", on);
         String manual = e.settings.server();
-        setSub(addressLine, manual.length() > 0 ? "Manual · " + manual
+        kit.setSub(addressLine, manual.length() > 0 ? "Manual · " + manual
                 : "Auto-detect · finds Ollama on this Wi-Fi network.");
-        enable(autoBtn, manual.length() > 0 || s == Engine.State.OFFLINE);
-        buttonText(scanBtn, e.isScanning() ? "Scanning…" : "Scan now");
-        enable(scanBtn, !e.isScanning());
+        SettingsKit.enable(autoBtn, manual.length() > 0 || s == Engine.State.OFFLINE);
+        kit.relabel(scanBtn, e.isScanning() ? "Scanning…" : "Scan now");
+        SettingsKit.enable(scanBtn, !e.isScanning());
         setStatus(secConnection, s == Engine.State.ONLINE && !Double.isNaN(lat) ? "Online · " + Math.round(lat) + " ms"
                 : st, c);
+        if (!apiKeyBox.field.hasFocus()) apiKeyBox.edits.bind(e.settings.apiKey());
+        if (e.settings.apiKey().length() > 0 && manual.length() == 0) {
+            kit.show(apiKeyNotice, "Not in use: the key only goes to an address you typed in. Set the AI address "
+                    + "above to your proxy.", t.warn);
+        } else {
+            kit.hide(apiKeyNotice);
+        }
         renderFound();
+    }
+
+    private void commitApiKey() {
+        SettingsWidgets.EditTracker ed = apiKeyBox.edits;
+        if (!ed.edited()) return;
+        String v = ed.text();
+        ed.settled();
+        if (v.equals(e.settings.apiKey())) return;
+        e.setApiKey(v); // saves it and reconnects with it
+        e.log("info", v.length() == 0 ? "API key removed" : "API key saved · reconnecting");
+        saved();
+        refreshConnection();
     }
 
     /** Other AI servers the last full scan found, each one tap away. */
@@ -1001,7 +848,7 @@ public final class SettingsScreen extends Screen {
             if (connected) {
                 row.addView(ui.chip("Connected", t.ok));
             } else {
-                row.addView(smallButton("Use", 0, Ui.SECONDARY, "Use " + s.label(), new View.OnClickListener() {
+                row.addView(kit.smallButton("Use", 0, Ui.SECONDARY, "Use " + s.label(), new View.OnClickListener() {
                     @Override
                     public void onClick(View view) {
                         e.setServer(s.label());
@@ -1021,21 +868,21 @@ public final class SettingsScreen extends Screen {
     private void buildModel() {
         secModel = section("AI model", "AI model");
         LinearLayout body = secModel.body;
-        heading(body, "Default model", "Every reply goes here unless Deep mode takes over.");
-        modelSelect = select(body, "Default model", new Runnable() {
+        kit.heading(body, "Default model", "Every reply goes here unless Deep mode takes over.");
+        modelSelect = kit.select(body, "Default model", new Runnable() {
             @Override
             public void run() {
                 pickModel(false);
             }
         });
-        heading(body, "Deep-mode model", "Handles Deep mode — and hard prompts in Auto.");
-        deepSelect = select(body, "Deep-mode model", new Runnable() {
+        kit.heading(body, "Deep-mode model", "Handles Deep mode — and hard prompts in Auto.");
+        deepSelect = kit.select(body, "Deep-mode model", new Runnable() {
             @Override
             public void run() {
                 pickModel(true);
             }
         });
-        heading(body, "Response mode", null);
+        kit.heading(body, "Response mode", null);
         modeSeg = new SettingsWidgets.Segmented(ui, "Mode", new String[]{"Auto", "Fast", "Deep"});
         modeSeg.setOnSelect(new SettingsWidgets.Segmented.OnSelect() {
             @Override
@@ -1049,8 +896,8 @@ public final class SettingsScreen extends Screen {
         modeNote = ui.dim("", 12);
         modeNote.setPadding(0, ui.dp(8), 0, ui.dp(8));
         body.addView(modeNote, Ui.fillW());
-        sep(body);
-        keepLoaded = toggleRow(body, "Keep model loaded",
+        kit.sep(body);
+        keepLoaded = kit.toggleRow(body, "Keep model loaded",
                 "Holds the model in the PC's memory between messages. Off: it unloads after 5 minutes idle.",
                 new Widgets.Toggle.OnChange() {
                     @Override
@@ -1109,28 +956,20 @@ public final class SettingsScreen extends Screen {
         List<ModelInfo> ms = e.models();
         String cur = e.currentModel();
         if (cur.length() == 0) {
-            modelSelect.value.setText(online ? "No models installed" : "Not chosen yet");
-            modelSelect.value.setTextColor(t.faint);
+            kit.setValue(modelSelect, online ? "No models installed" : "Not chosen yet", false);
         } else {
-            modelSelect.value.setText(cur);
-            modelSelect.value.setTextColor(t.ink);
+            kit.setValue(modelSelect, cur, true);
         }
-        modelSelect.detail.setText(detailFor(cur, online));
-        modelSelect.detail.setTextColor(e.isLoaded(cur) ? t.ok : online ? t.faint : t.warn);
+        kit.setTags(modelSelect, stateChips(cur, online, false));
         String deepPref = e.settings.deepModel();
         String deep = e.resolveInstalled(deepPref);
         if (deepPref.length() == 0) {
-            deepSelect.value.setText("Same as default");
-            deepSelect.value.setTextColor(t.dim);
-            deepSelect.detail.setText("");
+            kit.setValue(deepSelect, "Same as default", false);
+            kit.setTags(deepSelect);
         } else {
-            deepSelect.value.setText(deep != null ? deep : deepPref);
-            deepSelect.value.setTextColor(t.ink);
-            String d = deep == null && online && !ms.isEmpty() ? "Not installed" : detailFor(deep != null ? deep : deepPref,
-                    online);
-            deepSelect.detail.setText(t.hud ? d.toUpperCase(Locale.US) : d);
-            deepSelect.detail.setTextColor(deep == null && online && !ms.isEmpty() ? t.warn
-                    : e.isLoaded(deep == null ? "" : deep) ? t.ok : online ? t.faint : t.warn);
+            kit.setValue(deepSelect, deep != null ? deep : deepPref, true);
+            kit.setTags(deepSelect, stateChips(deep != null ? deep : deepPref, online,
+                    deep == null && online && !ms.isEmpty()));
         }
         String mode = e.mode();
         int mi = Settings.MODE_FAST.equals(mode) ? 1 : Settings.MODE_DEEP.equals(mode) ? 2 : 0;
@@ -1148,19 +987,20 @@ public final class SettingsScreen extends Screen {
         keepLoaded.setChecked(e.settings.keepLoaded(), false);
         String modeName = mi == 1 ? "Fast" : mi == 2 ? "Deep" : "Auto";
         if (!online) setStatus(secModel, modeName + " · offline", t.warn);
-        else setStatus(secModel, modeName + " · " + ms.size() + (ms.size() == 1 ? " model" : " models"), t.faint);
+        else setStatus(secModel, modeName + " · " + ms.size() + (ms.size() == 1 ? " model" : " models"), t.dim);
     }
 
-    private String detailFor(String model, boolean online) {
-        if (!online) return t.hud ? "OFFLINE" : "Offline";
-        if (model == null || model.length() == 0) return "";
-        String d = e.isLoaded(model) ? "Loaded" : "";
+    /** The select's chips: "Offline", "Not installed", "Loaded" and the parameter size (mono). */
+    private TextView[] stateChips(String model, boolean online, boolean missing) {
+        if (!online) return new TextView[]{ui.chip("Offline", t.warn)};
+        if (missing) return new TextView[]{ui.chip("Not installed", t.warn)};
+        if (model == null || model.length() == 0) return new TextView[0];
+        TextView loaded = e.isLoaded(model) ? ui.chip("Loaded", t.ok) : null;
+        TextView size = null;
         for (ModelInfo m : e.models()) {
-            if (m.name.equals(model) && m.parameterSize.length() > 0) {
-                d = d.length() > 0 ? d + " · " + m.parameterSize : m.parameterSize;
-            }
+            if (m.name.equals(model) && m.parameterSize.length() > 0) size = ui.chip(m.parameterSize, t.dim, true);
         }
-        return t.hud ? d.toUpperCase(Locale.US) : d;
+        return new TextView[]{loaded, size};
     }
 
     // ------------------------------------------------------------------
@@ -1173,8 +1013,8 @@ public final class SettingsScreen extends Screen {
         ctxReadout = ui.readout("", t.hud ? 13 : 13.5f, t.accent);
         ctxReadout.setPadding(ui.dp(10), ui.dp(6), ui.dp(10), ui.dp(6));
         ctxReadout.setBackground(new RippleDrawable(ColorStateList.valueOf(Theme.alpha(t.accent, 0x33)),
-                ui.rounded(t.input, t.hud ? t.edge : t.edge, 7), null));
-        IconDrawable pen = new IconDrawable(IconDrawable.EDIT, t.faint, t.faint, ui.dp(13));
+                ui.rounded(t.input, t.edge, 7), null));
+        IconDrawable pen = new IconDrawable(IconDrawable.EDIT, t.dim, t.dim, ui.dp(13));
         pen.setBounds(0, 0, ui.dp(13), ui.dp(13));
         ctxReadout.setCompoundDrawables(null, null, pen, null);
         ctxReadout.setCompoundDrawablePadding(ui.dp(7));
@@ -1195,7 +1035,7 @@ public final class SettingsScreen extends Screen {
                 });
             }
         });
-        Line ctx = line("Context window", "How much of the chat the model sees at once.", ctxReadout);
+        SettingsKit.Line ctx = kit.line("Context window", "How much of the chat the model sees at once.", ctxReadout);
         ctx.row.setPadding(0, ui.dp(10), 0, ui.dp(10));
         body.addView(ctx.row, Ui.fillW());
         ctxSeg = new SettingsWidgets.Segmented(ui, "Context window", CTX_LABELS);
@@ -1208,18 +1048,19 @@ public final class SettingsScreen extends Screen {
         LinearLayout.LayoutParams slp = Ui.fillW();
         slp.bottomMargin = ui.dp(12);
         body.addView(ctxSeg, slp);
-        sep(body);
+        kit.sep(body);
         threads = new SettingsWidgets.Stepper(ui, "CPU threads", new Runnable() {
             @Override
             public void run() {
                 promptNumber("CPU threads", "0 = let Ollama decide", e.settings.numThread(), new NumberResult() {
                     @Override
                     public void onNumber(int v) {
-                        setThreads(Math.min(v, 256));
+                        if (v > MAX_THREADS) ui.toast("Capped at " + MAX_THREADS + " threads.");
+                        setThreads(Math.min(v, MAX_THREADS));
                     }
                 });
             }
-        }).range(0, 64, 1).format(new SettingsWidgets.Stepper.Format() {
+        }).range(0, MAX_THREADS, 1).format(new SettingsWidgets.Stepper.Format() {
             @Override
             public String format(int v) {
                 return v == 0 ? (t.hud ? "AUTO" : "Auto") : String.valueOf(v);
@@ -1231,12 +1072,12 @@ public final class SettingsScreen extends Screen {
                 setThreads(value);
             }
         });
-        Line th = line("CPU threads", "Auto lets Ollama decide.", threads);
+        SettingsKit.Line th = kit.line("CPU threads", "Auto lets Ollama decide.", threads);
         body.addView(th.row, Ui.fillW());
-        sep(body);
+        kit.sep(body);
         TextView n = ui.dim("Changing either one reloads the model on the PC with your next message.", 12);
-        note(body, n);
-        loadedNote = ui.readout("", t.hud ? 10 : 11, t.faint);
+        kit.note(body, n);
+        loadedNote = ui.readout("", t.hud ? 10 : 11, t.dim);
         loadedNote.setPadding(ui.dp(23), ui.dp(8), 0, 0);
         loadedNote.setEllipsize(TextUtils.TruncateAt.END);
         body.addView(loadedNote, Ui.fillW());
@@ -1267,19 +1108,22 @@ public final class SettingsScreen extends Screen {
         threads.bind(e.settings.numThread());
         String cur = e.currentModel();
         ModelInfo r = cur.length() > 0 ? e.runningInfo(cur) : null;
-        String loaded;
+        CharSequence loaded;
         if (e.state() != Engine.State.ONLINE) {
-            loaded = "Offline · applies when the AI reconnects";
+            loaded = t.hud ? t.labelUnits("Offline · applies when the AI reconnects")
+                    : "Offline · applies when the AI reconnects";
         } else if (r != null) {
-            loaded = "Loaded now · " + cur + (r.contextLength > 0 ? " · " + grouped(r.contextLength) + " ctx" : "");
+            loaded = withIdent("Loaded now · ", cur, r.contextLength > 0 ? " · " + grouped(r.contextLength) + " ctx" : "");
+        } else if (cur.length() > 0) {
+            loaded = withIdent("", cur, " isn't loaded yet");
         } else {
-            loaded = cur.length() > 0 ? cur + " isn't loaded yet" : "No model loaded";
+            loaded = t.hud ? "NO MODEL LOADED" : "No model loaded";
         }
-        loadedNote.setText(t.hud ? loaded.toUpperCase(Locale.US) : loaded);
+        loadedNote.setText(loaded);
         String ctxS = ctx == 0 ? "auto" : ctx % 1024 == 0 ? (ctx / 1024) + "K" : grouped(ctx);
         int th = e.settings.numThread();
         setStatus(secPerf, "Ctx " + ctxS + " · Threads " + (th == 0 ? "auto" : String.valueOf(th)),
-                ctx == 0 && th == 0 ? t.faint : (t.hud ? t.engaged : t.faint));
+                ctx == 0 && th == 0 ? t.dim : (t.hud ? t.engagedInk : t.dim));
     }
 
     // ------------------------------------------------------------------
@@ -1289,7 +1133,7 @@ public final class SettingsScreen extends Screen {
     private void buildGeneration() {
         secGen = section("Generation", "Generation");
         LinearLayout body = secGen.body;
-        TextView[] th = sliderHead(body, "Temperature", "Lower is focused and repeatable; higher is more creative.",
+        TextView[] th = kit.sliderHead(body, "Temperature", "Lower is focused and repeatable; higher is more creative.",
                 new Runnable() {
                     @Override
                     public void run() {
@@ -1311,9 +1155,9 @@ public final class SettingsScreen extends Screen {
             }
         });
         body.addView(tempSlider, sliderLp());
-        scaleRow(body, "0.0", "1.0", "2.0");
-        sep(body);
-        TextView[] ph = sliderHead(body, "Top-p", "Samples only from the most likely words that add up to p.",
+        kit.scaleRow(body, "0.0", "1.0", "2.0");
+        kit.sep(body);
+        TextView[] ph = kit.sliderHead(body, "Top-p", "Samples only from the most likely words that add up to p.",
                 new Runnable() {
                     @Override
                     public void run() {
@@ -1335,8 +1179,8 @@ public final class SettingsScreen extends Screen {
             }
         });
         body.addView(topPSlider, sliderLp());
-        scaleRow(body, "0.05", null, "1.00");
-        sep(body);
+        kit.scaleRow(body, "0.05", null, "1.00");
+        kit.sep(body);
         maxTokens = new SettingsWidgets.Stepper(ui, "max reply tokens", new Runnable() {
             @Override
             public void run() {
@@ -1359,31 +1203,32 @@ public final class SettingsScreen extends Screen {
                 setMaxTokens(value);
             }
         });
-        Line mt = line("Max reply length", "In tokens. No limit lets the model decide.", maxTokens);
+        SettingsKit.Line mt = kit.line("Max reply length", "In tokens. No limit lets the model decide.", maxTokens);
         body.addView(mt.row, Ui.fillW());
-        sep(body);
+        kit.sep(body);
         LinearLayout foot = ui.hbox();
         foot.setPadding(0, ui.dp(10), 0, 0);
         TextView fn = ui.dim("Sampling applies to the next message and never reloads the model.", 12);
         foot.addView(fn, Ui.weight(1));
-        foot.addView(smallButton("Reset", IconDrawable.REFRESH, Ui.GHOST, "Reset generation", new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                e.settings.setTemperature(-1f);
-                e.settings.setTopP(-1f);
-                e.settings.setMaxTokens(0);
-                saved();
-                refreshGeneration();
-            }
-        }));
+        foot.addView(kit.smallButton("Reset", IconDrawable.REFRESH, Ui.GHOST, "Reset generation",
+                new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        e.settings.setTemperature(-1f);
+                        e.settings.setTopP(-1f);
+                        e.settings.setMaxTokens(0);
+                        saved();
+                        refreshGeneration();
+                    }
+                }));
         body.addView(foot, Ui.fillW());
     }
 
     private LinearLayout.LayoutParams sliderLp() {
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ui.dp(40));
         lp.topMargin = ui.dp(6);
-        lp.leftMargin = -ui.dp(8);
-        lp.rightMargin = -ui.dp(8);
+        lp.leftMargin = -ui.dp(9);
+        lp.rightMargin = -ui.dp(9);
         return lp;
     }
 
@@ -1406,15 +1251,16 @@ public final class SettingsScreen extends Screen {
     private void showGenValues() {
         float temp = e.settings.temperature(), topP = e.settings.topP();
         String def = t.hud ? "DEFAULT" : "Default";
+        int set = t.data;
         tempValue.setText(temp < 0 ? def : String.format(Locale.US, "%.2f", temp));
-        tempValue.setTextColor(temp < 0 ? t.faint : t.accent);
+        tempValue.setTextColor(temp < 0 ? t.dim : set);
         tempReset.setVisibility(temp < 0 ? View.GONE : View.VISIBLE);
         topPValue.setText(topP < 0 ? def : String.format(Locale.US, "%.2f", topP));
-        topPValue.setTextColor(topP < 0 ? t.faint : t.accent);
+        topPValue.setTextColor(topP < 0 ? t.dim : set);
         topPReset.setVisibility(topP < 0 ? View.GONE : View.VISIBLE);
         boolean custom = temp >= 0 || topP >= 0 || e.settings.maxTokens() > 0;
         if (!custom) {
-            setStatus(secGen, "Model defaults", t.faint);
+            setStatus(secGen, "Model defaults", t.dim);
         } else {
             StringBuilder sb = new StringBuilder();
             if (temp >= 0) sb.append("Temp ").append(String.format(Locale.US, "%.2f", temp));
@@ -1424,7 +1270,7 @@ public final class SettingsScreen extends Screen {
             if (e.settings.maxTokens() > 0) {
                 sb.append(sb.length() > 0 ? " · " : "").append("Max ").append(e.settings.maxTokens());
             }
-            setStatus(secGen, sb.toString(), t.hud ? t.engaged : t.faint);
+            setStatus(secGen, sb.toString(), t.hud ? t.engagedInk : t.dim);
         }
     }
 
@@ -1435,7 +1281,7 @@ public final class SettingsScreen extends Screen {
     private void buildPersona() {
         secPersona = section("Persona", "Persona");
         LinearLayout body = secPersona.body;
-        heading(body, "System prompt", "Standing instructions sent with every message.");
+        kit.heading(body, "System prompt", "Standing instructions sent with every message.");
         promptField = ui.field("", "e.g. You are OMNI, my concise, dry-witted assistant. Prefer short answers.",
                 InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
         promptField.setGravity(Gravity.TOP | Gravity.START);
@@ -1445,6 +1291,7 @@ public final class SettingsScreen extends Screen {
         promptField.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
         promptField.setLineSpacing(0, 1.2f);
         promptField.setContentDescription("System prompt");
+        promptEdits = new SettingsWidgets.EditTracker(promptField);
         promptField.addTextChangedListener(new TextWatcher() {
             @Override
             public void beforeTextChanged(CharSequence s, int st, int c, int af) {
@@ -1468,9 +1315,9 @@ public final class SettingsScreen extends Screen {
         body.addView(promptField, Ui.fillW());
         LinearLayout actions = ui.hbox();
         actions.setPadding(0, ui.dp(8), 0, ui.dp(8));
-        promptCount = ui.readout("", t.hud ? 10 : 11, t.faint);
+        promptCount = ui.readout("", t.hud ? 10 : 11, t.dim);
         actions.addView(promptCount, Ui.weight(1));
-        promptClear = smallButton("Clear", 0, Ui.GHOST, "Clear system prompt", new View.OnClickListener() {
+        promptClear = kit.smallButton("Clear", 0, Ui.GHOST, "Clear system prompt", new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 promptField.setText("");
@@ -1479,24 +1326,23 @@ public final class SettingsScreen extends Screen {
         });
         actions.addView(promptClear);
         actions.addView(ui.space(6, 1));
-        promptSave = smallButton("Save", IconDrawable.CHECK, Ui.PRIMARY, "Save system prompt", new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                commitPrompt();
-                promptField.clearFocus();
-                column.requestFocus();
-                hideKeyboard(promptField);
-            }
-        });
+        promptSave = kit.smallButton("Save", IconDrawable.CHECK, Ui.PRIMARY, "Save system prompt",
+                new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        commitPrompt();
+                        SettingsWidgets.parkFocus(promptField);
+                    }
+                });
         actions.addView(promptSave);
         body.addView(actions, Ui.fillW());
-        sep(body);
-        heading(body, "Memory", "Facts OMNI always knows about you, sent with every message.");
+        kit.sep(body);
+        kit.heading(body, "Memory", "Facts OMNI always knows about you, sent with every message.");
         factsBox = ui.vbox();
         body.addView(factsBox, Ui.fillW());
         LinearLayout add = ui.hbox();
         add.setPadding(0, ui.dp(8), 0, 0);
-        add.addView(bigButton("Add fact", IconDrawable.PLUS, Ui.SECONDARY, "Add fact", new View.OnClickListener() {
+        add.addView(kit.bigButton("Add fact", IconDrawable.PLUS, Ui.SECONDARY, "Add fact", new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 addFact();
@@ -1512,19 +1358,23 @@ public final class SettingsScreen extends Screen {
         String count = n == 0 ? "Not set" : grouped(n) + (n == 1 ? " char" : " chars");
         if (dirty) count += " · unsaved";
         promptCount.setText(t.hud ? count.toUpperCase(Locale.US) : count);
-        promptCount.setTextColor(dirty ? t.warn : t.faint);
+        promptCount.setTextColor(dirty ? t.warn : t.dim);
         // Save only shows while there's something to save; Clear only when there's text.
         promptSave.setVisibility(dirty ? View.VISIBLE : View.GONE);
         promptClear.setVisibility(cur.length() > 0 ? View.VISIBLE : View.GONE);
     }
 
+    /** Saves the prompt the user typed (never a stale copy: see {@link SettingsWidgets.EditTracker}). */
     private void commitPrompt() {
         if (promptField == null) return;
-        String v = promptField.getText().toString().trim();
-        if (!v.equals(e.settings.systemPrompt().trim())) {
-            e.settings.setSystemPrompt(v);
-            e.log("info", v.length() == 0 ? "System prompt cleared" : "System prompt updated");
-            saved();
+        if (promptEdits.edited()) {
+            String v = promptEdits.text();
+            promptEdits.settled();
+            if (!v.equals(e.settings.systemPrompt().trim())) {
+                e.settings.setSystemPrompt(v);
+                e.log("info", v.length() == 0 ? "System prompt cleared" : "System prompt updated");
+                saved();
+            }
         }
         updatePromptState();
         refreshPersonaStatus();
@@ -1591,7 +1441,7 @@ public final class SettingsScreen extends Screen {
             final int idx = i;
             LinearLayout row = ui.hbox();
             row.setPadding(0, ui.dp(2), 0, ui.dp(2));
-            TextView num = ui.readout(String.format(Locale.US, "%02d", i + 1), 11, t.hud ? t.accent : t.faint);
+            TextView num = ui.readout(String.format(Locale.US, "%02d", i + 1), 11, t.hud ? t.accent : t.dim);
             num.setPadding(0, 0, ui.dp(10), 0);
             row.addView(num);
             TextView text = ui.text(facts.get(i), 14, t.ink, t.body);
@@ -1604,7 +1454,7 @@ public final class SettingsScreen extends Screen {
                 }
             });
             row.addView(text, Ui.weight(1));
-            ImageView x = ui.iconButton(IconDrawable.CLOSE, "Forget fact " + (i + 1), t.faint, new View.OnClickListener() {
+            ImageView x = ui.iconButton(IconDrawable.CLOSE, "Forget fact " + (i + 1), t.dim, new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
                     removeFact(idx);
@@ -1627,7 +1477,7 @@ public final class SettingsScreen extends Screen {
         int n = e.settings.facts().size();
         boolean prompt = e.settings.systemPrompt().trim().length() > 0;
         String s = (prompt ? "Prompt set" : "No prompt") + " · " + n + (n == 1 ? " fact" : " facts");
-        setStatus(secPersona, s, prompt || n > 0 ? (t.hud ? t.accent : t.faint) : t.faint);
+        setStatus(secPersona, s, prompt || n > 0 ? (t.hud ? t.accent : t.dim) : t.dim);
     }
 
     // ------------------------------------------------------------------
@@ -1637,7 +1487,7 @@ public final class SettingsScreen extends Screen {
     private void buildVoice() {
         secVoice = section("Voice", "Voice");
         LinearLayout body = secVoice.body;
-        readAloud = toggleRow(body, "Read replies aloud", "Speaks each reply as it streams, using Android's voice.",
+        readAloud = kit.toggleRow(body, "Read replies aloud", "Speaks each reply as it streams, using Android's voice.",
                 new Widgets.Toggle.OnChange() {
                     @Override
                     public void changed(boolean on) {
@@ -1645,8 +1495,19 @@ public final class SettingsScreen extends Screen {
                         refreshVoice();
                     }
                 }, null);
-        sep(body);
-        TextView[] rh = sliderHead(body, "Speech rate", null, null);
+        kit.sep(body);
+        handsFree = kit.toggleRow(body, "Hands-free conversation", "After each spoken reply, OMNI listens again — "
+                        + "talk without touching the phone. The headset in Comms is the same switch.",
+                new Widgets.Toggle.OnChange() {
+                    @Override
+                    public void changed(boolean on) {
+                        e.settings.setHandsFree(on);
+                        e.log("info", "Hands-free conversation · " + (on ? "ON" : "OFF"));
+                        refreshVoice();
+                    }
+                }, null);
+        kit.sep(body);
+        TextView[] rh = kit.sliderHead(body, "Speech rate", null, null);
         rateValue = rh[0];
         rateSlider = new SettingsWidgets.Slider(a, t, 0.5f, 2f, 0.05f, 6);
         rateSlider.setMarker(1f);
@@ -1663,33 +1524,135 @@ public final class SettingsScreen extends Screen {
             }
         });
         body.addView(rateSlider, sliderLp());
-        scaleRow(body, "0.5×", null, "2.0×");
+        kit.scaleRow(body, "0.5×", null, "2.0×");
         LinearLayout row = ui.hbox();
         row.setPadding(0, ui.dp(10), 0, 0);
-        row.addView(bigButton("Test voice", IconDrawable.PLAY, Ui.SECONDARY, "Test voice", new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                e.speakNow(TEST_LINE);
-            }
-        }));
-        TextView hint = ui.dim("Plays a line at the current rate.", 12);
-        hint.setPadding(ui.dp(12), 0, 0, 0);
-        row.addView(hint, Ui.weight(1));
+        row.addView(kit.bigButton("Test voice", IconDrawable.PLAY, Ui.SECONDARY, "Test voice",
+                new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        testVoice();
+                    }
+                }));
+        voiceHint = ui.dim("", 12);
+        voiceHint.setPadding(ui.dp(12), 0, 0, 0);
+        row.addView(voiceHint, Ui.weight(1));
         body.addView(row, Ui.fillW());
+        voiceNotice = kit.notice(body);
+        LinearLayout fix = ui.hbox();
+        fix.setPadding(ui.dp(23), ui.dp(6), 0, 0);
+        fix.addView(kit.smallButton("Voice settings", 0, Ui.SECONDARY, "Open voice settings",
+                new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        openSystemScreen(new Intent("com.android.settings.TTS_SETTINGS"),
+                                "Open Android Settings › Accessibility › Text-to-speech output.");
+                    }
+                }));
+        fix.setVisibility(View.GONE);
+        body.addView(fix, Ui.fillW());
+        voiceFix = fix;
+    }
+
+    private void testVoice() {
+        e.speakNow(TEST_LINE);
+        // The text-to-speech engine starts in the background: look again once it has had a moment.
+        voiceHint.removeCallbacks(voiceRecheck);
+        for (int ms : VOICE_RECHECK_MS) voiceHint.postDelayed(voiceRecheck, ms);
+        refreshVoice();
     }
 
     private void refreshVoice() {
         boolean on = e.settings.readAloud();
         readAloud.setChecked(on, false);
+        boolean hf = e.settings.handsFree();
+        handsFree.setChecked(hf, false);
         float rate = e.settings.speechRate();
-        rateSlider.bind(rate, false);
+        if (!rateSlider.isPressed()) rateSlider.bind(rate, false);
         rateValue.setText(String.format(Locale.US, "%.2f×", rate));
-        setStatus(secVoice, (on ? "Read-aloud on" : "Read-aloud off") + " · " + String.format(Locale.US, "%.2f×", rate),
-                on ? (t.hud ? t.engaged : t.ok) : t.faint);
+        boolean available = e.speechAvailable();
+        voiceShownAvailable = available;
+        if (available) {
+            kit.hide(voiceNotice);
+            voiceFix.setVisibility(View.GONE);
+        } else {
+            kit.show(voiceNotice, "This phone has no working text-to-speech voice, so OMNI can't speak. Install or "
+                    + "turn on a voice in Android's text-to-speech settings, then test again.", t.warn);
+            voiceFix.setVisibility(View.VISIBLE);
+        }
+        voiceHint.setText(a.isSpeaking() ? "Speaking…" : "Plays a line at the current rate.");
+        String s = (on ? "Read-aloud on" : "Read-aloud off") + (hf ? " · hands-free" : "") + " · "
+                + String.format(Locale.US, "%.2f×", rate);
+        if (!available) setStatus(secVoice, "No voice · " + (on ? "read-aloud on" : "read-aloud off"), t.warn);
+        else setStatus(secVoice, s, on || hf ? (t.hud ? t.engagedInk : t.ok) : t.dim);
     }
 
     // ------------------------------------------------------------------
-    // 8 · PC bridge
+    // 8 · Notifications
+    // ------------------------------------------------------------------
+
+    private void buildNotifications() {
+        secNotify = section("Notifications", "Notifications");
+        LinearLayout body = secNotify.body;
+        notifyToggle = kit.toggleRow(body, "Background notifications", "When a reply, a model download or a timer "
+                        + "finishes while OmniDeck is in the background.",
+                new Widgets.Toggle.OnChange() {
+                    @Override
+                    public void changed(boolean on) {
+                        e.settings.setNotifications(on);
+                        e.log("info", "Background notifications · " + (on ? "ON" : "OFF"));
+                        // Android 13+ asks for permission the first time (a no-op once granted).
+                        if (on) a.ensureNotificationPermission();
+                        refreshNotifications();
+                    }
+                }, null);
+        notifyNotice = kit.notice(body);
+        LinearLayout fix = ui.hbox();
+        fix.setPadding(ui.dp(23), ui.dp(8), 0, ui.dp(2));
+        fix.addView(kit.smallButton("Open Android settings", IconDrawable.SETTINGS, Ui.SECONDARY,
+                "Open notification settings", new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        openNotificationSettings();
+                    }
+                }));
+        fix.setVisibility(View.GONE);
+        body.addView(fix, Ui.fillW());
+        notifyFix = fix;
+    }
+
+    private void openNotificationSettings() {
+        Intent i;
+        if (Build.VERSION.SDK_INT >= 26) {
+            // Settings.ACTION_APP_NOTIFICATION_SETTINGS / EXTRA_APP_PACKAGE (API 26).
+            i = new Intent("android.settings.APP_NOTIFICATION_SETTINGS")
+                    .putExtra("android.provider.extra.APP_PACKAGE", a.getPackageName());
+        } else {
+            i = new Intent("android.settings.APPLICATION_DETAILS_SETTINGS",
+                    Uri.fromParts("package", a.getPackageName(), null));
+        }
+        openSystemScreen(i, "Open Android Settings › Apps › OmniDeck › Notifications.");
+    }
+
+    private void refreshNotifications() {
+        if (notifyToggle == null) return;
+        boolean on = e.settings.notifications();
+        notifyToggle.setChecked(on, false);
+        String why = on ? e.notificationsBlocked() : "";
+        if (why.length() > 0) {
+            kit.show(notifyNotice, why + " Until then OmniDeck can't tell you when something finishes in the "
+                    + "background.", t.warn);
+            notifyFix.setVisibility(View.VISIBLE);
+        } else {
+            kit.hide(notifyNotice);
+            notifyFix.setVisibility(View.GONE);
+        }
+        setStatus(secNotify, !on ? "Off" : why.length() > 0 ? "Blocked" : "On",
+                !on ? t.dim : why.length() > 0 ? t.warn : t.ok);
+    }
+
+    // ------------------------------------------------------------------
+    // 9 · PC bridge
     // ------------------------------------------------------------------
 
     private void buildBridge() {
@@ -1709,29 +1672,44 @@ public final class SettingsScreen extends Screen {
         bridgeDetail.setPadding(0, ui.dp(3), 0, 0);
         st.addView(bridgeDetail);
         status.addView(st, Ui.weight(1));
-        status.addView(smallButton("Check", IconDrawable.REFRESH, Ui.SECONDARY, "Check bridge",
+        status.addView(kit.smallButton("Check", IconDrawable.REFRESH, Ui.SECONDARY, "Check bridge",
                 new View.OnClickListener() {
                     @Override
                     public void onClick(View v) {
+                        commitBridgeHost();
+                        commitPort();
                         checkBridge(true);
                     }
                 }));
         body.addView(status, Ui.fillW());
-        sep(body);
+        kit.sep(body);
 
-        portField = ui.numberField("", String.valueOf(com.omnideck.mobile.core.BridgeClient.DEFAULT_PORT));
+        // Address : port — where LaunchBridge listens.
+        hostLine = kit.heading(body, "Bridge address", "");
+        LinearLayout addr = ui.hbox();
+        hostField = monoField("", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI
+                | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS, "Bridge address", new Runnable() {
+            @Override
+            public void run() {
+                commitBridgeHost();
+            }
+        });
+        hostEdits = new SettingsWidgets.EditTracker(hostField);
+        addr.addView(hostField, Ui.weight(1));
+        TextView colon = ui.readout(":", 16, t.dim);
+        colon.setPadding(ui.dp(7), 0, ui.dp(7), 0);
+        addr.addView(colon);
+        portField = ui.numberField("", String.valueOf(BridgeClient.DEFAULT_PORT));
         portField.setTypeface(t.mono);
         portField.setContentDescription("Bridge port");
         portField.setImeOptions(EditorInfo.IME_ACTION_DONE);
         portField.setSingleLine(true);
-        portField.setMinWidth(ui.dp(92));
+        portField.setMinWidth(ui.dp(88));
         portField.setOnEditorActionListener(new TextView.OnEditorActionListener() {
             @Override
             public boolean onEditorAction(TextView v, int actionId, KeyEvent event) {
                 commitPort();
-                portField.clearFocus();
-                column.requestFocus();
-                hideKeyboard(v);
+                SettingsWidgets.parkFocus(portField);
                 return true;
             }
         });
@@ -1741,160 +1719,227 @@ public final class SettingsScreen extends Screen {
                 if (!has) commitPort();
             }
         });
-        Line port = line("Port", "LaunchBridge's port on the PC.", portField);
-        body.addView(port.row, Ui.fillW());
-        sep(body);
-        heading(body, "Pairing token", "Lets this phone control the PC. Pair now fetches one for you.");
-        LinearLayout tokenBox = ui.hbox();
-        tokenBox.setBackground(ui.rounded(t.input, t.edge, 8));
-        tokenField = new EditText(a);
-        tokenField.setBackground(null);
-        tokenField.setTextColor(t.ink);
-        tokenField.setHintTextColor(t.faint);
-        tokenField.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
-        tokenField.setHint("Not paired");
-        tokenField.setSingleLine(true);
-        tokenField.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD
-                | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
-        tokenField.setTypeface(t.mono);
-        tokenField.setImeOptions(EditorInfo.IME_ACTION_DONE);
-        tokenField.setPadding(ui.dp(12), ui.dp(10), ui.dp(4), ui.dp(10));
-        tokenField.setContentDescription("Bridge token");
-        tokenField.setOnFocusChangeListener(new View.OnFocusChangeListener() {
+        portEdits = new SettingsWidgets.EditTracker(portField);
+        addr.addView(portField, new LinearLayout.LayoutParams(ui.dp(92), ViewGroup.LayoutParams.WRAP_CONTENT));
+        body.addView(addr, Ui.fillW());
+        hostNotice = kit.notice(body);
+        View rule = kit.sep(body);
+        ((LinearLayout.LayoutParams) rule.getLayoutParams()).topMargin = ui.dp(14);
+
+        kit.heading(body, "Pairing token", "Lets this phone control the PC. Pair now fetches one for you.");
+        tokenBox = new SettingsWidgets.SecretField(ui, "token", "Not paired", true);
+        tokenBox.field.setContentDescription("Bridge token");
+        tokenBox.setOnCommit(new SettingsWidgets.SecretField.OnCommit() {
             @Override
-            public void onFocusChange(View v, boolean has) {
-                if (!has) commitToken();
-            }
-        });
-        tokenField.setOnEditorActionListener(new TextView.OnEditorActionListener() {
-            @Override
-            public boolean onEditorAction(TextView v, int actionId, KeyEvent event) {
+            public void commit() {
                 commitToken();
-                tokenField.clearFocus();
-                column.requestFocus();
-                hideKeyboard(v);
-                return true;
             }
         });
-        tokenBox.addView(tokenField, Ui.weight(1));
-        eyeBtn = new ImageView(a);
-        eyeBtn.setScaleType(ImageView.ScaleType.CENTER);
-        TypedValue tv = new TypedValue();
-        a.getTheme().resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, tv, true);
-        if (tv.resourceId != 0) eyeBtn.setBackground(a.getDrawable(tv.resourceId));
-        eyeBtn.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                ui.tick(v);
-                setTokenVisible(!tokenVisible);
-            }
-        });
-        tokenBox.addView(eyeBtn, new LinearLayout.LayoutParams(ui.dp(40), ui.dp(40)));
-        ImageView paste = ui.iconButton(IconDrawable.CLIPBOARD, "Paste token", t.dim, new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                pasteToken();
-            }
-        });
-        tokenBox.addView(paste, new LinearLayout.LayoutParams(ui.dp(40), ui.dp(40)));
         body.addView(tokenBox, Ui.fillW());
-        setTokenVisible(false);
 
         LinearLayout btns = ui.hbox();
         btns.setPadding(0, ui.dp(12), 0, 0);
-        pairBtn = bigButton("Pair now", IconDrawable.LINK, Ui.PRIMARY, "Pair now", new View.OnClickListener() {
+        View.OnClickListener pairClick = new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 pair();
             }
-        });
-        btns.addView(pairBtn);
+        };
+        // Unpaired, pairing is the one thing to do (primary); re-pairing is maintenance (secondary).
+        pairNowBtn = kit.bigButton("Pair now", IconDrawable.LINK, Ui.PRIMARY, "Pair now", pairClick);
+        btns.addView(pairNowBtn);
+        pairAgainBtn = kit.bigButton("Pair again", IconDrawable.LINK, Ui.SECONDARY, "Pair again", pairClick);
+        btns.addView(pairAgainBtn);
         btns.addView(ui.space(8, 1));
-        forgetBtn = bigButton("Forget pairing", 0, Ui.DANGER, "Forget pairing", new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                forgetPairing();
-            }
-        });
+        forgetBtn = kit.bigButton("Forget pairing", IconDrawable.CLOSE, Ui.DANGER, "Forget pairing",
+                new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        forgetPairing();
+                    }
+                });
         btns.addView(forgetBtn);
         body.addView(btns, Ui.fillW());
-        pairStatus = ui.dim("", 12.5f);
-        pairStatus.setPadding(0, ui.dp(10), 0, 0);
-        pairStatus.setVisibility(View.GONE);
-        body.addView(pairStatus, Ui.fillW());
+        pairStatus = kit.notice(body);
+
+        View rule2 = kit.sep(body);
+        ((LinearLayout.LayoutParams) rule2.getLayoutParams()).topMargin = ui.dp(14);
+        kit.heading(body, "Wake-on-LAN", "Wakes the PC from sleep. The phone learns the PC's MAC address once "
+                + "paired; Wake-on-LAN must be on in the PC's BIOS and network adapter.");
+        LinearLayout wol = ui.hbox();
+        macField = monoField("AA:BB:CC:DD:EE:FF", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+                | InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS, "PC MAC address", new Runnable() {
+            @Override
+            public void run() {
+                commitMac();
+            }
+        });
+        macEdits = new SettingsWidgets.EditTracker(macField);
+        wol.addView(macField, Ui.weight(1));
+        wol.addView(ui.space(8, 1));
+        wakeBtn = kit.bigButton("Wake PC", IconDrawable.POWER, Ui.SECONDARY, "Wake PC", new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                wakePc();
+            }
+        });
+        wol.addView(wakeBtn);
+        body.addView(wol, Ui.fillW());
+        wolStatus = kit.notice(body);
     }
 
-    private void setTokenVisible(boolean on) {
-        tokenVisible = on;
-        int sel = tokenField.getSelectionEnd();
-        tokenField.setTransformationMethod(on ? null : PasswordTransformationMethod.getInstance());
-        tokenField.setTypeface(t.mono);
-        if (sel >= 0) tokenField.setSelection(Math.min(sel, tokenField.getText().length()));
-        eyeBtn.setImageDrawable(new SettingsWidgets.Glyph(on ? SettingsWidgets.Glyph.EYE_OFF : SettingsWidgets.Glyph.EYE,
-                t.dim, ui.dp(20)));
-        eyeBtn.setContentDescription(on ? "Hide token" : "Show token");
+    /** The bridge's (paired, reachable) state; a status line is dropped once this changes under it. */
+    private String bridgeKey() {
+        return e.bridgePaired() + "/" + e.bridgeOnline() + "/" + e.bridgeHost() + ":" + e.settings.bridgePort();
     }
 
-    private void pasteToken() {
-        ClipboardManager cm = (ClipboardManager) a.getSystemService(Context.CLIPBOARD_SERVICE);
-        ClipData clip = cm == null ? null : cm.getPrimaryClip();
-        CharSequence s = clip != null && clip.getItemCount() > 0 ? clip.getItemAt(0).coerceToText(a) : null;
-        if (s == null || s.toString().trim().length() == 0) {
-            ui.toast("The clipboard is empty.");
-            return;
-        }
-        tokenField.setText(s.toString().trim());
-        commitToken();
-        ui.toast("Token pasted");
+    private void showPairStatus(String s, int color) {
+        kit.show(pairStatus, s, color);
+        pairStatus.key = bridgeKey();
     }
 
     private void commitPort() {
-        String raw = portField.getText().toString().trim();
+        if (!portEdits.edited()) return;
+        String raw = portEdits.text();
         int cur = e.settings.bridgePort();
         int v;
         try {
-            v = raw.length() == 0 ? com.omnideck.mobile.core.BridgeClient.DEFAULT_PORT : Integer.parseInt(raw);
+            v = raw.length() == 0 ? BridgeClient.DEFAULT_PORT : Integer.parseInt(raw);
         } catch (NumberFormatException ex) {
             v = -1;
         }
         if (v <= 0 || v >= 65536) {
             ui.toast("Ports run from 1 to 65535.");
-            portField.setText(String.valueOf(cur));
+            portEdits.bind(String.valueOf(cur));
             return;
         }
+        portEdits.bind(String.valueOf(v));
         if (v != cur) {
             e.settings.setBridgePort(v);
             e.log("info", "PC bridge port · " + v);
             saved();
+            a.onStateChanged(); // the PC tab follows
             checkBridge(false);
         }
-        portField.setText(String.valueOf(v));
         refreshBridge();
     }
 
-    private void commitToken() {
-        String v = tokenField.getText().toString().trim();
-        if (!v.equals(e.settings.bridgeToken())) {
-            e.settings.setBridgeToken(v);
-            saved();
-            refreshBridge();
+    /**
+     * Saves the typed bridge address: blank = the PC running the AI. A
+     * "host:port" also sets the port. The token stays bound to the PC that
+     * issued it, so a different PC shows as not paired until paired again.
+     */
+    private void commitBridgeHost() {
+        if (!hostEdits.edited()) return;
+        String raw = hostEdits.text();
+        String host = "";
+        int port = e.settings.bridgePort();
+        if (raw.length() > 0) {
+            HostPort hp = HostPort.parse(raw, port);
+            if (hp == null || hp.https) {
+                // Kept in the field and not saved, with the reason under it.
+                kit.show(hostNotice, hp == null ? "That isn't an address — type the PC's IP or name, e.g. "
+                        + "192.168.1.20." : "LaunchBridge speaks plain http on your network: leave out https://.",
+                        t.danger);
+                hostNotice.key = INVALID;
+                return;
+            }
+            host = hp.host;
+            port = hp.port;
         }
+        kit.hide(hostNotice);
+        hostEdits.bind(host);
+        boolean changed = false;
+        if (!host.equals(e.settings.bridgeHost())) {
+            e.settings.setBridgeHost(host);
+            e.log("info", host.length() == 0 ? "PC bridge · same PC as the AI" : "PC bridge address · " + host);
+            changed = true;
+        }
+        if (port != e.settings.bridgePort()) {
+            e.settings.setBridgePort(port);
+            portEdits.bind(String.valueOf(port));
+            changed = true;
+        }
+        if (changed) {
+            saved();
+            a.onStateChanged(); // the PC tab follows the new address
+            checkBridge(false);
+        }
+        refreshBridge();
+    }
+
+    /** Saves the typed token bound to the bridge in use ("" unpairs); only a real edit is saved. */
+    private void commitToken() {
+        SettingsWidgets.EditTracker ed = tokenBox.edits;
+        if (!ed.edited()) return;
+        String v = ed.text();
+        ed.settled();
+        if (v.equals(e.settings.bridgeToken())) return;
+        e.setBridgeToken(v);
+        e.log(v.length() == 0 ? "warn" : "info", v.length() == 0 ? "PC bridge pairing removed" : "PC bridge token set");
+        saved();
+        refreshBridge();
+    }
+
+    private void commitMac() {
+        if (!macEdits.edited()) return;
+        String raw = macEdits.text();
+        String mac = "";
+        if (raw.length() > 0) {
+            mac = WakeOnLan.normalize(raw);
+            if (mac == null) {
+                // Kept in the field (one typo shouldn't cost the whole address) and not saved.
+                kit.show(wolStatus, "“" + raw + "” isn't a MAC address — it looks like AA:BB:CC:DD:EE:FF.", t.danger);
+                wolStatus.key = INVALID;
+                return;
+            }
+        }
+        macEdits.bind(mac);
+        if (INVALID.equals(wolStatus.key)) kit.hide(wolStatus);
+        if (!mac.equals(e.settings.pcMac())) {
+            e.settings.setPcMac(mac);
+            e.log("info", mac.length() == 0 ? "Wake-on-LAN · MAC cleared" : "Wake-on-LAN · MAC " + mac);
+            saved();
+        }
+        refreshBridge();
+    }
+
+    private void wakePc() {
+        commitMac();
+        if (waking || macEdits.edited()) return; // an invalid MAC is on show
+        waking = true;
+        SettingsKit.enable(wakeBtn, false);
+        kit.show(wolStatus, "Sending the wake-up packet…", t.dim);
+        e.wakePc(new Engine.Callback<String>() {
+            @Override
+            public void done(String v, String error) {
+                waking = false;
+                if (!isBuilt()) return;
+                if (error != null) kit.show(wolStatus, error, t.warn);
+                else kit.show(wolStatus, v, t.ok);
+                refreshBridge();
+            }
+        });
     }
 
     private void pair() {
         if (pairing) return;
+        commitBridgeHost();
         commitPort();
+        String host = e.bridgeHost();
         pairing = true;
-        enable(pairBtn, false);
-        showPairStatus("Pairing with LaunchBridge…", t.dim);
+        refreshBridge();
+        showPairStatus("Pairing with LaunchBridge" + (host.length() > 0 ? " at " + host + ":"
+                + e.settings.bridgePort() : "") + "…", t.dim);
         e.bridgePair(new Engine.Callback<String>() {
             @Override
             public void done(String token, String error) {
                 pairing = false;
+                if (!isBuilt()) return;
                 if (error != null) {
                     showPairStatus("Pairing failed — " + error, t.danger);
                 } else {
-                    tokenField.setText(token);
+                    tokenBox.edits.bind(token);
                     showPairStatus("Paired. The PC tab and /open, /vol, /sys and /shot now control your PC.", t.ok);
                     saved();
                 }
@@ -1908,34 +1953,34 @@ public final class SettingsScreen extends Screen {
                 new Runnable() {
                     @Override
                     public void run() {
-                        e.settings.setBridgeToken("");
-                        tokenField.setText("");
+                        e.setBridgeToken("");
+                        tokenBox.edits.bind("");
                         e.log("warn", "PC bridge pairing removed");
-                        showPairStatus("Pairing removed.", t.faint);
+                        showPairStatus("Pairing removed.", t.dim);
                         saved();
                         refreshBridge();
                     }
                 });
     }
 
-    private void showPairStatus(String s, int color) {
-        pairStatus.setText(s);
-        pairStatus.setTextColor(color);
-        pairStatus.setVisibility(View.VISIBLE);
-    }
-
     /** Asks LaunchBridge if it's there (no auth needed) and updates the status line. */
     private void checkBridge(final boolean fromUser) {
-        String host = bridgeHost();
+        String host = e.bridgeHost();
         if (host.length() == 0) {
-            if (fromUser) showPairStatus("Connect to your AI first — the bridge runs on the same PC.", t.warn);
+            if (fromUser) showPairStatus("Enter the bridge address above, or connect to your AI — the bridge "
+                    + "usually runs on the same PC.", t.warn);
             return;
         }
-        if (fromUser) showPairStatus("Checking " + host + ":" + e.settings.bridgePort() + "…", t.dim);
+        if (fromUser) {
+            checking = true;
+            showPairStatus("Checking " + host + ":" + e.settings.bridgePort() + "…", t.dim);
+        }
         e.bridgeHealth(new Engine.Callback<org.json.JSONObject>() {
             @Override
             public void done(org.json.JSONObject v, String error) {
+                if (!isBuilt()) return;
                 if (fromUser) {
+                    checking = false;
                     if (error != null) {
                         showPairStatus("No answer — " + error, t.danger);
                     } else {
@@ -1945,13 +1990,9 @@ public final class SettingsScreen extends Screen {
                     }
                 }
                 refreshBridge();
+                refreshTools();
             }
         });
-    }
-
-    private String bridgeHost() {
-        ServerInfo srv = e.server();
-        return srv != null ? srv.host : e.settings.lastHost();
     }
 
     private void refreshBridge() {
@@ -1976,53 +2017,180 @@ public final class SettingsScreen extends Screen {
             c = t.danger;
         } else {
             s = "Not paired";
-            c = t.faint;
+            c = t.dim;
         }
         bridgeState.setText(t.hud ? s.toUpperCase(Locale.US) : s);
         bridgeState.setTextColor(c);
         bridgeDot.setColor(c);
         bridgeDot.setPulsing(isShown() && paired && Boolean.TRUE.equals(online) && !e.settings.reduceMotion());
-        String host = bridgeHost();
-        bridgeDetail.setText(host.length() > 0 ? "LaunchBridge at " + host + ":" + e.settings.bridgePort()
-                : "Runs on the same PC as your AI — connect to it first.");
-        if (!portField.hasFocus()) portField.setText(String.valueOf(e.settings.bridgePort()));
-        if (!tokenField.hasFocus() && !tokenField.getText().toString().equals(e.settings.bridgeToken())) {
-            tokenField.setText(e.settings.bridgeToken());
+        String host = e.bridgeHost();
+        String other = e.settings.bridgeTokenHost();
+        if (host.length() == 0) {
+            bridgeDetail.setText("Enter the PC's address below, or connect to your AI — the bridge usually runs on "
+                    + "the same PC.");
+        } else if (!paired && e.settings.bridgeToken().length() > 0 && other.length() > 0) {
+            bridgeDetail.setText("Paired with the bridge at " + other + ", not " + host + " — pair again for this PC.");
+        } else {
+            bridgeDetail.setText("LaunchBridge at " + host + ":" + e.settings.bridgePort());
         }
-        enable(pairBtn, !pairing);
-        buttonText(pairBtn, pairing ? "Pairing…" : paired ? "Pair again" : "Pair now");
-        enable(forgetBtn, paired);
-        setStatus(secBridge, paired ? "Paired" : "Not paired", paired ? t.ok : t.faint);
+        String aiHost = aiHost();
+        kit.setSub(hostLine, "Leave empty to use the PC running your AI"
+                + (aiHost.length() > 0 ? " (" + aiHost + ")" : "") + ". The port is 8765 unless you changed it.");
+        hostField.setHint(aiHost.length() > 0 ? aiHost : "PC address");
+        if (!hostField.hasFocus()) hostEdits.bind(e.settings.bridgeHost());
+        if (!portField.hasFocus()) portEdits.bind(String.valueOf(e.settings.bridgePort()));
+        if (!tokenBox.field.hasFocus()) tokenBox.edits.bind(e.settings.bridgeToken());
+        if (!macField.hasFocus()) macEdits.bind(e.settings.pcMac());
+        pairNowBtn.setVisibility(paired ? View.GONE : View.VISIBLE);
+        pairAgainBtn.setVisibility(paired ? View.VISIBLE : View.GONE);
+        TextView pb = paired ? pairAgainBtn : pairNowBtn;
+        SettingsKit.enable(pb, !pairing);
+        kit.relabel(pb, pairing ? "Pairing…" : paired ? "Pair again" : "Pair now");
+        SettingsKit.enable(forgetBtn, paired);
+        SettingsKit.enable(wakeBtn, !waking);
+        // A result line describes the bridge as it was; once that changes, it goes.
+        if (pairStatus.isShowing() && !pairing && !checking && !bridgeKey().equals(pairStatus.key)) {
+            kit.hide(pairStatus);
+        }
+        setStatus(secBridge, paired ? (Boolean.FALSE.equals(online) ? "Paired · unreachable" : "Paired") : "Not paired",
+                paired ? (Boolean.FALSE.equals(online) ? t.warn : t.ok) : t.dim);
+    }
+
+    /** The PC running the AI (the bridge's default host): the live link, else the last one. */
+    private String aiHost() {
+        ServerInfo srv = e.server();
+        return srv != null ? srv.host : e.settings.lastHost();
     }
 
     // ------------------------------------------------------------------
-    // 9 · Privacy & data
+    // 10 · PC tools (the AI acting on the PC)
+    // ------------------------------------------------------------------
+
+    private void buildTools() {
+        secTools = section("PC tools", "PC tools");
+        LinearLayout body = secTools.body;
+        aiTools = kit.toggleRow(body, "Let OMNI use PC tools", "In chat, OMNI can check the PC's vitals, set the "
+                        + "volume, open apps and more. Needs a model that supports tools and a paired PC bridge.",
+                new Widgets.Toggle.OnChange() {
+                    @Override
+                    public void changed(boolean on) {
+                        e.settings.setAiTools(on);
+                        e.log("info", "PC tools for OMNI · " + (on ? "ON" : "OFF"));
+                        refreshTools();
+                    }
+                }, null);
+        kit.sep(body);
+        confirmActions = kit.toggleRow(body, "Ask before PC actions", "OMNI checks with you before anything changes "
+                        + "on the PC — opening apps, the volume, the clipboard, locking it.",
+                new Widgets.Toggle.OnChange() {
+                    @Override
+                    public void changed(boolean on) {
+                        e.settings.setConfirmPcActions(on);
+                        e.log(on ? "info" : "warn", "Ask before PC actions · " + (on ? "ON" : "OFF"));
+                        refreshTools();
+                    }
+                }, null);
+        TextView head = ui.label("Readiness");
+        head.setPadding(0, ui.dp(12), 0, ui.dp(8));
+        body.addView(head, Ui.fillW());
+        readiness = ui.vbox();
+        readiness.setBackground(SettingsWidgets.well(ui));
+        readiness.setPadding(0, ui.dp(3), 0, ui.dp(3));
+        toolModel = kit.check(readiness, "Model");
+        toolBridge = kit.check(readiness, "Bridge");
+        body.addView(readiness, Ui.fillW());
+    }
+
+    private void refreshTools() {
+        if (aiTools == null) return;
+        boolean on = e.settings.aiTools();
+        boolean ask = e.settings.confirmPcActions();
+        aiTools.setChecked(on, false);
+        confirmActions.setChecked(ask, false);
+        // Model: can it call tools? (/api/show capabilities, fetched once per model while shown)
+        boolean modelOk = false;
+        String model = e.currentModel();
+        if (e.state() != Engine.State.ONLINE) {
+            kit.setCheck(toolModel, "Connect to your AI to check its model.", t.dim);
+        } else if (model.length() == 0) {
+            kit.setCheck(toolModel, "No model chosen yet.", t.warn);
+        } else {
+            OllamaClient.ModelDetails d = e.details(model);
+            if (d == null) {
+                kit.setCheck(toolModel, withIdent("Checking ", model, "…"), t.dim);
+                askCapabilities(model);
+            } else if (d.supports("tools")) {
+                modelOk = true;
+                kit.setCheck(toolModel, withIdentBody(model, " can call tools."), t.ok);
+            } else {
+                kit.setCheck(toolModel, withIdentBody(model, " can't call tools — choose one that can "
+                        + "(qwen3, llama3.1…)."), t.warn);
+            }
+        }
+        boolean paired = e.bridgePaired();
+        Boolean online = e.bridgeOnline();
+        boolean bridgeOk = paired && !Boolean.FALSE.equals(online);
+        if (!paired) kit.setCheck(toolBridge, "Not paired — pair it in PC bridge above.", t.warn);
+        else if (Boolean.FALSE.equals(online)) kit.setCheck(toolBridge, "Paired, but the PC isn't answering.", t.warn);
+        else kit.setCheck(toolBridge, Boolean.TRUE.equals(online) ? "Paired · online." : "Paired.", t.ok);
+        readiness.setAlpha(on ? 1f : 0.55f);
+        String s = on ? (ask ? "On · asks first" : "On · acts directly") : "Off";
+        setStatus(secTools, s, !on ? t.dim : modelOk && bridgeOk ? (ask ? t.ok : t.engagedInk) : t.warn);
+    }
+
+    /** "model" + body text, the model in mono (the Check line is set in the body face). */
+    private CharSequence withIdentBody(String model, String after) {
+        SpannableStringBuilder sb = new SpannableStringBuilder();
+        sb.append(ui.mono(model));
+        sb.append(after);
+        return sb;
+    }
+
+    private void askCapabilities(final String model) {
+        if (!isShown() || !toolsAsked.add(model)) return;
+        e.fetchDetails(model, new Engine.Callback<OllamaClient.ModelDetails>() {
+            @Override
+            public void done(OllamaClient.ModelDetails d, String error) {
+                if (!isBuilt()) return;
+                if (d == null && model.equals(e.currentModel())) {
+                    kit.setCheck(toolModel, withIdentBody(model, " — couldn't read its capabilities."), t.dim);
+                    return;
+                }
+                refreshTools();
+            }
+        });
+    }
+
+    // ------------------------------------------------------------------
+    // 11 · Privacy & data
     // ------------------------------------------------------------------
 
     private void buildPrivacy() {
         secPrivacy = section("Privacy & data", "Privacy");
         LinearLayout body = secPrivacy.body;
-        incognito = toggleRow(body, "Incognito", "New chats and replies aren't saved on this phone while it's on.",
-                new Widgets.Toggle.OnChange() {
-                    @Override
-                    public void changed(boolean on) {
-                        e.settings.setIncognito(on);
-                        if (!on) e.save();
-                        e.log(on ? "warn" : "info", "Incognito · " + (on ? "ON" : "OFF"));
-                        refreshPrivacy();
-                    }
-                }, null);
-        sep(body);
-        navRow(body, "Export current chat", "Share this conversation as Markdown.", IconDrawable.SHARE, new Runnable() {
+        SettingsKit.Line[] il = new SettingsKit.Line[1];
+        incognito = kit.toggleRow(body, "Incognito", "", new Widgets.Toggle.OnChange() {
             @Override
-            public void run() {
-                a.commander().exportChat();
+            public void changed(boolean on) {
+                if (on) e.settings.setIncognito(true);
+                else leaveIncognito();
+                e.log(on ? "warn" : "info", "Incognito · " + (on ? "ON" : "OFF"));
+                refreshPrivacy();
             }
-        });
-        sep(body);
-        historyLine = line("Saved chats", "Counting…", null);
+        }, il);
+        incognitoLine = il[0];
+        kit.sep(body);
+        kit.navRow(body, "Export current chat", "Share this conversation as Markdown.", IconDrawable.SHARE,
+                new Runnable() {
+                    @Override
+                    public void run() {
+                        a.commander().exportChat();
+                    }
+                });
+        kit.sep(body);
+        historyLine = kit.line("Saved chats", "Counting…", null);
         body.addView(historyLine.row, Ui.fillW());
-        clearBtn = bigButton("Clear all chat history", IconDrawable.TRASH, Ui.DANGER, "Clear all chat history",
+        clearBtn = kit.bigButton("Clear all chat history", IconDrawable.TRASH, Ui.DANGER, "Clear all chat history",
                 new View.OnClickListener() {
                     @Override
                     public void onClick(View v) {
@@ -2032,11 +2200,31 @@ public final class SettingsScreen extends Screen {
         body.addView(clearBtn, Ui.fillW());
     }
 
+    /**
+     * Incognito off: whatever was said while it was on is never written. The
+     * open chat may hold such messages, so it is closed WITHOUT saving (new
+     * chat while incognito is still on — Engine.save skips it), then saving
+     * resumes. An empty chat has nothing to hide and stays.
+     */
+    private void leaveIncognito() {
+        boolean close = !e.conversation().isEmpty();
+        if (close) e.newChat();
+        e.settings.setIncognito(false);
+        if (close) ui.toast("Incognito off · the open chat was closed without saving.");
+    }
+
     private void confirmClearHistory() {
-        String what = savedChats > 0 ? "all " + savedChats + (savedChats == 1 ? " saved chat" : " saved chats")
-                : "every saved chat";
-        ui.confirm("Clear all chat history?", "Deletes " + what + " on this phone, including the open one. "
-                + "This can't be undone.", "Delete all", new Runnable() {
+        boolean open = !e.conversation().isEmpty();
+        String msg;
+        if (savedChats > 0) {
+            msg = "Deletes " + (savedChats == 1 ? "the saved chat" : "all " + savedChats + " saved chats")
+                    + " on this phone and clears the open chat. This can't be undone.";
+        } else if (savedChats == 0 && open) {
+            msg = "Clears the open chat. Nothing else is saved on this phone.";
+        } else {
+            msg = "Deletes every saved chat on this phone and clears the open chat. This can't be undone.";
+        }
+        ui.confirm("Clear all chat history?", msg, "Delete all", new Runnable() {
             @Override
             public void run() {
                 clearHistory();
@@ -2044,7 +2232,9 @@ public final class SettingsScreen extends Screen {
         });
     }
 
+    /** Deletes every saved chat, then starts a fresh one, so the open chat goes too (saved or not). */
     private void clearHistory() {
+        final boolean open = !e.conversation().isEmpty();
         e.listChats(new Engine.Callback<List<ConversationStore.Entry>>() {
             @Override
             public void done(List<ConversationStore.Entry> entries, String error) {
@@ -2054,9 +2244,11 @@ public final class SettingsScreen extends Screen {
                 }
                 e.newChat();
                 e.log("warn", "Chat history cleared · " + n + (n == 1 ? " chat" : " chats"));
-                ui.toast(n == 0 ? "No saved chats to clear." : "Deleted " + n + (n == 1 ? " chat." : " chats."));
+                ui.toast(n > 0 ? "Deleted " + n + (n == 1 ? " chat." : " chats.")
+                        : open ? "Cleared the open chat." : "No saved chats to clear.");
                 savedChats = 0;
                 saved();
+                if (!isBuilt()) return;
                 refreshPrivacy();
                 countChats(); // queued after the deletes on the same disk thread
             }
@@ -2074,9 +2266,10 @@ public final class SettingsScreen extends Screen {
                     for (ConversationStore.Entry en : entries) msgs += en.count;
                 }
                 if (savedChats == 0) {
-                    setSub(historyLine, "None on this phone yet.");
+                    kit.setSub(historyLine, e.settings.incognito() && !e.conversation().isEmpty()
+                            ? "None saved — the open chat is incognito." : "None on this phone yet.");
                 } else {
-                    setSub(historyLine, savedChats + (savedChats == 1 ? " chat · " : " chats · ") + grouped(msgs)
+                    kit.setSub(historyLine, savedChats + (savedChats == 1 ? " chat · " : " chats · ") + grouped(msgs)
                             + (msgs == 1 ? " message" : " messages") + " stored on this phone.");
                 }
                 refreshPrivacy();
@@ -2087,12 +2280,15 @@ public final class SettingsScreen extends Screen {
     private void refreshPrivacy() {
         boolean inc = e.settings.incognito();
         incognito.setChecked(inc, false);
-        enable(clearBtn, savedChats != 0);
-        setStatus(secPrivacy, inc ? "Incognito" : "Saving chats", inc ? t.engaged : t.faint);
+        kit.setSub(incognitoLine, inc ? "On: nothing is saved. Turning it off closes the open chat without saving it."
+                : "New chats and replies aren't saved on this phone while it's on.");
+        incognitoLine.title.setTextColor(inc ? t.engagedInk : t.ink);
+        SettingsKit.enable(clearBtn, savedChats != 0 || !e.conversation().isEmpty());
+        setStatus(secPrivacy, inc ? "Incognito" : "Saving chats", inc ? t.engagedInk : t.dim);
     }
 
     // ------------------------------------------------------------------
-    // 10 · About
+    // 12 · About
     // ------------------------------------------------------------------
 
     private void buildAbout() {
@@ -2101,7 +2297,8 @@ public final class SettingsScreen extends Screen {
         LinearLayout id = ui.hbox();
         id.setPadding(0, ui.dp(10), 0, ui.dp(4));
         ImageView logo = new ImageView(a);
-        logo.setImageDrawable(new IconDrawable(IconDrawable.LOGO, t.accent, t.hud ? t.inkStrong : t.accent2, ui.dp(38)));
+        logo.setImageDrawable(new IconDrawable(IconDrawable.LOGO, t.accent, t.logoCore, ui.dp(38)));
+        logo.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
         LinearLayout.LayoutParams llp = new LinearLayout.LayoutParams(ui.dp(38), ui.dp(38));
         llp.rightMargin = ui.dp(12);
         id.addView(logo, llp);
@@ -2114,17 +2311,17 @@ public final class SettingsScreen extends Screen {
         names.addView(tag);
         id.addView(names, Ui.weight(1));
         body.addView(id, Ui.fillW());
-        aboutGrid = readoutGrid(body, new String[]{"App", "Ollama", "Android", "AI link"});
-        View gap = ui.space(1, 6);
-        body.addView(gap);
-        navRow(body, "Command reference", "Every slash command, listed in Comms.", IconDrawable.TERMINAL, new Runnable() {
-            @Override
-            public void run() {
-                runInComms("/help");
-            }
-        });
-        sep(body);
-        navRow(body, "Diagnostics", "Connection report: network, address, bridge.", IconDrawable.ACTIVITY,
+        aboutGrid = kit.readoutGrid(body, new String[]{"App", "Ollama", "Android", "AI link"});
+        body.addView(ui.space(1, 6));
+        kit.navRow(body, "Command reference", "Every slash command, listed in Comms.", IconDrawable.TERMINAL,
+                new Runnable() {
+                    @Override
+                    public void run() {
+                        runInComms("/help");
+                    }
+                });
+        kit.sep(body);
+        kit.navRow(body, "Diagnostics", "Connection report: network, address, bridge.", IconDrawable.ACTIVITY,
                 new Runnable() {
                     @Override
                     public void run() {
@@ -2143,15 +2340,13 @@ public final class SettingsScreen extends Screen {
 
     private void refreshAbout() {
         String v = a.appVersion();
-        aboutGrid[0].setText("v" + v);
+        kit.setReadout(aboutGrid[0], "v" + v, true);
         ServerInfo srv = e.server();
         boolean on = e.state() == Engine.State.ONLINE && srv != null;
-        aboutGrid[1].setText(on && srv.version.length() > 0 ? srv.version : "—");
-        aboutGrid[1].setTextColor(on ? t.ink : t.faint);
-        aboutGrid[2].setText(Build.VERSION.RELEASE + " · API " + Build.VERSION.SDK_INT);
-        aboutGrid[3].setText(on ? srv.label() : "Offline");
-        aboutGrid[3].setTextColor(on ? t.ink : t.faint);
-        setStatus(secAbout, "Build " + v, t.faint);
+        kit.setReadout(aboutGrid[1], on && srv.version.length() > 0 ? srv.version : "—", on);
+        kit.setReadout(aboutGrid[2], Build.VERSION.RELEASE + " · API " + Build.VERSION.SDK_INT, true);
+        kit.setReadout(aboutGrid[3], on ? srv.label() : "Offline", on);
+        setStatus(secAbout, "Build " + v, t.dim);
     }
 
     // ------------------------------------------------------------------
@@ -2165,56 +2360,73 @@ public final class SettingsScreen extends Screen {
         refreshModel();
         refreshPerformance();
         refreshGeneration();
-        if (!promptField.hasFocus()) {
-            String sp = e.settings.systemPrompt();
-            if (!sp.equals(promptField.getText().toString())) promptField.setText(sp);
-        }
+        if (!promptField.hasFocus()) promptEdits.bind(e.settings.systemPrompt());
         updatePromptState();
         refreshFacts();
         refreshPersonaStatus();
         refreshVoice();
+        refreshNotifications();
         refreshBridge();
+        refreshTools();
         refreshPrivacy();
         refreshAbout();
     }
 
-    /** Saves text fields that save on focus loss (the screen is closing or the activity is going away). */
+    /**
+     * Saves what the user typed into the text fields (the page is closing or
+     * the app is leaving the screen). Only real edits are written — a field
+     * still showing the value it was filled with never overwrites a change
+     * made elsewhere since. The bridge address and port go first, so a token
+     * typed at the same time is bound to the right PC.
+     */
     private void commitFields() {
         if (promptField == null) return;
-        commitPrompt();
-        String port = portField.getText().toString().trim();
-        if (!port.equals(String.valueOf(e.settings.bridgePort()))) commitPort();
+        commitBridgeHost();
+        commitPort();
         commitToken();
+        commitMac();
+        commitApiKey();
+        commitPrompt();
     }
 
     @Override
     protected void onShow() {
         shownFacts = null;
+        toolsAsked.clear();
+        // Result lines belong to the visit that produced them.
+        if (!pairing) kit.hide(pairStatus);
+        if (!waking) kit.hide(wolStatus);
+        kit.hide(hostNotice);
         refresh();
         countChats();
-        if (bridgeHost().length() > 0) checkBridge(false);
+        if (e.bridgeHost().length() > 0) checkBridge(false);
     }
 
     @Override
     protected void onHide() {
         commitFields();
         View f = a.getCurrentFocus();
-        if (f != null) hideKeyboard(f);
+        if (f != null) SettingsWidgets.parkFocus(f);
         column.requestFocus();
         stopGlides();
         linkDot.setPulsing(false);
         bridgeDot.setPulsing(false);
+        voiceHint.removeCallbacks(voiceRecheck);
         savedMark.removeCallbacks(savedReset);
         savedReset.run();
     }
 
     @Override
     public void onActivityStop() {
-        commitFields();
+        // A hidden Settings page has no edits in flight, and its fields may be
+        // stale (a /system command, the PC tab's Forget pairing): commit only
+        // while it is on screen.
+        if (isShown()) commitFields();
         if (linkDot != null) {
             stopGlides();
             linkDot.setPulsing(false);
             bridgeDot.setPulsing(false);
+            voiceHint.removeCallbacks(voiceRecheck);
         }
     }
 
@@ -2231,6 +2443,7 @@ public final class SettingsScreen extends Screen {
         refreshPerformance();
         refreshVoice();
         refreshBridge();
+        refreshTools();
         refreshAbout();
     }
 
@@ -2240,8 +2453,34 @@ public final class SettingsScreen extends Screen {
     }
 
     @Override
+    public void onLog(Telemetry.Event ev) {
+        // A missing text-to-speech voice is reported through the log (and a toast).
+        if (isShown() && voiceShownAvailable != null && voiceShownAvailable != e.speechAvailable()) refreshVoice();
+    }
+
+    @Override
+    public void onSpeechChanged(boolean speaking) {
+        if (isBuilt()) voiceHint.setText(speaking ? "Speaking…" : "Plays a line at the current rate.");
+    }
+
+    @Override
+    public void onConversationReplaced() {
+        if (isBuilt()) refreshPrivacy();
+    }
+
+    @Override
+    public void onMessageAdded(com.omnideck.mobile.core.ChatMessage m) {
+        if (isShown()) refreshPrivacy();
+    }
+
+    @Override
     public boolean onBack() {
         return false;
+    }
+
+    @Override
+    public void onDestroy() {
+        if (voiceHint != null) voiceHint.removeCallbacks(voiceRecheck);
     }
 
     // ------------------------------------------------------------------

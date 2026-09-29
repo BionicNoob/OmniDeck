@@ -1,5 +1,7 @@
 package com.omnideck.mobile.ui;
 
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.ColorFilter;
@@ -10,10 +12,19 @@ import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.graphics.drawable.Drawable;
+import android.text.Editable;
+import android.text.InputType;
 import android.text.TextUtils;
+import android.text.TextWatcher;
+import android.text.method.PasswordTransformationMethod;
 import android.util.TypedValue;
 import android.view.Gravity;
+import android.view.KeyEvent;
 import android.view.View;
+import android.view.ViewParent;
+import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputMethodManager;
+import android.widget.EditText;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.SeekBar;
@@ -24,9 +35,10 @@ import java.util.Locale;
 /**
  * Instrument-grade controls for the Settings screen, drawn from the active
  * theme's tokens so they read the same in Cyber, Light and Dark:
- * a fader-style {@link Slider}, a {@link Segmented} control, a numeric
- * {@link Stepper}, miniature {@link ThemePreview}s and a few extra
- * {@link Glyph} icons (minus, eye) in the app's line-icon style.
+ * the app's {@link Slider}, a {@link Segmented} control, a numeric
+ * {@link Stepper}, a masked {@link SecretField}, an {@link EditTracker} for
+ * fields that save on their own, miniature {@link ThemePreview}s and a few
+ * extra {@link Glyph} icons (minus, eye) in the app's line-icon style.
  */
 public final class SettingsWidgets {
     private SettingsWidgets() {}
@@ -46,11 +58,13 @@ public final class SettingsWidgets {
     // ------------------------------------------------------------------
 
     /**
-     * A SeekBar over a float range with a hairline track, tick marks, an
-     * optional "default" notch and a knob in the theme's style (a reticle in
-     * Cyber, a solid knob in Light/Dark). It can show an "unset" state (the
-     * model's own default is used): the fill disappears and the knob goes
-     * hollow until the user moves it. Keeps SeekBar's accessibility.
+     * A SeekBar over a float range in the app's one slider look (shared with
+     * the PC tab's volume slider): a 4dp track in the data ink at 20%, a
+     * data-colored fill, a tick scale underneath, an optional "default" notch
+     * and a ringed thumb (a surface disc, a data ring and a center dot; a soft
+     * halo while dragged). It can show an "unset" state (the model's own
+     * default is used): the fill disappears and the thumb goes hollow until
+     * the user moves it. Keeps SeekBar's accessibility.
      */
     public static final class Slider extends SeekBar {
         /** {@code done} is true when the user lets go (or a key/accessibility step lands). */
@@ -79,7 +93,8 @@ public final class SettingsWidgets {
             setSplitTrack(false);
             setProgressDrawable(new Track());
             setThumb(new Knob());
-            int pad = Math.round(12 * density);
+            // The thumb's halo (13dp) fits inside the padding at either end.
+            int pad = Math.round(13 * density);
             setPadding(pad, 0, pad, 0);
             setMinimumHeight(Math.round(40 * density));
             setOnSeekBarChangeListener(new OnSeekBarChangeListener() {
@@ -94,6 +109,7 @@ public final class SettingsWidgets {
                 @Override
                 public void onStartTrackingTouch(SeekBar s) {
                     tracking = true;
+                    invalidate();
                 }
 
                 @Override
@@ -138,17 +154,22 @@ public final class SettingsWidgets {
             return getMax() > 0 ? getProgress() / (float) getMax() : 0f;
         }
 
-        /** The track: rest line, filled part, ticks and the default notch. */
+        /** The track: rest line, filled part, tick scale and the default notch. */
         private final class Track extends Drawable {
             private final Paint rest = new Paint(Paint.ANTI_ALIAS_FLAG);
             private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
             private final Paint tick = new Paint(Paint.ANTI_ALIAS_FLAG);
+            private final Paint notch = new Paint(Paint.ANTI_ALIAS_FLAG);
             private final RectF r = new RectF();
 
             Track() {
-                rest.setColor(t.hud ? Theme.alpha(t.accent, 0x2E) : t.isDark ? 0x2EFFFFFF : 0x24171717);
-                fill.setColor(t.accent);
-                tick.setStrokeWidth(Math.max(1f, density));
+                rest.setColor(Theme.alpha(t.data, 0x33));
+                fill.setColor(t.data);
+                tick.setColor(Theme.alpha(t.hud ? t.label : t.faint, 0x8C));
+                tick.setStrokeWidth(Math.max(1f, density * 0.8f));
+                notch.setColor(t.hud ? t.engaged : t.dim);
+                notch.setStrokeWidth(Math.max(1f, density * 1.2f));
+                notch.setStrokeCap(Paint.Cap.ROUND);
             }
 
             @Override
@@ -160,28 +181,28 @@ public final class SettingsWidgets {
             @Override
             public void draw(Canvas c) {
                 Rect b = getBounds();
-                float h = (t.hud ? 2f : 3f) * density;
+                float h = 4 * density;
                 float cy = b.exactCenterY();
                 r.set(b.left, cy - h / 2, b.right, cy + h / 2);
                 c.drawRoundRect(r, h / 2, h / 2, rest);
-                // Ticks below the track, like a fader's scale.
+                // A fader's scale under the track: longer marks at both ends and the middle.
                 if (ticks > 1) {
-                    tick.setColor(t.hud ? Theme.alpha(t.accent, 0x40) : t.isDark ? 0x33FFFFFF : 0x2E171717);
-                    float y0 = cy + 7 * density, y1 = y0 + 4 * density;
+                    float y0 = cy + 11 * density;
                     for (int i = 0; i <= ticks; i++) {
                         float x = b.left + (b.width() - 1) * (i / (float) ticks);
-                        c.drawLine(x, y0, x, (i == 0 || i == ticks || i * 2 == ticks) ? y1 + 2 * density : y1, tick);
+                        boolean major = i == 0 || i == ticks || i * 2 == ticks;
+                        c.drawLine(x, y0, x, y0 + (major ? 5 : 3) * density, tick);
                     }
                 }
+                // The model's own default, notched above the track.
                 if (!Float.isNaN(marker) && getMax() > 0) {
                     float f = (marker - min) / (step * getMax());
                     float x = b.left + b.width() * Math.max(0, Math.min(1, f));
-                    tick.setColor(t.hud ? t.engaged : t.dim);
-                    c.drawLine(x, cy - 8 * density, x, cy - 4 * density, tick);
+                    c.drawLine(x, cy - 10 * density, x, cy - 5.5f * density, notch);
                 }
                 if (!unset) {
-                    r.set(b.left, cy - h / 2, b.left + b.width() * fraction(), cy + h / 2);
-                    if (r.width() > 0) c.drawRoundRect(r, h / 2, h / 2, fill);
+                    r.set(b.left, cy - h / 2, Math.max(b.left + h, b.left + b.width() * fraction()), cy + h / 2);
+                    c.drawRoundRect(r, h / 2, h / 2, fill);
                 }
             }
 
@@ -199,7 +220,7 @@ public final class SettingsWidgets {
             }
         }
 
-        /** The knob: a reticle in Cyber, a solid knob in Light / Dark, hollow while unset. */
+        /** The ringed thumb: a surface disc with a data ring and center dot; hollow while unset. */
         private final class Knob extends Drawable {
             private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
             private final int size = Math.round(22 * density);
@@ -218,39 +239,27 @@ public final class SettingsWidgets {
             public void draw(Canvas c) {
                 Rect b = getBounds();
                 float cx = b.exactCenterX(), cy = b.exactCenterY();
-                float rOuter = 8.5f * density;
-                int base = opaque(t.surface, t.bg);
+                float r = 7 * density;
+                p.setStyle(Paint.Style.FILL);
+                if (tracking && !unset) {
+                    p.setColor(Theme.alpha(t.data, 0x2E));
+                    c.drawCircle(cx, cy, 13 * density, p);
+                }
+                p.setColor(t.hud ? t.bg : opaque(t.surface, t.bg));
+                c.drawCircle(cx, cy, r, p);
+                p.setStyle(Paint.Style.STROKE);
                 if (unset) {
-                    p.setStyle(Paint.Style.FILL);
-                    p.setColor(base);
-                    c.drawCircle(cx, cy, rOuter, p);
-                    p.setStyle(Paint.Style.STROKE);
+                    // Hollow: the model's default is in effect until the user moves it.
                     p.setStrokeWidth(1.4f * density);
                     p.setColor(t.faint);
-                    c.drawCircle(cx, cy, rOuter - 0.7f * density, p);
+                    c.drawCircle(cx, cy, r - 0.7f * density, p);
                     return;
                 }
-                if (t.hud) {
-                    p.setStyle(Paint.Style.FILL);
-                    p.setColor(opaque(t.surface2, t.bg));
-                    c.drawCircle(cx, cy, rOuter, p);
-                    p.setColor(Theme.alpha(t.accent, 0x33));
-                    c.drawCircle(cx, cy, rOuter - 1.5f * density, p);
-                    p.setStyle(Paint.Style.STROKE);
-                    p.setStrokeWidth(1.5f * density);
-                    p.setColor(t.accent);
-                    c.drawCircle(cx, cy, rOuter - 0.75f * density, p);
-                    p.setStyle(Paint.Style.FILL);
-                    c.drawCircle(cx, cy, 2.4f * density, p);
-                } else {
-                    p.setStyle(Paint.Style.FILL);
-                    p.setColor(t.isDark ? t.bg : 0x1F000000);
-                    c.drawCircle(cx, cy + (t.isDark ? 0 : 0.6f * density), rOuter + 0.8f * density, p);
-                    p.setColor(t.isDark ? t.accent : 0xFFFFFFFF);
-                    c.drawCircle(cx, cy, rOuter, p);
-                    p.setColor(t.isDark ? t.onAccent : t.accent);
-                    c.drawCircle(cx, cy, 3f * density, p);
-                }
+                p.setStrokeWidth(2 * density);
+                p.setColor(t.data);
+                c.drawCircle(cx, cy, r - density, p);
+                p.setStyle(Paint.Style.FILL);
+                c.drawCircle(cx, cy, 2 * density, p);
             }
 
             @Override
@@ -465,15 +474,21 @@ public final class SettingsWidgets {
             return value;
         }
 
-        /** Shows {@code v} without calling the listener. */
+        /** Shows {@code v} without calling the listener. The end buttons dim (and disable) at the limits. */
         public void bind(int v) {
             value = v;
             readout.setText(format != null ? format.format(v) : String.valueOf(v));
+            minus.setEnabled(v > min);
             minus.setAlpha(v <= min ? 0.35f : 1f);
+            plus.setEnabled(v < max);
             plus.setAlpha(v >= max ? 0.35f : 1f);
         }
 
-        private void move(int dir) {
+        /**
+         * One step in {@code dir}. A value typed in beyond the range never moves
+         * the other way: + does nothing above the top, − steps down by one step.
+         */
+        void move(int dir) {
             int next = value;
             if (ladder != null) {
                 if (dir > 0) {
@@ -492,12 +507,266 @@ public final class SettingsWidgets {
                     }
                 }
             } else {
-                next = Math.max(min, Math.min(max, value + dir * step));
+                if (dir > 0 ? value >= max : value <= min) return;
+                next = dir > 0 ? Math.min(max, value + step) : Math.max(min, value - step);
             }
             if (next == value) return;
             bind(next);
             if (listener != null) listener.stepped(next);
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Text fields
+    // ------------------------------------------------------------------
+
+    /**
+     * Remembers whether the user edited a text field since the screen last
+     * filled it from settings, so a screen commits real edits only — never a
+     * stale copy of a value that has since been changed elsewhere (a slash
+     * command, the PC tab). Filling the field from code goes through
+     * {@link #bind}, which doesn't count as an edit.
+     */
+    public static final class EditTracker implements TextWatcher {
+        private final EditText field;
+        private int quiet;
+        private boolean touched;
+        private String bound = "";
+
+        public EditTracker(EditText field) {
+            this.field = field;
+            field.addTextChangedListener(this);
+        }
+
+        /** Shows the stored value (not an edit). */
+        public void bind(String value) {
+            bound = value == null ? "" : value;
+            quiet++;
+            try {
+                if (!field.getText().toString().equals(bound)) field.setText(bound);
+            } finally {
+                quiet--;
+            }
+            touched = false;
+        }
+
+        /** Runs {@code r} without counting its text changes as edits (e.g. swapping the masking). */
+        public void quietly(Runnable r) {
+            quiet++;
+            try {
+                r.run();
+            } finally {
+                quiet--;
+            }
+        }
+
+        /** True when the user changed the text since {@link #bind} (and it differs from what was bound). */
+        public boolean edited() {
+            return touched && !text().equals(bound.trim());
+        }
+
+        /** The edit was saved (or thrown away): what the field shows is now the stored value. */
+        public void settled() {
+            bound = field.getText().toString();
+            touched = false;
+        }
+
+        public String text() {
+            return field.getText().toString().trim();
+        }
+
+        @Override
+        public void beforeTextChanged(CharSequence s, int start, int count, int after) {
+        }
+
+        @Override
+        public void onTextChanged(CharSequence s, int start, int before, int count) {
+        }
+
+        @Override
+        public void afterTextChanged(Editable s) {
+            if (quiet == 0) touched = true;
+        }
+    }
+
+    /**
+     * Moves focus off a text field onto the nearest ancestor that takes focus
+     * in touch mode (the settings column), so no other field grabs it, and
+     * hides the keyboard.
+     */
+    public static void parkFocus(View field) {
+        ViewParent p = field.getParent();
+        while (p instanceof View) {
+            View v = (View) p;
+            if (v.isFocusableInTouchMode()) {
+                v.requestFocus();
+                break;
+            }
+            p = v.getParent();
+        }
+        if (field.hasFocus()) field.clearFocus();
+        InputMethodManager imm = (InputMethodManager) field.getContext().getSystemService(Context.INPUT_METHOD_SERVICE);
+        if (imm != null) imm.hideSoftInputFromWindow(field.getWindowToken(), 0);
+    }
+
+    /**
+     * A masked secret (pairing token, API key) in a recessed slot with show /
+     * hide and an optional paste button. Masked, the dots are set in the body
+     * face (a round, centred bullet — the mono face's bullet is a low square
+     * that reads like a dotted leader); revealed, the secret is in mono like
+     * every identifier. The slot's edge lights up while the field has focus.
+     * Done, focus loss and paste each report a commit.
+     */
+    public static final class SecretField extends LinearLayout {
+        public interface OnCommit {
+            void commit();
+        }
+
+        public final EditText field;
+        public final EditTracker edits;
+        private final Ui ui;
+        private final Theme t;
+        private final String noun;
+        private final ImageView eye;
+        private final Drawable rest, focused;
+        private boolean revealed;
+        /** The face applied: -1 none yet, 0 placeholder, 1 revealed, 2 masked. */
+        private int face = -1;
+        private OnCommit onCommit;
+
+        /** {@code noun}: "token", "API key" — used in the buttons' descriptions ("Show token"). */
+        public SecretField(final Ui ui, String noun, String hint, boolean withPaste) {
+            super(ui.c);
+            this.ui = ui;
+            this.t = ui.t;
+            this.noun = noun;
+            setOrientation(HORIZONTAL);
+            setGravity(Gravity.CENTER_VERTICAL);
+            rest = ui.rounded(t.input, t.edge, 8);
+            focused = ui.rounded(t.input, t.hud ? t.edgeStrong : t.id == Theme.DARK ? t.data : t.accent, 8);
+            setBackground(rest);
+            field = new EditText(ui.c);
+            field.setBackground(null);
+            field.setTextColor(t.ink);
+            field.setHintTextColor(t.faint);
+            field.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+            field.setHint(hint);
+            field.setSingleLine(true);
+            field.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD
+                    | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+            field.setImeOptions(EditorInfo.IME_ACTION_DONE);
+            field.setPadding(ui.dp(12), ui.dp(10), ui.dp(4), ui.dp(10));
+            edits = new EditTracker(field);
+            field.addTextChangedListener(new TextWatcher() {
+                @Override
+                public void beforeTextChanged(CharSequence s, int start, int count, int after) {
+                }
+
+                @Override
+                public void onTextChanged(CharSequence s, int start, int before, int count) {
+                }
+
+                @Override
+                public void afterTextChanged(Editable s) {
+                    applyFace();
+                }
+            });
+            field.setOnFocusChangeListener(new OnFocusChangeListener() {
+                @Override
+                public void onFocusChange(View v, boolean has) {
+                    setBackground(has ? focused : rest);
+                    if (!has && onCommit != null) onCommit.commit();
+                }
+            });
+            field.setOnEditorActionListener(new TextView.OnEditorActionListener() {
+                @Override
+                public boolean onEditorAction(TextView v, int actionId, KeyEvent event) {
+                    if (onCommit != null) onCommit.commit();
+                    parkFocus(field);
+                    return true;
+                }
+            });
+            addView(field, new LayoutParams(0, LayoutParams.WRAP_CONTENT, 1));
+            eye = new ImageView(ui.c);
+            eye.setScaleType(ImageView.ScaleType.CENTER);
+            TypedValue tv = new TypedValue();
+            ui.c.getTheme().resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, tv, true);
+            if (tv.resourceId != 0) eye.setBackground(ui.c.getDrawable(tv.resourceId));
+            eye.setOnClickListener(new OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    ui.tick(v);
+                    setRevealed(!revealed);
+                }
+            });
+            addView(eye, new LayoutParams(ui.dp(40), ui.dp(40)));
+            if (withPaste) {
+                ImageView paste = ui.iconButton(IconDrawable.CLIPBOARD, "Paste " + noun, t.dim, new OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        paste();
+                    }
+                });
+                addView(paste, new LayoutParams(ui.dp(40), ui.dp(40)));
+            }
+            setRevealed(false);
+        }
+
+        public void setOnCommit(OnCommit c) {
+            onCommit = c;
+        }
+
+        public boolean isRevealed() {
+            return revealed;
+        }
+
+        public void setRevealed(final boolean on) {
+            revealed = on;
+            final int sel = field.getSelectionEnd();
+            edits.quietly(new Runnable() {
+                @Override
+                public void run() {
+                    field.setTransformationMethod(on ? null : PasswordTransformationMethod.getInstance());
+                }
+            });
+            applyFace();
+            if (sel >= 0) field.setSelection(Math.min(sel, field.getText().length()));
+            eye.setImageDrawable(new Glyph(on ? Glyph.EYE_OFF : Glyph.EYE, t.dim, ui.dp(20)));
+            eye.setContentDescription((on ? "Hide " : "Show ") + noun);
+        }
+
+        /** Revealed text in mono; masked dots in the body face, a little apart; the placeholder in plain body. */
+        private void applyFace() {
+            boolean empty = field.length() == 0;
+            int state = empty ? 0 : revealed ? 1 : 2;
+            if (state == face) return;
+            face = state;
+            field.setTypeface(state == 1 ? t.mono : t.body);
+            field.setLetterSpacing(state == 2 ? 0.08f : 0f);
+        }
+
+        private void paste() {
+            ClipboardManager cm = (ClipboardManager) ui.c.getSystemService(Context.CLIPBOARD_SERVICE);
+            ClipData clip = cm == null ? null : cm.getPrimaryClip();
+            CharSequence s = clip != null && clip.getItemCount() > 0 ? clip.getItemAt(0).coerceToText(ui.c) : null;
+            if (s == null || s.toString().trim().length() == 0) {
+                ui.toast("The clipboard is empty.");
+                return;
+            }
+            field.setText(s.toString().trim());
+            if (onCommit != null) onCommit.commit();
+            ui.toast(Character.toUpperCase(noun.charAt(0)) + noun.substring(1) + " pasted");
+        }
+    }
+
+    /** The recessed instrument-tile well, the same as the PC tab's vitals tiles. */
+    public static Drawable well(Ui ui) {
+        Theme t = ui.t;
+        if (t.hud) {
+            return Panel.builder().fill(Theme.alpha(t.surface2, 0xB3)).edge(t.hair, Math.max(1, ui.dp(1)))
+                    .radius(ui.dp(8)).build();
+        }
+        return ui.rounded(t.surface2, t.isDark ? t.hair : t.edge, 8);
     }
 
     // ------------------------------------------------------------------

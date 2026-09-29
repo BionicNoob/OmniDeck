@@ -14,15 +14,14 @@ import android.widget.ScrollView;
 import android.widget.SeekBar;
 import android.widget.TextView;
 
-import com.omnideck.mobile.core.ConversationStore;
 import com.omnideck.mobile.ui.Theme;
-import com.omnideck.mobile.ui.Widgets;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.RobolectricTestRunner;
+import org.robolectric.RuntimeEnvironment;
 import org.robolectric.annotation.Config;
 import org.robolectric.annotation.GraphicsMode;
 import org.robolectric.annotation.LooperMode;
@@ -30,7 +29,6 @@ import org.robolectric.shadows.ShadowAlertDialog;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -38,6 +36,7 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
+import static org.robolectric.Shadows.shadowOf;
 
 /**
  * The Settings overlay end to end: opened from the top-bar gear, every
@@ -50,94 +49,7 @@ import static org.junit.Assert.fail;
 @Config(sdk = 34, qualifiers = "w393dp-h852dp-xhdpi")
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 @LooperMode(LooperMode.Mode.PAUSED)
-public class SettingsScreenTest extends Harness {
-
-    private Settings settings() {
-        return engine().settings;
-    }
-
-    private void openSettings() {
-        click("Settings");
-        advance(300);
-        assertTrue("settings open", act.settingsOpen());
-    }
-
-    /** The settings page's vertical scroller (the only one showing while settings is open). */
-    private ScrollView scroller() {
-        for (View v : views()) {
-            if (v instanceof ScrollView && v.isShown()) return (ScrollView) v;
-        }
-        throw new AssertionError("no settings scroller");
-    }
-
-    /** Scrolls so {@code v} sits near the top of the settings scroller. */
-    private void scrollTo(View v) {
-        ScrollView sv = scroller();
-        int y = 0;
-        View cur = v;
-        while (cur != null && cur != sv) {
-            y += cur.getTop();
-            cur = (View) cur.getParent();
-        }
-        sv.scrollTo(0, Math.max(0, y - 40));
-        advance(200);
-    }
-
-    private View need(String description) {
-        View v = button(description);
-        assertNotNull("no view described as " + description, v);
-        return v;
-    }
-
-    private Widgets.Toggle toggle(String title) {
-        View v = need(title);
-        if (v instanceof Widgets.Toggle) return (Widgets.Toggle) v;
-        List<View> all = new ArrayList<>();
-        collect(v, all);
-        for (View c : all) {
-            if (c instanceof Widgets.Toggle) return (Widgets.Toggle) c;
-        }
-        throw new AssertionError("no toggle for " + title);
-    }
-
-    private static EditText firstEditText(View root) {
-        List<View> all = new ArrayList<>();
-        collect(root, all);
-        for (View v : all) {
-            if (v instanceof EditText) return (EditText) v;
-        }
-        throw new AssertionError("no EditText");
-    }
-
-    /** Types into the latest ui.prompt dialog and presses OK. */
-    private void answerPrompt(String text) {
-        AlertDialog d = ShadowAlertDialog.getLatestAlertDialog();
-        assertNotNull("prompt dialog", d);
-        firstEditText(d.getWindow().getDecorView()).setText(text);
-        d.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
-        idle();
-    }
-
-    private void confirmLatest() {
-        AlertDialog d = ShadowAlertDialog.getLatestAlertDialog();
-        assertNotNull("confirm dialog", d);
-        d.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
-        idle();
-    }
-
-    private void chatAndWait(String text) {
-        int before = engine().conversation().messages.size();
-        submit(text);
-        waitFor("reply to " + text, () -> !engine().isBusy()
-                && engine().conversation().messages.size() >= before + 2);
-    }
-
-    private List<ConversationStore.Entry> savedChats() {
-        AtomicReference<List<ConversationStore.Entry>> out = new AtomicReference<>();
-        engine().listChats((v, err) -> out.set(v));
-        waitFor("chat list", () -> out.get() != null);
-        return out.get();
-    }
+public class SettingsScreenTest extends SettingsBaseTest {
 
     // ------------------------------------------------------------------
     // Behaviour
@@ -485,18 +397,20 @@ public class SettingsScreenTest extends Harness {
     // Screenshots
     // ------------------------------------------------------------------
 
+    /** Every section of the page, at rest (notifications allowed, bridge paired). */
+    static final String[] SECTIONS = {"Connection", "AI model", "Performance", "Generation", "Persona", "Voice",
+            "Notifications", "PC bridge", "PC tools", "Privacy", "About"};
+
     private void shots(String theme) throws Exception {
         withBridge(true);
+        shadowOf(RuntimeEnvironment.getApplication()).grantPermissions(Notifier.PERMISSION);
         launch(theme, MainActivity.TAB_COMMAND);
         waitOnline();
         openSettings();
         advance(800);
         shoot("settings-" + theme + "-top");
-        String[] sections = {"Connection", "AI model", "Performance", "Generation", "Persona", "Voice", "PC bridge",
-                "Privacy", "About"};
-        for (String s : sections) {
-            click("Jump to " + s);
-            advance(1200);
+        for (String s : SECTIONS) {
+            jump(s);
             shoot("settings-" + theme + "-" + s.toLowerCase(java.util.Locale.US).replace(' ', '-'));
         }
     }
